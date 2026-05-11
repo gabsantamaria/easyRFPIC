@@ -15,6 +15,7 @@ import * as params from '../src/scene/params.js';
 import * as anchors from '../src/scene/anchors.js';
 import * as rings from '../src/geometry/rings.js';
 import * as transforms from '../src/scene/transforms.js';
+import * as solver from '../src/scene/solver.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const srcPath = join(__dirname, '..', 'src', 'PhotonicLayout.jsx');
@@ -51,15 +52,14 @@ const injected = {
   rectInstanceToRing: rings.rectInstanceToRing,
   shapeInstanceToRing: rings.shapeInstanceToRing,
   expandTransforms: transforms.expandTransforms,
+  solveLayout: solver.solveLayout,
+  applyMirrors: solver.applyMirrors,
+  resolveBooleanBboxes: solver.resolveBooleanBboxes,
 };
 
 // Names still defined inside the slice. Anything extracted out moves to
 // `injected` above and is dropped from this list.
 const sliceSymbols = [
-  // solver
-  'solveLayout', 'applyMirrors',
-  // booleans
-  'resolveBooleanBboxes',
   // geometry
   'ringToSvgPath',
   // scene factories
