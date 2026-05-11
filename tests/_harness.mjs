@@ -3,15 +3,14 @@
 // loadable module so the node-script tests can exercise it without a
 // browser, bundler, or React runtime.
 //
-// As Stage-1 modules get extracted into their own files, the harness will
-// be updated to import them directly. While code is still inlined in
-// PhotonicLayout.jsx, we slice the file from just after its top-level
-// React/lucide imports up to the line where the first JSX component
-// (`function Canvas(...)`) begins, then evaluate that slice via the
-// Function constructor and re-export the named symbols.
+// As Stage-1 modules get extracted into their own files, the harness imports
+// them as real ESM and injects them into the scope of the evaluated slice,
+// so code still inside PhotonicLayout.jsx can call into them as before.
+// Once everything is extracted the slice-and-eval can go away.
 import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import * as racetrack from '../src/geometry/racetrack.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const srcPath = join(__dirname, '..', 'src', 'PhotonicLayout.jsx');
@@ -22,12 +21,26 @@ const endIdx = lines.findIndex((l) => /^function Canvas\(/.test(l));
 if (endIdx < 0) {
   throw new Error('harness: could not locate "function Canvas(" boundary in PhotonicLayout.jsx');
 }
-// Drop the React / lucide-react imports (always the first two lines of
-// the file). Everything from line index 2 up to `function Canvas` is
-// pure JS.
-const pureJS = lines.slice(2, endIdx).join('\n');
+// Find the first line after the top-of-file `import` block. We can't
+// evaluate import statements inside the Function constructor, so we drop
+// every leading `import` line (including the multi-line continuation
+// case if it ever appears).
+let startIdx = 0;
+while (startIdx < endIdx && /^\s*import\b/.test(lines[startIdx])) startIdx++;
+const pureJS = lines.slice(startIdx, endIdx).join('\n');
 
-const symbols = [
+// Symbols that have been extracted into sub-modules and should be exposed
+// in the evaluated slice's scope (so any remaining inlined code can still
+// call them). Each entry is [name, value].
+const injected = {
+  eulerBend180Centerline: racetrack.eulerBend180Centerline,
+  buildRacetrackCenterline: racetrack.buildRacetrackCenterline,
+  offsetCenterlineToBand: racetrack.offsetCenterlineToBand,
+};
+
+// Names still defined inside the slice. Anything extracted out moves to
+// `injected` above and is dropped from this list.
+const sliceSymbols = [
   // params + expr
   'tokenizeIdents', 'resolveParams', 'evalExpr',
   // anchors
@@ -38,7 +51,6 @@ const symbols = [
   'expandTransforms', 'resolveBooleanBboxes',
   // geometry
   'rectInstanceToRing', 'shapeInstanceToRing',
-  'eulerBend180Centerline', 'buildRacetrackCenterline', 'offsetCenterlineToBand',
   'ringToSvgPath',
   // scene factories
   'defaultStack', 'normalizeScene', 'makeDefaultScene', 'makeBlankScene',
@@ -46,6 +58,8 @@ const symbols = [
   'generatePyAEDT', 'generateHfssNative', 'generateGDS',
 ];
 
-const body = `${pureJS}\nreturn { ${symbols.join(', ')} };`;
+const injectedNames = Object.keys(injected);
+const body = `${pureJS}\nreturn { ${[...sliceSymbols, ...injectedNames].join(', ')} };`;
 // eslint-disable-next-line no-new-func
-export const mod = new Function(body)();
+const fn = new Function(...injectedNames, body);
+export const mod = fn(...injectedNames.map((n) => injected[n]));
