@@ -1,0 +1,22 @@
+node_modules/
+dist/
+.vite/
+.DS_Store
+
+# Test outputs
+tests/out/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
