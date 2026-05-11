@@ -18,6 +18,7 @@ import * as transforms from '../src/scene/transforms.js';
 import * as solver from '../src/scene/solver.js';
 import * as gds from '../src/export/gds.js';
 import * as pyaedt from '../src/export/pyaedt.js';
+import * as hfssNative from '../src/export/hfss-native.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const srcPath = join(__dirname, '..', 'src', 'PhotonicLayout.jsx');
@@ -59,6 +60,7 @@ const injected = {
   resolveBooleanBboxes: solver.resolveBooleanBboxes,
   generateGDS: gds.generateGDS,
   generatePyAEDT: pyaedt.generatePyAEDT,
+  generateHfssNative: hfssNative.generateHfssNative,
 };
 
 // Names still defined inside the slice. Anything extracted out moves to
@@ -68,8 +70,6 @@ const sliceSymbols = [
   'ringToSvgPath',
   // scene factories
   'defaultStack', 'normalizeScene', 'makeDefaultScene', 'makeBlankScene',
-  // exporters
-  'generateHfssNative',
 ];
 
 const injectedNames = Object.keys(injected);
