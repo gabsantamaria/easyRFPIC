@@ -12,6 +12,7 @@ import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import * as racetrack from '../src/geometry/racetrack.js';
 import * as params from '../src/scene/params.js';
+import * as anchors from '../src/scene/anchors.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const srcPath = join(__dirname, '..', 'src', 'PhotonicLayout.jsx');
@@ -41,13 +42,15 @@ const injected = {
   resolveParams: params.resolveParams,
   evalExpr: params.evalExpr,
   RESERVED_IDENTS: params.RESERVED_IDENTS,
+  ANCHORS: anchors.ANCHORS,
+  parseAnchor: anchors.parseAnchor,
+  anchorLocal: anchors.anchorLocal,
+  anchorWorld: anchors.anchorWorld,
 };
 
 // Names still defined inside the slice. Anything extracted out moves to
 // `injected` above and is dropped from this list.
 const sliceSymbols = [
-  // anchors
-  'parseAnchor', 'anchorLocal', 'anchorWorld',
   // solver
   'solveLayout', 'applyMirrors',
   // transforms + booleans
