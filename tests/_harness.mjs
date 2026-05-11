@@ -11,6 +11,7 @@ import { readFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import * as racetrack from '../src/geometry/racetrack.js';
+import * as params from '../src/scene/params.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const srcPath = join(__dirname, '..', 'src', 'PhotonicLayout.jsx');
@@ -36,13 +37,15 @@ const injected = {
   eulerBend180Centerline: racetrack.eulerBend180Centerline,
   buildRacetrackCenterline: racetrack.buildRacetrackCenterline,
   offsetCenterlineToBand: racetrack.offsetCenterlineToBand,
+  tokenizeIdents: params.tokenizeIdents,
+  resolveParams: params.resolveParams,
+  evalExpr: params.evalExpr,
+  RESERVED_IDENTS: params.RESERVED_IDENTS,
 };
 
 // Names still defined inside the slice. Anything extracted out moves to
 // `injected` above and is dropped from this list.
 const sliceSymbols = [
-  // params + expr
-  'tokenizeIdents', 'resolveParams', 'evalExpr',
   // anchors
   'parseAnchor', 'anchorLocal', 'anchorWorld',
   // solver

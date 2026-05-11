@@ -1,118 +1,12 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Plus, Trash2, RotateCcw, RotateCw, Download, Upload, Lock, Unlock, FlipHorizontal, FlipVertical, Layers, Settings2, Box, Square, Link2, Link2Off, Grid3x3, AlertTriangle, Maximize2, Save, FileText, FilePlus, Copy, FolderTree, BookOpen, Package, Boxes, Pencil, Ruler, Eye, EyeOff, ArrowDown, ArrowUp, Move, Repeat, Combine, Minus, X as XIcon, Circle, Hexagon } from 'lucide-react';
 import { eulerBend180Centerline, buildRacetrackCenterline, offsetCenterlineToBand } from './geometry/racetrack.js';
+import { tokenizeIdents, resolveParams, evalExpr, RESERVED_IDENTS } from './scene/params.js';
 
 // =========================================================================
 // PHOTONIC IC LAYOUT TOOL — Phase 1.1
 // Cursor-zoom, grid snap, vertex resize, parameter expressions
 // =========================================================================
-
-// ----------------------------------------------------------------------
-// EXPRESSION EVALUATOR (handles parameter dependencies)
-// ----------------------------------------------------------------------
-function tokenizeIdents(expr) {
-  if (typeof expr !== 'string') return [];
-  const matches = expr.match(/[A-Za-z_][A-Za-z0-9_]*/g) || [];
-  return matches;
-}
-
-// Resolve all parameter values, given that params can depend on other params.
-// Returns { values: { name: number }, errors: { name: string } }
-function resolveParams(params, extraValues = null) {
-  const values = extraValues ? { ...extraValues } : {};
-  const errors = {};
-  const remaining = new Set(Object.keys(params));
-  let progress = true;
-  let iters = 0;
-  while (remaining.size > 0 && progress && iters < 100) {
-    progress = false;
-    iters++;
-    for (const name of Array.from(remaining)) {
-      const p = params[name];
-      const expr = p.expr ?? String(p.value ?? 0);
-      const idents = tokenizeIdents(expr).filter(i => i !== name);
-      const allResolved = idents.every(i => i in values || !(i in params));
-      if (!allResolved) continue;
-      try {
-        let s = expr;
-        // Strip "um" unit suffixes that appear in HFSS-style expressions
-        // (e.g., "0um", "(50um)"). In-app evaluation is in µm, so the suffix
-        // is informational only and must be removed before arithmetic.
-        s = s.replace(/(\d|\))\s*um\b/g, '$1');
-        const keys = Object.keys(values).sort((a, b) => b.length - a.length);
-        for (const k of keys) {
-          const re = new RegExp(`\\b${k}\\b`, 'g');
-          s = s.replace(re, `(${values[k]})`);
-        }
-        // Translate common math functions to their JS Math equivalents.
-        const MATH_FNS = ['abs','sqrt','sin','cos','tan','asin','acos','atan','atan2','exp','log','log10','floor','ceil','round','pow','min','max'];
-        for (const fn of MATH_FNS) {
-          s = s.replace(new RegExp(`\\b${fn}\\s*\\(`, 'g'), `Math.${fn}(`);
-        }
-        s = s.replace(/\bpi\b/g, 'Math.PI').replace(/\bPI\b/g, 'Math.PI');
-        if (!/^[\d\s+\-*/.()A-Za-z,]+$/.test(s) && s.trim() !== '') {
-          errors[name] = `Unresolved or invalid: ${s}`;
-          remaining.delete(name);
-          continue;
-        }
-        if (s.trim() === '') { values[name] = 0; remaining.delete(name); progress = true; continue; }
-        // eslint-disable-next-line no-new-func
-        const v = Function(`"use strict"; return (${s})`)();
-        if (Number.isFinite(v)) {
-          values[name] = v;
-          remaining.delete(name);
-          progress = true;
-        } else {
-          errors[name] = 'NaN/Infinity';
-          remaining.delete(name);
-        }
-      } catch (e) {
-        errors[name] = e.message;
-        remaining.delete(name);
-      }
-    }
-  }
-  // Anything still remaining = circular or unresolvable
-  for (const name of remaining) {
-    errors[name] = 'circular or unresolvable';
-    values[name] = 0;
-  }
-  return { values, errors };
-}
-
-// Evaluate an arbitrary expression (for shape dims, snap offsets) given resolved param values
-function evalExpr(expr, paramValues) {
-  if (typeof expr === 'number') return expr;
-  if (typeof expr !== 'string' || !expr.trim()) return 0;
-  const num = Number(expr);
-  if (!Number.isNaN(num)) return num;
-  try {
-    let s = expr;
-    // Strip "um" unit suffixes that may appear when expressions are shared
-    // with the HFSS export path (where literals carry "um" for clarity at
-    // sim time). In-app evaluation is always in µm, so the suffix is a
-    // no-op. Match \d.um or )um — only directly after a number or ).
-    s = s.replace(/(\d|\))\s*um\b/g, '$1');
-    const keys = Object.keys(paramValues).sort((a, b) => b.length - a.length);
-    for (const k of keys) {
-      const re = new RegExp(`\\b${k}\\b`, 'g');
-      s = s.replace(re, `(${paramValues[k]})`);
-    }
-    // Translate common math functions to their JS Math equivalents BEFORE the
-    // safety check, so expressions like "abs(x)" or "tan(x)" resolve correctly.
-    // Each known fn is rewritten to "Math.<fn>(...)". The safety regex then
-    // permits ".", letters, and parentheses.
-    const MATH_FNS = ['abs','sqrt','sin','cos','tan','asin','acos','atan','atan2','exp','log','log10','floor','ceil','round','pow','min','max'];
-    for (const fn of MATH_FNS) {
-      s = s.replace(new RegExp(`\\b${fn}\\s*\\(`, 'g'), `Math.${fn}(`);
-    }
-    s = s.replace(/\bpi\b/g, 'Math.PI').replace(/\bPI\b/g, 'Math.PI');
-    if (!/^[\d\s+\-*/.()A-Za-z,]+$/.test(s)) return 0;
-    // eslint-disable-next-line no-new-func
-    const v = Function(`"use strict"; return (${s})`)();
-    return Number.isFinite(v) ? v : 0;
-  } catch { return 0; }
-}
 
 // ----------------------------------------------------------------------
 // ANCHORS
@@ -9476,16 +9370,6 @@ export default function App() {
       params: { ...prev.params, [name]: { ...prev.params[name], ...patch } },
     }));
   };
-
-  // List of identifier names that should never be auto-created as parameters
-  // (math functions and constants used in expressions).
-  const RESERVED_IDENTS = new Set([
-    'sin','cos','tan','asin','acos','atan','atan2','sqrt','exp','log','log10',
-    'abs','min','max','floor','ceil','round','pow','pi','e','PI','E',
-    // Unit suffixes that may appear in HFSS-style expressions (e.g., "20um").
-    // These are not parameters and must not be auto-created.
-    'um','mm','cm','m','nm','deg','rad',
-  ]);
 
   // Compute a params patch to auto-create any identifiers in `expr` that aren't
   // already parameters. Returns { ...newParams } that can be merged into params.
