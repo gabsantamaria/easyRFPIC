@@ -16,6 +16,7 @@ import * as anchors from '../src/scene/anchors.js';
 import * as rings from '../src/geometry/rings.js';
 import * as transforms from '../src/scene/transforms.js';
 import * as solver from '../src/scene/solver.js';
+import * as gds from '../src/export/gds.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const srcPath = join(__dirname, '..', 'src', 'PhotonicLayout.jsx');
@@ -55,6 +56,7 @@ const injected = {
   solveLayout: solver.solveLayout,
   applyMirrors: solver.applyMirrors,
   resolveBooleanBboxes: solver.resolveBooleanBboxes,
+  generateGDS: gds.generateGDS,
 };
 
 // Names still defined inside the slice. Anything extracted out moves to
@@ -65,7 +67,7 @@ const sliceSymbols = [
   // scene factories
   'defaultStack', 'normalizeScene', 'makeDefaultScene', 'makeBlankScene',
   // exporters
-  'generatePyAEDT', 'generateHfssNative', 'generateGDS',
+  'generatePyAEDT', 'generateHfssNative',
 ];
 
 const injectedNames = Object.keys(injected);
