@@ -14,6 +14,7 @@ import * as racetrack from '../src/geometry/racetrack.js';
 import * as params from '../src/scene/params.js';
 import * as anchors from '../src/scene/anchors.js';
 import * as rings from '../src/geometry/rings.js';
+import * as transforms from '../src/scene/transforms.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const srcPath = join(__dirname, '..', 'src', 'PhotonicLayout.jsx');
@@ -49,6 +50,7 @@ const injected = {
   anchorWorld: anchors.anchorWorld,
   rectInstanceToRing: rings.rectInstanceToRing,
   shapeInstanceToRing: rings.shapeInstanceToRing,
+  expandTransforms: transforms.expandTransforms,
 };
 
 // Names still defined inside the slice. Anything extracted out moves to
@@ -56,8 +58,8 @@ const injected = {
 const sliceSymbols = [
   // solver
   'solveLayout', 'applyMirrors',
-  // transforms + booleans
-  'expandTransforms', 'resolveBooleanBboxes',
+  // booleans
+  'resolveBooleanBboxes',
   // geometry
   'ringToSvgPath',
   // scene factories
