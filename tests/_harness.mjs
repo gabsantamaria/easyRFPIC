@@ -31,11 +31,17 @@ if (endIdx < 0) {
   throw new Error('harness: could not locate "function Canvas(" boundary in PhotonicLayout.jsx');
 }
 // Find the first line after the top-of-file `import` block. We can't
-// evaluate import statements inside the Function constructor, so we drop
-// every leading `import` line (including the multi-line continuation
-// case if it ever appears).
+// evaluate import statements inside the Function constructor, so we
+// strip every leading `import` statement — including multi-line ones
+// like `import { a, b,\n  c,\n} from '...';`.
 let startIdx = 0;
-while (startIdx < endIdx && /^\s*import\b/.test(lines[startIdx])) startIdx++;
+while (startIdx < endIdx && /^\s*import\b/.test(lines[startIdx])) {
+  // Advance past the import statement. A multi-line `import { ... }
+  // from '...'` ends on a line containing ';'. Single-line imports end
+  // on the same line they start.
+  while (startIdx < endIdx && !lines[startIdx].includes(';')) startIdx++;
+  startIdx++; // consume the line with the closing ;
+}
 const pureJS = lines.slice(startIdx, endIdx).join('\n');
 
 // Symbols that have been extracted into sub-modules and should be exposed
