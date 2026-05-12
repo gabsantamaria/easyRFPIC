@@ -282,7 +282,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       }
     } else if (drag && drag.kind === 'move' && moveSnapHover) {
       const line = moveSnapHover.kind === 'edge'
-        ? `Alt-drag · align ${moveSnapHover.dSide} of dragged to ${moveSnapHover.targetSide} of ${moveSnapHover.targetCompId} (visual only)`
+        ? `Alt-drag · release to snap ${moveSnapHover.dSide} edge to ${moveSnapHover.targetSide} edge of ${moveSnapHover.targetCompId}`
         : `Alt-drag · release to snap to ${moveSnapHover.compId}.${moveSnapHover.anchor}`;
       status = { kind: 'snap', line };
     } else if (drag && drag.kind === 'move' && altKey) {
@@ -1112,13 +1112,13 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     // that was used for visual previewing during the move). This gives a
     // smooth "drag-toward-something-and-let-go" gesture for connecting
     // components without entering the explicit snap-creation tool.
-    if (drag && drag.kind === 'move' && moveSnapHover && moveSnapHover.kind === 'anchor') {
-      // Only anchor-pair snaps install a persistent scene-level snap.
-      // Edge-alignment snaps are visual-only during the drag: on release
-      // we just keep the cluster at the edge-aligned position. If the
-      // user wants the relationship to persist, they can install a real
-      // snap from the inspector or via a second alt-drag landing on a
-      // specific anchor.
+    if (drag && drag.kind === 'move' && moveSnapHover) {
+      // Both anchor and edge alt-drag releases install a persistent
+      // scene-level snap. For edge alignments the snap is anchor-based
+      // too (we pick the canonical N/S or E/W anchors), and the free
+      // axis is captured as the current literal offset so the user's
+      // mid-drag X (or Y) position is preserved — they can still tune
+      // it via the auto-created gap_* parameter later.
       const target = moveSnapHover;
       // The "dragged" component for snap purposes is the one the user
       // clicked on — typically the boolean itself when dragging a composite,
@@ -1128,38 +1128,75 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       // the clicked component to match user intent.
       const dragId = drag.clickedId || drag.rootId;
       const draggedComp = solved.find(c => c.id === dragId);
-      if (draggedComp && target.compId !== dragId) {
-        // Use the dragged-anchor that was used during preview (stored on
-        // moveSnapHover) so the installed snap matches what the user saw.
-        const bestAnchor = target.dAnchor || 'C';
-        // Auto-reverse if the dragged component is already the `to` of an
-        // existing snap (only one parent is allowed). If both ends are
-        // already constrained, abort with a helpful message and leave the
-        // literal cx/cy from the move in place.
+
+      // Resolve target compId + the (target anchor, dragged anchor, dx, dy)
+      // tuple based on which kind of preview was active.
+      let targetCompId = null;
+      let targetAnchor = null;       // anchor on the target
+      let draggedAnchor = null;      // anchor on the dragged comp
+      // The dx/dy we want to commit. For anchor snaps the values are
+      // zero (the two anchors coincide); for edge snaps the free axis
+      // captures the current literal offset between the two anchors.
+      let initDx = 0, initDy = 0;
+
+      if (target.kind === 'anchor') {
+        targetCompId  = target.compId;
+        targetAnchor  = target.anchor;
+        draggedAnchor = target.dAnchor || 'C';
+      } else {
+        // Edge alignment: choose the N/S/E/W anchor that lies on the
+        // aligned edge for each side.
+        const edgeAnchor = (axis, side) => {
+          if (axis === 'h') return side === 'top' ? 'N' : 'S';
+          return side === 'right' ? 'E' : 'W';
+        };
+        targetCompId  = target.targetCompId;
+        targetAnchor  = edgeAnchor(target.axis, target.targetSide);
+        draggedAnchor = edgeAnchor(target.axis, target.dSide);
+        // Capture the free-axis offset. Anchors land at the midpoint of
+        // their respective edges (N/S sit on cx; E/W sit on cy), so the
+        // relative offset between the two anchors on the FREE axis is
+        // exactly draggedComp.center − targetComp.center on that axis.
+        const targetComp = solved.find((c) => c.id === targetCompId);
+        if (draggedComp && targetComp) {
+          if (target.axis === 'h') {
+            initDx = draggedComp.cx - targetComp.cx;
+          } else {
+            initDy = draggedComp.cy - targetComp.cy;
+          }
+        }
+      }
+
+      if (draggedComp && targetCompId && targetCompId !== dragId) {
+        // Auto-reverse if the dragged component is already the `to` of
+        // an existing snap (only one parent is allowed). If both ends
+        // are already constrained, abort with a helpful message and
+        // leave the literal cx/cy from the move in place.
         const draggedHasIncoming = scene.snaps.some(s => s.to.compId === dragId);
-        const targetHasIncoming = scene.snaps.some(s => s.to.compId === target.compId);
-        let fromCompId, fromAnchor, toCompId, toAnchor;
+        const targetHasIncoming  = scene.snaps.some(s => s.to.compId === targetCompId);
+        let fromCompId, fromAnchor, toCompId, toAnchor, finalDx, finalDy;
         if (!draggedHasIncoming) {
           // Standard direction: target is the parent of the dragged comp.
-          fromCompId = target.compId; fromAnchor = target.anchor;
-          toCompId = dragId; toAnchor = bestAnchor;
+          fromCompId = targetCompId;  fromAnchor = targetAnchor;
+          toCompId   = dragId;         toAnchor   = draggedAnchor;
+          finalDx = initDx; finalDy = initDy;
         } else if (!targetHasIncoming) {
-          // Dragged is already constrained — reverse so target becomes child.
-          fromCompId = dragId; fromAnchor = bestAnchor;
-          toCompId = target.compId; toAnchor = target.anchor;
+          // Reverse so target becomes child. Flipping direction also
+          // flips the sign of the offset we computed.
+          fromCompId = dragId;          fromAnchor = draggedAnchor;
+          toCompId   = targetCompId;    toAnchor   = targetAnchor;
+          finalDx = -initDx; finalDy = -initDy;
         } else {
-          // Both already constrained — leave the literal move in place and
-          // surface the situation in the alert dialog.
           alertDialog(
-            `Both ${dragId} and ${target.compId} are already positioned by another snap. Re-root one of them first (use the ⇄ button in the inspector) to free a target.`,
+            `Both ${dragId} and ${targetCompId} are already positioned by another snap. Re-root one of them first (use the ⇄ button in the inspector) to free a target.`,
             'Cannot create snap'
           );
           setDrag(null);
           setMoveSnapHover(null);
           return;
         }
-        // Pick fresh gap-parameter names. Use 0 dx/dy because the dragged
-        // component's anchor is exactly on the target at this point.
+        // Pick fresh gap-parameter names. The captured offset is the
+        // expression value; the user can tune it later in the inspector.
         const usedNames = new Set(Object.keys(scene.params));
         const nextName = (prefix) => {
           let i = 1;
@@ -1169,12 +1206,17 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         };
         const gapX = nextName('gap_x');
         const gapY = nextName('gap_y');
+        // Round captured offsets to 4 decimals — the user is dragging by
+        // mouse, so sub-µm precision past that is noise.
+        const fmt = (v) => Number(v.toFixed(4)).toString();
+        const dxExpr = fmt(finalDx);
+        const dyExpr = fmt(finalDy);
         updateScene(prev => ({
           ...prev,
           params: {
             ...prev.params,
-            [gapX]: { expr: '0', unit: 'µm', desc: `Gap ${fromCompId}.${fromAnchor} → ${toCompId}.${toAnchor} (dx)` },
-            [gapY]: { expr: '0', unit: 'µm', desc: `Gap ${fromCompId}.${fromAnchor} → ${toCompId}.${toAnchor} (dy)` },
+            [gapX]: { expr: dxExpr, unit: 'µm', desc: `Gap ${fromCompId}.${fromAnchor} → ${toCompId}.${toAnchor} (dx)` },
+            [gapY]: { expr: dyExpr, unit: 'µm', desc: `Gap ${fromCompId}.${fromAnchor} → ${toCompId}.${toAnchor} (dy)` },
           },
           snaps: [...prev.snaps, {
             id: `snap_${Date.now()}`,
