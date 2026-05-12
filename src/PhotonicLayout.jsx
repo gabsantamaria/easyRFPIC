@@ -2370,19 +2370,31 @@ export default function App() {
       seenComps.add(compId);
       const c = compsById[compId];
       if (!c) return;
-      // Collect from this component's geometry expressions
-      for (const expr of [c.w, c.h]) {
-        if (typeof expr !== 'string') continue;
-        for (const id of tokenizeIdents(expr)) frontier.push(id);
-      }
-      for (const cu of (c.cutouts || [])) {
-        for (const expr of [cu.dx, cu.dy, cu.w, cu.h]) {
+      if (c.kind === 'boolean') {
+        // Booleans are derived: their stored w/h are literal '0' (the
+        // real geometry comes from the operands). Recurse into each
+        // operand so its geometry expressions — and the parents along
+        // its own snap chain — surface in the highlight when the
+        // boolean is selected.
+        for (const opId of (c.operandIds || [])) walkComp(opId);
+      } else {
+        // Primitive geometry: tokenize w / h plus every cutout's
+        // dx / dy / w / h expressions.
+        for (const expr of [c.w, c.h]) {
           if (typeof expr !== 'string') continue;
           for (const id of tokenizeIdents(expr)) frontier.push(id);
         }
+        for (const cu of (c.cutouts || [])) {
+          for (const expr of [cu.dx, cu.dy, cu.w, cu.h]) {
+            if (typeof expr !== 'string') continue;
+            for (const id of tokenizeIdents(expr)) frontier.push(id);
+          }
+        }
       }
-      // Snap that positions this component (if any) brings in its dx/dy and
-      // recursively the parent component's chain.
+      // Snap that positions this component (if any) brings in its dx/dy
+      // and recursively the parent component's chain. Applies to both
+      // primitives and booleans — a boolean can be snapped to another
+      // component just like a primitive can.
       const snap = incomingSnap(compId);
       if (snap) {
         for (const expr of [snap.dx, snap.dy]) {
