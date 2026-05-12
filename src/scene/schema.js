@@ -13,6 +13,45 @@
 // ----------------------------------------------------------------------
 // DEFAULT SCENE
 // ----------------------------------------------------------------------
+
+// Nominal values for every identifier the default stack references
+// across its thickness / core_width / slab_height / slab_width /
+// etch_angle fields. Shared between `paramsForStack` (used by
+// makeBlankScene and by normalizeScene's upgrade-old-scene path) so
+// blank scenes start with the same stack tuning a freshly-loaded
+// design would have.
+const STACK_PARAM_DEFAULTS = {
+  h_si:       { expr: '250', unit: 'µm',  desc: 'Silicon handle thickness' },
+  h_sio2:     { expr: '4.7', unit: 'µm',  desc: 'Buried oxide thickness' },
+  h_wg:       { expr: '0.6', unit: 'µm',  desc: 'WG total height (LiTaO3 layer)' },
+  h_clad:     { expr: '2',   unit: 'µm',  desc: 'Cladding thickness' },
+  h_cond:     { expr: '0.8', unit: 'µm',  desc: 'Conductor (electrode) thickness' },
+  w_wg:       { expr: '1.2', unit: 'µm',  desc: 'WG core width (rib bottom)' },
+  h_slab:     { expr: '0.1', unit: 'µm',  desc: 'Slab height (unetched LiTaO3 below rib)' },
+  w_slab:     { expr: '5',   unit: 'µm',  desc: 'Slab width (around rib)' },
+  etch_angle: { expr: '70',  unit: 'deg', desc: 'Etch sidewall angle from horizontal' },
+};
+
+// Collect every identifier referenced from the given stack's expression
+// fields and return a params dict with nominal defaults for each.
+// Identifiers not in STACK_PARAM_DEFAULTS get a generic 1 µm fallback.
+export function paramsForStack(stack) {
+  const out = {};
+  for (const layer of stack || []) {
+    const fields = ['thickness', 'core_width', 'slab_height', 'slab_width', 'etch_angle'];
+    for (const f of fields) {
+      const v = layer[f];
+      if (typeof v !== 'string') continue;
+      const idents = v.match(/[A-Za-z_][A-Za-z0-9_]*/g) || [];
+      for (const id of idents) {
+        if (out[id]) continue;
+        out[id] = STACK_PARAM_DEFAULTS[id] || { expr: '1', unit: 'µm', desc: `Layer ${f} (${layer.name || id})` };
+      }
+    }
+  }
+  return out;
+}
+
 export function defaultStack() {
   // Bottom-up order. Z=0 is the top of the buried oxide (where the WG sits).
   // Substrates have negative Z, the WG layer is at Z=0..h_wg, conductor sits above.
@@ -51,30 +90,12 @@ export function normalizeScene(s) {
       ...layer,
     };
   });
-  // Ensure every parameter referenced in stack fields exists with a sensible default.
-  const STACK_DEFAULTS = {
-    h_si: { expr: '250', unit: 'µm', desc: 'Silicon handle thickness' },
-    h_sio2: { expr: '4.7', unit: 'µm', desc: 'Buried oxide thickness' },
-    h_wg: { expr: '0.6', unit: 'µm', desc: 'WG total height (LiTaO3 layer)' },
-    h_clad: { expr: '2', unit: 'µm', desc: 'Cladding thickness' },
-    h_cond: { expr: '0.8', unit: 'µm', desc: 'Conductor (electrode) thickness' },
-    w_wg: { expr: '1.2', unit: 'µm', desc: 'WG core width (rib bottom)' },
-    h_slab: { expr: '0.1', unit: 'µm', desc: 'Slab height (unetched LiTaO3 below rib)' },
-    w_slab: { expr: '5', unit: 'µm', desc: 'Slab width (around rib)' },
-    etch_angle: { expr: '70', unit: 'deg', desc: 'Etch sidewall angle from horizontal' },
-  };
-  for (const layer of stack) {
-    const fields = ['thickness', 'core_width', 'slab_height', 'slab_width', 'etch_angle'];
-    for (const f of fields) {
-      const v = layer[f];
-      const idents = (typeof v === 'string')
-        ? v.match(/[A-Za-z_][A-Za-z0-9_]*/g) || []
-        : [];
-      for (const id of idents) {
-        if (params[id]) continue;
-        params[id] = STACK_DEFAULTS[id] || { expr: '1', unit: 'µm', desc: `Layer ${f} (${layer.name || id})` };
-      }
-    }
+  // Ensure every parameter referenced in stack fields exists with a
+  // sensible default. Existing params win; only missing names get
+  // populated from paramsForStack.
+  const stackDefaults = paramsForStack(stack);
+  for (const [name, p] of Object.entries(stackDefaults)) {
+    if (!params[name]) params[name] = p;
   }
   // Migrate legacy `scene.booleans` (a side list) into the new model where
   // booleans are full components with kind='boolean' and operands tagged
@@ -204,17 +225,21 @@ export function makeDefaultScene() {
 }
 
 // Empty starting scene: same default layer stack so add-tools work right
-// away (you need a conductor layer to drag electrodes), but no components,
-// no snaps, no parameters. Used by the "new blank" command for starting a
-// fresh design from scratch.
+// away (you need a conductor layer to drag electrodes). Pre-populates
+// `params` with nominal values for every identifier the stack
+// references (h_wg, h_si, w_wg, etc.) — without these the PARAMS panel
+// would come up empty and the stack's thicknesses would all resolve to
+// NaN until the user manually added them. Used by the "new blank"
+// command for starting a fresh design from scratch.
 export function makeBlankScene() {
+  const stack = defaultStack();
   return {
-    params: {},
+    params: paramsForStack(stack),
     components: [],
     snaps: [],
     mirrors: [],
     groups: [],
     booleans: [],
-    stack: defaultStack(),
+    stack,
   };
 }

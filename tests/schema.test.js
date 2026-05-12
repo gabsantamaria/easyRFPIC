@@ -28,6 +28,22 @@ describe('makeBlankScene / makeDefaultScene', () => {
     expect(s.mirrors).toEqual([]);
     expect(Array.isArray(s.stack)).toBe(true);
   });
+  it('makeBlankScene pre-populates params for every identifier the default stack references', () => {
+    const s = makeBlankScene();
+    // Every name appearing in a stack field must have a corresponding
+    // entry in params with a finite expr.
+    for (const layer of s.stack) {
+      for (const f of ['thickness', 'core_width', 'slab_height', 'slab_width', 'etch_angle']) {
+        const v = layer[f];
+        if (typeof v !== 'string') continue;
+        const idents = v.match(/[A-Za-z_][A-Za-z0-9_]*/g) || [];
+        for (const id of idents) {
+          expect(s.params[id], `missing param "${id}" referenced by ${layer.id}.${f}`).toBeDefined();
+          expect(s.params[id].expr).toBeTypeOf('string');
+        }
+      }
+    }
+  });
   it('makeDefaultScene has non-empty content', () => {
     const s = makeDefaultScene();
     expect(Object.keys(s.params).length).toBeGreaterThan(0);
