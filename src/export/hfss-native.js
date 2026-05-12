@@ -637,7 +637,7 @@ def safe_create_box(box_params, attributes, name):
          "Transparency:=", ${isPortSheet ? '0.5' : '0.0'},
          "PartCoordinateSystem:=", "Global",
          "MaterialValue:=", "\\"${ascii(materialName)}\\"",
-         "SolveInside:=", ${c.layer === 'waveguide' ? 'True' : (isPortSheet ? 'True' : 'False')})${isPortSheet ? '' : `
+         "SolveInside:=", ${c.layer === 'waveguide' ? 'True' : (isPortSheet ? 'True' : 'False')}])${isPortSheet ? '' : `
     oEditor.SweepAlongVector(
         ["NAME:Selections", "Selections:=", "${id}", "NewPartsModelFlag:=", "Model"],
         ["NAME:VectorSweepParameters",
