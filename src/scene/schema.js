@@ -155,6 +155,10 @@ export function normalizeScene(s) {
     // truth is now scene.components entries with kind='boolean'.
     booleans: [],
     stack,
+    // The current stack's display name — purely a label so the user
+    // can recognize which stack a design is wearing. Loading a stack
+    // from the library overwrites both this field and `stack`.
+    stackName: s.stackName || 'LTOI600_NbN_EPFL',
   };
 }
 
@@ -221,7 +225,7 @@ export function makeDefaultScene() {
     { id: 's7', from: { compId: 'ring_bot', anchor: 'S' }, to: { compId: 'gnd_bot', anchor: 'N' }, dx: 'gap_x7', dy: 'gap_y7' },
   ];
 
-  return { params, components, snaps, mirrors: [], groups: [], booleans: [], stack: defaultStack() };
+  return { params, components, snaps, mirrors: [], groups: [], booleans: [], stack: defaultStack(), stackName: 'LTOI600_NbN_EPFL' };
 }
 
 // Empty starting scene: same default layer stack so add-tools work right
@@ -241,5 +245,6 @@ export function makeBlankScene() {
     groups: [],
     booleans: [],
     stack,
+    stackName: 'LTOI600_NbN_EPFL',
   };
 }

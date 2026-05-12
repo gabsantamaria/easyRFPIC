@@ -9,7 +9,7 @@ import { solveLayout, applyMirrors, resolveBooleanBboxes } from './scene/solver.
 import { generateGDS } from './export/gds.js';
 import { generatePyAEDT } from './export/pyaedt.js';
 import { generateHfssNative } from './export/hfss-native.js';
-import { defaultStack, normalizeScene, makeDefaultScene, makeBlankScene } from './scene/schema.js';
+import { defaultStack, normalizeScene, makeDefaultScene, makeBlankScene, paramsForStack } from './scene/schema.js';
 import {
   BASE_DESIGN_PREFIX, BASE_LIB_PREFIX, BASE_ARCHIVE_PREFIX, WORKSPACE_KEY,
   designPrefix, libPrefix, archivePrefix, activeDesignKey,
@@ -29,6 +29,9 @@ import {
   getWorkspaceHandle, setWorkspaceHandle as persistWorkspaceHandle,
   ensureWritePermission, writeBundleToHandle,
 } from './storage/file-handle.js';
+import {
+  listStacks, loadStack, saveStack, deleteStack,
+} from './storage/stacks.js';
 import { HoverTooltip } from './ui/HoverTooltip.jsx';
 import { DropdownMenu } from './ui/DropdownMenu.jsx';
 import { ModalDialog } from './ui/ModalDialog.jsx';
@@ -115,8 +118,10 @@ export default function App() {
   const [addMode, setAddMode] = useState(null);
   // Active layer choice for the shape buttons in the toolbar. Persists
   // across button clicks so the user can quickly add several shapes to
-  // the same layer.
-  const [activeLayer, setActiveLayer] = useState('waveguide');
+  // the same layer. Defaults to 'electrode' (the conductor) since most
+  // edit sessions on this codebase start by laying out signal /
+  // ground / electrode features rather than waveguides.
+  const [activeLayer, setActiveLayer] = useState('electrode');
   // Active conductor layer (used when activeLayer === 'electrode' and the
   // stack defines one or more conductor layers).
   const [activeConductorLayerId, setActiveConductorLayerId] = useState(null);
@@ -182,6 +187,30 @@ export default function App() {
     })();
     return () => { cancelled = true; };
   }, [workspace]);
+  // Stack library state: names of stacks saved in this workspace.
+  const [stackList, setStackList] = useState([]);
+  const refreshStackList = useCallback(async () => {
+    const names = await listStacks(workspace);
+    setStackList(names.sort());
+  }, [workspace]);
+  useEffect(() => { refreshStackList(); }, [refreshStackList]);
+  // Auto-seed the default stack 'LTOI600_NbN_EPFL' on first run so the
+  // user has a baseline to switch back to even before saving anything.
+  // Runs once per workspace once the list has loaded.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const names = await listStacks(workspace);
+      if (cancelled) return;
+      const seedName = 'LTOI600_NbN_EPFL';
+      if (names.length === 0) {
+        await saveStack(workspace, seedName, { name: seedName, stack: defaultStack() });
+        if (!cancelled) refreshStackList();
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [workspace, refreshStackList]);
+
   // Library state
   const [libraryItems, setLibraryItems] = useState([]); // names
   const [archivedLibraryItems, setArchivedLibraryItems] = useState([]); // names
@@ -2098,6 +2127,56 @@ export default function App() {
     );
   };
 
+  // ----- Stack library -----
+  // Switch the current scene to a stack loaded from the library. Keeps
+  // existing params (the user's tuning isn't reset) but injects any
+  // identifiers the new stack references that aren't already defined,
+  // matching the makeBlankScene-style behavior. The scene's stackName
+  // updates too so the toolbar label reflects the change.
+  const switchStack = async (name) => {
+    const payload = await loadStack(workspace, name);
+    if (!payload || !Array.isArray(payload.stack)) {
+      await alertDialog(`Stack "${name}" failed to load.`, 'Error');
+      return;
+    }
+    updateScene((prev) => {
+      const seeded = paramsForStack(payload.stack);
+      const params = { ...prev.params };
+      for (const [pn, pv] of Object.entries(seeded)) if (!params[pn]) params[pn] = pv;
+      return { ...prev, stack: payload.stack, stackName: name, params };
+    });
+  };
+
+  // Save the current scene.stack to the library under a name the user
+  // picks. If a stack already exists under that name, ask before
+  // overwriting. After save we also stamp scene.stackName so subsequent
+  // edits "belong" to the just-saved stack.
+  const saveCurrentStackAs = async () => {
+    const suggested = scene.stackName || 'LTOI600_NbN_EPFL';
+    const name = await promptDialog('Save current stack as:', suggested, 'Save stack');
+    if (!name || !name.trim()) return;
+    const trimmed = name.trim();
+    if (stackList.includes(trimmed)) {
+      const ok = await confirmDialog(`Overwrite existing stack "${trimmed}"?`, 'Overwrite stack');
+      if (!ok) return;
+    }
+    const ok = await saveStack(workspace, trimmed, { name: trimmed, stack: scene.stack });
+    if (!ok) { await alertDialog('Failed to save stack.', 'Error'); return; }
+    updateScene((prev) => ({ ...prev, stackName: trimmed }));
+    await refreshStackList();
+  };
+
+  // Delete a named stack from the library. The currently-loaded
+  // scene.stack is unaffected — only the library entry vanishes — so
+  // the user doesn't lose their working stack if they delete the wrong
+  // entry by mistake.
+  const deleteStackEntry = async (name) => {
+    const ok = await confirmDialog(`Delete saved stack "${name}" from the library?`, 'Delete stack');
+    if (!ok) return;
+    await deleteStack(workspace, name);
+    await refreshStackList();
+  };
+
   // Archive a library item: move it from the active prefix to the archive prefix.
   const archiveLibraryEntry = async (name) => {
     const item = await loadLibraryItem(workspace, name);
@@ -3644,6 +3723,52 @@ export default function App() {
 
             {activePanel === 'layers' && (
               <div className="space-y-2 text-xs">
+                {/* Stack library: pick a saved stack to swap in, or save
+                    the current one as a new entry. The dropdown reads
+                    out the scene's stackName so the user can see which
+                    stack they're wearing right now. */}
+                <div className="rounded border border-slate-700 px-2 py-1.5" style={{ background: '#1e293b' }}>
+                  <div className="flex items-center gap-1 mb-1">
+                    <Layers size={11} className="text-cyan-400 flex-shrink-0" />
+                    <span className="text-[9px] uppercase tracking-wider text-slate-400">Stack</span>
+                    <select
+                      value={stackList.includes(scene.stackName) ? scene.stackName : '__current__'}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (v === '__current__') return;
+                        switchStack(v);
+                      }}
+                      className="flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-cyan-300 outline-none focus:border-cyan-400"
+                      title="Switch to a saved stack from the library"
+                    >
+                      {!stackList.includes(scene.stackName) && (
+                        <option value="__current__">
+                          {scene.stackName || '(unnamed)'} · unsaved
+                        </option>
+                      )}
+                      {stackList.map((n) => (
+                        <option key={n} value={n}>{n}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={saveCurrentStackAs}
+                      className="flex-1 text-[10px] px-2 py-0.5 rounded bg-cyan-700 hover:bg-cyan-600 text-white"
+                      title="Save the current stack to the library under a name. Stacks are stored per workspace."
+                    >
+                      save as…
+                    </button>
+                    <button
+                      onClick={() => deleteStackEntry(scene.stackName)}
+                      disabled={!stackList.includes(scene.stackName)}
+                      className="text-[10px] px-2 py-0.5 rounded border border-slate-600 hover:border-red-400 hover:text-red-300 text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed"
+                      title="Remove the currently-loaded stack from the library. The working stack in the scene is kept."
+                    >
+                      delete
+                    </button>
+                  </div>
+                </div>
                 <p className="text-[10px] text-slate-500 italic px-1 leading-snug">
                   Layer stack from bottom to top. Substrate layers are placed below Z=0; the waveguide layer is patterned wherever a waveguide component is defined; the cladding layer fills above. Thickness values are parameters — edit them in PARAMS or here.
                 </p>
