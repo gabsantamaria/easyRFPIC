@@ -892,10 +892,136 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                 best = currentBest;
               }
             }
+            // -----------------------------------------------------------
+            // (3) Anchor-on-edge stickiness: edge snaps lock one axis and
+            //     let the cluster track the cursor along the other. To
+            //     make corners and midpoints feel "sticky" as the user
+            //     slides along the locked edge, we run a focused scan
+            //     over the 3 anchors lying on the chosen target side
+            //     (and the matching dragged-side anchors) with an
+            //     extended free-axis reach. The main anchor pass only
+            //     accepts pairs whose full 2-D distance is within
+            //     worldThresh; this sub-pass instead accepts pairs whose
+            //     FREE-axis offset is within STICKY (deliberately larger
+            //     than worldThresh), because the locked axis is about to
+            //     be forced to coincide by the edge snap anyway. When a
+            //     stickier match exists, promote it from edge to anchor
+            //     so the commit locks both axes.
+            //
+            //     STICKY is set to 2.5x worldThresh so the user gets a
+            //     pronounced detent at each anchor while sliding the
+            //     cluster laterally along a long edge — corners and
+            //     midpoint capture from a noticeable distance and the
+            //     cluster jumps back to free tracking once the cursor
+            //     crosses the boundary.
+            // -----------------------------------------------------------
+            // The override runs whenever the cluster is engaged in an
+            // edge-style alt-drag (best === edge) — and ALSO when the
+            // previous frame's moveSnapHover was an anchor we promoted
+            // here, so the cluster doesn't release the anchor when the
+            // cursor wanders just outside the main anchor pass's reach.
+            const isStickyHoverContext = (
+              (best && best.kind === 'edge') ||
+              (moveSnapHover && moveSnapHover.kind === 'anchor' && moveSnapHover.viaEdge)
+            );
+            if (isStickyHoverContext) {
+              const edgeAnchorMap = {
+                h: { top: ['NW','N','NE'], bottom: ['SW','S','SE'], centerY: ['W','C','E'] },
+                v: { left: ['NW','W','SW'], right: ['NE','E','SE'], centerX: ['N','C','S'] },
+              };
+              // Pick the axis/sides to scan: from the edge candidate when
+              // best is edge, or from the prior frame's moveSnapHover edge
+              // descriptor when we're holding an override-promoted anchor.
+              const ctxAxis = best && best.kind === 'edge' ? best.axis
+                : (moveSnapHover?.edgeAxis || null);
+              const ctxTargetSide = best && best.kind === 'edge' ? best.targetSide
+                : (moveSnapHover?.edgeTargetSide || null);
+              const ctxDSide = best && best.kind === 'edge' ? best.dSide
+                : (moveSnapHover?.edgeDSide || null);
+              const ctxTargetCompId = best && best.kind === 'edge' ? best.targetCompId
+                : (moveSnapHover?.compId || null);
+              const tAnchorList = (ctxAxis && edgeAnchorMap[ctxAxis]?.[ctxTargetSide]) || [];
+              const dAnchorList = (ctxAxis && edgeAnchorMap[ctxAxis]?.[ctxDSide]) || [];
+              if (tAnchorList.length && dAnchorList.length && ctxTargetCompId) {
+                const oc = solved.find(c => c.id === ctxTargetCompId);
+                if (oc) {
+                  const ow = typeof oc.w === 'string' ? evalExpr(oc.w, paramValues) : oc.w;
+                  const oh = typeof oc.h === 'string' ? evalExpr(oc.h, paramValues) : oc.h;
+                  if (Number.isFinite(ow) && Number.isFinite(oh) && ow > 0 && oh > 0) {
+                    // STICKY is scaled to the target's free-axis edge
+                    // length so the sticky zone is a visible fraction of
+                    // the edge regardless of zoom or target size. A long
+                    // 1000-unit top edge gives anchors at -500/0/+500 with
+                    // a 200-unit sticky radius — the cluster catches the
+                    // midpoint and each corner with a wide noticeable
+                    // detent. A short edge falls back to worldThresh*2
+                    // so we still get a screen-pixel detent.
+                    const freeAxisLen = ctxAxis === 'h' ? ow : oh;
+                    const STICKY = Math.max(worldThresh * 2, freeAxisLen * 0.2);
+                    let stickBest = null;
+                    // Index-pair the anchor lists so we only consider
+                    // NATURAL alignments along the edge:
+                    //   leftmost ↔ leftmost (NW ↔ SW)
+                    //   midpoint ↔ midpoint (N  ↔ S)
+                    //   rightmost ↔ rightmost (NE ↔ SE)
+                    // (Both edgeAnchorMap lists are ordered consistently:
+                    // left→mid→right on h, top→mid→bottom on v.)
+                    // Iterating 3×3 instead would let us snap the
+                    // cluster's NW corner to the target's S midpoint —
+                    // which lands the cluster's left edge at the target
+                    // center, not the cluster's center. That's the wrong
+                    // detent for an edge-slide gesture.
+                    const pairCount = Math.min(tAnchorList.length, dAnchorList.length);
+                    for (let i = 0; i < pairCount; i++) {
+                      const ta = tAnchorList[i];
+                      const da = dAnchorList[i];
+                      const tlp = anchorLocal(ta, ow, oh);
+                      const tx = oc.cx + tlp.x;
+                      const ty = oc.cy + tlp.y;
+                      const dlp = anchorLocal(da, dw, dh);
+                      const dax = proposedCx + dlp.x;
+                      const day = proposedCy + dlp.y;
+                      // Only the FREE-axis distance matters here: the
+                      // locked axis is forced to coincide by the edge
+                      // snap itself.
+                      const freeDist = ctxAxis === 'h'
+                        ? Math.abs(tx - dax)
+                        : Math.abs(ty - day);
+                      if (freeDist <= STICKY) {
+                        const cand = {
+                          kind: 'anchor',
+                          dist: freeDist,
+                          dAnchor: da,
+                          target: { x: tx, y: ty, compId: oc.id, anchor: ta },
+                          // Mark this candidate as edge-stickiness-promoted
+                          // so the next frame can keep it sticky even when
+                          // the main edge candidate drops out.
+                          viaEdge: true,
+                          edgeAxis: ctxAxis,
+                          edgeTargetSide: ctxTargetSide,
+                          edgeDSide: ctxDSide,
+                        };
+                        if (!stickBest || freeDist < stickBest.dist) stickBest = cand;
+                      }
+                    }
+                    if (stickBest) best = stickBest;
+                  }
+                }
+              }
+            }
             if (best) {
               let newCx = proposedCx, newCy = proposedCy;
               if (best.kind === 'anchor') {
-                setMoveSnapHover({ kind: 'anchor', ...best.target, dAnchor: best.dAnchor });
+                setMoveSnapHover({
+                  kind: 'anchor', ...best.target, dAnchor: best.dAnchor,
+                  // Pass through the edge-stickiness origin so the next
+                  // frame can keep the anchor sticky beyond the main
+                  // anchor pass's worldThresh reach.
+                  viaEdge: !!best.viaEdge,
+                  edgeAxis: best.edgeAxis,
+                  edgeTargetSide: best.edgeTargetSide,
+                  edgeDSide: best.edgeDSide,
+                });
                 // Place the cluster so its chosen anchor sits on the target.
                 const dlp = anchorLocal(best.dAnchor, dw, dh);
                 newCx = best.target.x - dlp.x;
