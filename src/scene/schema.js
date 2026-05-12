@@ -52,6 +52,40 @@ export function paramsForStack(stack) {
   return out;
 }
 
+// Migrate a stack to the explicit coplanar-group model. Stacks that
+// already declare any `coplanarGroup` on at least one layer are
+// passed through unchanged. Stacks with no explicit groupings are
+// scanned for adjacent waveguide / conductor / cladding role layers
+// (the pre-migration "device level" pattern); each contiguous run is
+// stamped with a shared coplanarGroup id. Single-member runs are
+// degenerate and left as solo layers.
+//
+// Called from normalizeScene on load and from switchStack when a
+// library stack is brought in, so legacy entries — including the
+// originally-auto-seeded LTOI600_NbN_EPFL — get coplanar grouping
+// back at the moment they enter the scene.
+export function migrateStackCoplanarGroups(stack) {
+  const arr = stack || [];
+  const isLegacyDeviceRole = (r) => r === 'waveguide' || r === 'conductor' || r === 'cladding';
+  const anyExplicitGroup = arr.some((l) => l.coplanarGroup);
+  if (anyExplicitGroup) return arr;
+  let nonce = 0;
+  let curGroupId = null;
+  let next = arr.map((layer) => {
+    if (!isLegacyDeviceRole(layer.role)) {
+      curGroupId = null;
+      return layer;
+    }
+    if (!curGroupId) curGroupId = `device_${nonce++}`;
+    return { ...layer, coplanarGroup: curGroupId };
+  });
+  // Drop degenerate single-member groups so those layers stay sequential.
+  const counts = {};
+  for (const l of next) if (l.coplanarGroup) counts[l.coplanarGroup] = (counts[l.coplanarGroup] || 0) + 1;
+  next = next.map((l) => (l.coplanarGroup && counts[l.coplanarGroup] < 2) ? { ...l, coplanarGroup: undefined } : l);
+  return next;
+}
+
 export function defaultStack() {
   // Bottom-up order. Z=0 is the top of the buried oxide (where the WG sits).
   // Substrates have negative Z, the WG layer is at Z=0..h_wg, conductor sits above.
@@ -94,36 +128,8 @@ export function normalizeScene(s) {
       ...layer,
     };
   });
-  // Migrate legacy stacks to the explicit coplanar-group model. Older
-  // stacks auto-grouped adjacent waveguide / conductor / cladding
-  // role layers into one "device level" via role inspection in the
-  // LayersPanel. The new model makes coplanar grouping explicit via a
-  // `coplanarGroup` string id on each layer — sequential by default,
-  // coplanar only when the user opts in. To preserve existing scenes'
-  // visual + export behavior, here we detect runs of contiguous
-  // role∈{waveguide,conductor,cladding} layers in stacks that have
-  // NO coplanarGroup assignments anywhere, and assign them a shared
-  // id. Stacks that already declare coplanar groups (newly-created
-  // ones) are passed through untouched.
-  const isLegacyDeviceRole = (r) => r === 'waveguide' || r === 'conductor' || r === 'cladding';
-  const anyExplicitGroup = stack.some((l) => l.coplanarGroup);
-  if (!anyExplicitGroup) {
-    let groupNonce = 0;
-    let curGroupId = null;
-    stack = stack.map((layer) => {
-      if (!isLegacyDeviceRole(layer.role)) {
-        curGroupId = null;
-        return layer;
-      }
-      if (!curGroupId) curGroupId = `device_${groupNonce++}`;
-      return { ...layer, coplanarGroup: curGroupId };
-    });
-    // Single-member "groups" of one are degenerate — drop the id so
-    // those layers stay sequential.
-    const counts = {};
-    for (const l of stack) if (l.coplanarGroup) counts[l.coplanarGroup] = (counts[l.coplanarGroup] || 0) + 1;
-    stack = stack.map((l) => (l.coplanarGroup && counts[l.coplanarGroup] < 2) ? { ...l, coplanarGroup: undefined } : l);
-  }
+  // Migrate legacy stacks to the explicit coplanar-group model.
+  stack = migrateStackCoplanarGroups(stack);
   // Ensure every parameter referenced in stack fields exists with a
   // sensible default. Existing params win; only missing names get
   // populated from paramsForStack.

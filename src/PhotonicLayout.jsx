@@ -9,7 +9,7 @@ import { solveLayout, applyMirrors, resolveBooleanBboxes } from './scene/solver.
 import { generateGDS } from './export/gds.js';
 import { generatePyAEDT } from './export/pyaedt.js';
 import { generateHfssNative } from './export/hfss-native.js';
-import { defaultStack, normalizeScene, makeDefaultScene, makeBlankScene, paramsForStack } from './scene/schema.js';
+import { defaultStack, normalizeScene, makeDefaultScene, makeBlankScene, paramsForStack, migrateStackCoplanarGroups } from './scene/schema.js';
 import {
   BASE_DESIGN_PREFIX, BASE_LIB_PREFIX, BASE_ARCHIVE_PREFIX, WORKSPACE_KEY,
   designPrefix, libPrefix, archivePrefix, activeDesignKey,
@@ -210,6 +210,27 @@ export default function App() {
     })();
     return () => { cancelled = true; };
   }, [workspace, refreshStackList]);
+
+  // Auto-save the working stack to the library entry whose name
+  // matches scene.stackName. Triggers whenever scene.stack changes
+  // (layer added/removed, role/material/color edits, coplanar group
+  // toggled, layers reordered) so the library entry stays the
+  // source of truth — switching away and back returns the SAME
+  // grouped / edited state.
+  //
+  // No-op when scene.stackName isn't a known library entry (e.g.,
+  // brand-new "unsaved" stack name). The user can name it via
+  // rename… to start auto-saving.
+  useEffect(() => {
+    if (!scene.stackName) return;
+    if (!stackList.includes(scene.stackName)) return;
+    let cancelled = false;
+    (async () => {
+      await saveStack(workspace, scene.stackName, { name: scene.stackName, stack: scene.stack });
+      if (cancelled) return;
+    })();
+    return () => { cancelled = true; };
+  }, [workspace, scene.stack, scene.stackName, stackList]);
 
   // Library state
   const [libraryItems, setLibraryItems] = useState([]); // names
@@ -2139,11 +2160,18 @@ export default function App() {
       await alertDialog(`Stack "${name}" failed to load.`, 'Error');
       return;
     }
+    // Run the same coplanar-group migration normalizeScene runs at
+    // load time. Library entries written before the explicit-group
+    // model came in (or before user-made groupings were saved) get
+    // their waveguide/conductor/cladding adjacency restored to a
+    // single coplanar group. Stacks that already declare groupings
+    // pass through unchanged.
+    const migrated = migrateStackCoplanarGroups(payload.stack);
     updateScene((prev) => {
-      const seeded = paramsForStack(payload.stack);
+      const seeded = paramsForStack(migrated);
       const params = { ...prev.params };
       for (const [pn, pv] of Object.entries(seeded)) if (!params[pn]) params[pn] = pv;
-      return { ...prev, stack: payload.stack, stackName: name, params };
+      return { ...prev, stack: migrated, stackName: name, params };
     });
   };
 
