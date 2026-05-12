@@ -146,6 +146,13 @@ export default function App() {
   // body, so we defer the resolution to call-time via this ref. Updated
   // by an effect below once createBoolean exists.
   const createBooleanRef = useRef(null);
+  // Same pattern for createGroup / dissolveGroup (Cmd+G / Cmd+Shift+G).
+  const createGroupRef = useRef(null);
+  const dissolveGroupRef = useRef(null);
+  // Resolves "which group should Cmd+Shift+G dissolve right now?" based
+  // on the current selection. Held via ref because the keyboard handler
+  // captures it before the function's declaration.
+  const currentGroupIdRef = useRef(null);
   const [exportPreview, setExportPreview] = useState(null); // { filename, content, downloaded }
   // Workspace = which "folder" of designs+library we're using. Empty string is the default folder.
   const [workspace, setWorkspace] = useState('');
@@ -315,7 +322,12 @@ export default function App() {
   // checkpointTimerRef holds the timer that will commit it.
   const pendingCheckpointRef = useRef(null);
   const checkpointTimerRef = useRef(null);
-  const CHECKPOINT_DELAY_MS = 2000;
+  // Quiet window before a pre-edit snapshot lands on the undo stack.
+  // Smaller = finer-grained undo (each typed-and-pause counts as one
+  // step) but more history entries; bigger = coarser undo. 700 ms is
+  // about a half-second of inactivity, which empirically separates
+  // distinct edits without trying to record every single keystroke.
+  const CHECKPOINT_DELAY_MS = 700;
 
   const updateScene = useCallback((updater) => {
     setScene(prev => {
@@ -615,6 +627,19 @@ export default function App() {
         if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
         e.preventDefault();
         handlePaste();
+      } else if ((e.metaKey || e.ctrlKey) && (e.key === 'g' || e.key === 'G')) {
+        // Cmd+G  → group selected components.
+        // Cmd+⇧G → ungroup whatever group the selection belongs to.
+        // Skip if the user is in a text field so they can type "g" freely.
+        const tag = e.target?.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target?.isContentEditable) return;
+        e.preventDefault();
+        if (e.shiftKey) {
+          const gid = currentGroupIdRef.current && currentGroupIdRef.current();
+          if (gid) dissolveGroupRef.current && dissolveGroupRef.current(gid);
+        } else {
+          createGroupRef.current && createGroupRef.current();
+        }
       } else if (e.key === '+' || e.key === '-') {
         // Boolean shortcuts: union (+) / subtract (-) act on the current
         // selection. Skip when typing in any input so users can enter
@@ -1245,11 +1270,37 @@ export default function App() {
     const isFront = idx === scene.components.length - 1;
     const isBack = idx === 0;
     const multi = selectedIds.has(compId) && selectedIds.size > 1;
+    // Group context: dissolve is enabled when ANY selected component
+    // (or the right-clicked one) belongs to a group; create is enabled
+    // when there are ≥ 2 selected.
+    const ungroupId = (() => {
+      const byId = Object.fromEntries(scene.components.map(c => [c.id, c]));
+      const ids = selectedIds.has(compId) ? selectedIds : new Set([compId]);
+      for (const id of ids) {
+        const c = byId[id];
+        if (c && c.group) {
+          const g = scene.groups.find(g => g.name === c.group);
+          if (g) return g.id;
+        }
+      }
+      return null;
+    })();
     const items = [
       { label: 'Bring to front', icon: ArrowUp, onClick: () => bringToFront(compId), disabled: isFront },
       { label: 'Bring forward', onClick: () => bringForward(compId), disabled: isFront, hint: '↑' },
       { label: 'Send backward', onClick: () => sendBackward(compId), disabled: isBack, hint: '↓' },
       { label: 'Send to back', icon: ArrowDown, onClick: () => sendToBack(compId), disabled: isBack },
+      { divider: true },
+      // Grouping: the ref pattern lets us call createGroup/dissolveGroup
+      // even though they're declared later in App's body.
+      { label: 'Group', icon: FolderTree, hint: '⌘G',
+        onClick: () => createGroupRef.current && createGroupRef.current(),
+        disabled: selectedIds.size < 2,
+      },
+      { label: 'Ungroup', hint: '⌘⇧G',
+        onClick: () => ungroupId && dissolveGroupRef.current && dissolveGroupRef.current(ungroupId),
+        disabled: !ungroupId,
+      },
       { divider: true },
       { label: multi ? `Duplicate (${selectedIds.size})` : 'Duplicate', icon: Copy,
         onClick: () => duplicateIds(multi ? selectedIds : new Set([compId])) },
@@ -1538,6 +1589,28 @@ export default function App() {
       groups: prev.groups.filter(x => x.id !== groupId),
     }));
   };
+
+  // Resolve "the current group context" for the ungroup shortcut: walk
+  // selectedIds, find the first group any selected component belongs
+  // to, and return its id. Returns null if nothing selected is grouped.
+  const currentGroupId = () => {
+    if (selectedIds.size === 0) return null;
+    const byId = Object.fromEntries(scene.components.map(c => [c.id, c]));
+    for (const cid of selectedIds) {
+      const c = byId[cid];
+      if (c && c.group) {
+        const g = scene.groups.find(g => g.name === c.group);
+        if (g) return g.id;
+      }
+    }
+    return null;
+  };
+
+  // Late-binding refs for the Cmd+G / Cmd+Shift+G keyboard handler
+  // declared above this point in the function body.
+  createGroupRef.current = createGroup;
+  dissolveGroupRef.current = dissolveGroup;
+  currentGroupIdRef.current = currentGroupId;
 
   const renameGroupParameter = async (groupId, oldName, newName) => {
     if (!newName || newName === oldName) return;
