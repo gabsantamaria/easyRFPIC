@@ -281,10 +281,10 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         };
       }
     } else if (drag && drag.kind === 'move' && moveSnapHover) {
-      status = {
-        kind: 'snap',
-        line: `Alt-drag · release to snap to ${moveSnapHover.compId}.${moveSnapHover.anchor}`,
-      };
+      const line = moveSnapHover.kind === 'edge'
+        ? `Alt-drag · align ${moveSnapHover.dSide} of dragged to ${moveSnapHover.targetSide} of ${moveSnapHover.targetCompId} (visual only)`
+        : `Alt-drag · release to snap to ${moveSnapHover.compId}.${moveSnapHover.anchor}`;
+      status = { kind: 'snap', line };
     } else if (drag && drag.kind === 'move' && altKey) {
       status = {
         kind: 'snap',
@@ -760,12 +760,23 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             const stickThresh = worldThresh * 0.5; // candidate must beat current by this margin
             let best = null;
             let currentBest = null; // the candidate matching the existing moveSnapHover, if any
+            // Cluster bbox bounds at the proposed position (used by the
+            // edge-pair pass below).
+            const dxMin = proposedCx - dw / 2, dxMax = proposedCx + dw / 2;
+            const dyMin = proposedCy - dh / 2, dyMax = proposedCy + dh / 2;
             for (const oc of solved) {
               if (drag.clusterSet && drag.clusterSet.has(oc.id)) continue;
               if (oc.consumedBy) continue;
               const ow = typeof oc.w === 'string' ? evalExpr(oc.w, paramValues) : oc.w;
               const oh = typeof oc.h === 'string' ? evalExpr(oc.h, paramValues) : oc.h;
               if (!Number.isFinite(ow) || !Number.isFinite(oh) || ow <= 0 || oh <= 0) continue;
+              // -----------------------------------------------------------
+              // (1) Anchor-pair candidates: every (dragged anchor, target
+              //     anchor) pair across the 9-point grids. Distance is the
+              //     2D distance between the two anchors at the dragged
+              //     cluster's current proposed position; snap commits both
+              //     axes when this kind wins.
+              // -----------------------------------------------------------
               for (const ta of ANCHORS) {
                 const tlp = anchorLocal(ta, ow, oh);
                 const tx = oc.cx + tlp.x;
@@ -777,17 +788,72 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   const dist = Math.hypot(tx - dax, ty - day);
                   if (dist <= worldThresh) {
                     const cand = {
+                      kind: 'anchor',
                       dist,
                       dAnchor: da,
                       target: { x: tx, y: ty, compId: oc.id, anchor: ta },
                     };
                     if (!best || dist < best.dist) best = cand;
-                    if (moveSnapHover &&
+                    if (moveSnapHover && moveSnapHover.kind === 'anchor' &&
                         moveSnapHover.compId === oc.id &&
                         moveSnapHover.anchor === ta &&
                         moveSnapHover.dAnchor === da) {
                       currentBest = cand;
                     }
+                  }
+                }
+              }
+              // -----------------------------------------------------------
+              // (2) Edge-pair candidates: align a horizontal (or vertical)
+              //     edge of the dragged cluster with a horizontal (or
+              //     vertical) edge of the target, when the two bboxes
+              //     overlap on the ORTHOGONAL axis. Distance is the 1-D
+              //     offset between the two edges; only the snapped axis
+              //     is constrained on placement — the other axis tracks
+              //     the cursor — and no scene-level snap is created on
+              //     release. Useful for "align bottoms" / "align tops"
+              //     gestures where you want edge co-linearity but don't
+              //     care about exact x positioning.
+              // -----------------------------------------------------------
+              const oxMin = oc.cx - ow / 2, oxMax = oc.cx + ow / 2;
+              const oyMin = oc.cy - oh / 2, oyMax = oc.cy + oh / 2;
+              const xOverlap = Math.min(oxMax, dxMax) - Math.max(oxMin, dxMin);
+              const yOverlap = Math.min(oyMax, dyMax) - Math.max(oyMin, dyMin);
+              const tryEdge = (axis, dSide, dEdgeVal, tSide, tEdgeVal, midX, midY) => {
+                const dist = Math.abs(dEdgeVal - tEdgeVal);
+                if (dist > worldThresh) return;
+                const cand = {
+                  kind: 'edge',
+                  dist,
+                  axis,                  // 'h' = horizontal edges, snap Y
+                  targetCompId: oc.id,
+                  targetSide: tSide,     // 'top'/'bottom' or 'left'/'right'
+                  dSide,                 // dragged-side equivalent
+                  edgeVal: tEdgeVal,     // axis-aligned coord to snap to
+                  x: midX, y: midY,      // representative point for the hover marker
+                };
+                if (!best || cand.dist < best.dist) best = cand;
+                if (moveSnapHover && moveSnapHover.kind === 'edge' &&
+                    moveSnapHover.axis === axis &&
+                    moveSnapHover.targetCompId === oc.id &&
+                    moveSnapHover.targetSide === tSide &&
+                    moveSnapHover.dSide === dSide) {
+                  currentBest = cand;
+                }
+              };
+              if (xOverlap > 0) {
+                const midX = (Math.max(oxMin, dxMin) + Math.min(oxMax, dxMax)) / 2;
+                for (const [dSide, dY] of [['top', dyMax], ['bottom', dyMin]]) {
+                  for (const [tSide, tY] of [['top', oyMax], ['bottom', oyMin]]) {
+                    tryEdge('h', dSide, dY, tSide, tY, midX, tY);
+                  }
+                }
+              }
+              if (yOverlap > 0) {
+                const midY = (Math.max(oyMin, dyMin) + Math.min(oyMax, dyMax)) / 2;
+                for (const [dSide, dX] of [['right', dxMax], ['left', dxMin]]) {
+                  for (const [tSide, tX] of [['right', oxMax], ['left', oxMin]]) {
+                    tryEdge('v', dSide, dX, tSide, tX, tX, midY);
                   }
                 }
               }
@@ -802,11 +868,30 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
               }
             }
             if (best) {
-              setMoveSnapHover({ ...best.target, dAnchor: best.dAnchor });
-              // Place the cluster so its chosen anchor sits on the target.
-              const dlp = anchorLocal(best.dAnchor, dw, dh);
-              const newCx = best.target.x - dlp.x;
-              const newCy = best.target.y - dlp.y;
+              let newCx = proposedCx, newCy = proposedCy;
+              if (best.kind === 'anchor') {
+                setMoveSnapHover({ kind: 'anchor', ...best.target, dAnchor: best.dAnchor });
+                // Place the cluster so its chosen anchor sits on the target.
+                const dlp = anchorLocal(best.dAnchor, dw, dh);
+                newCx = best.target.x - dlp.x;
+                newCy = best.target.y - dlp.y;
+              } else {
+                // Edge snap: lock only one axis; the other tracks the cursor.
+                setMoveSnapHover({
+                  kind: 'edge', axis: best.axis,
+                  targetCompId: best.targetCompId,
+                  targetSide: best.targetSide,
+                  dSide: best.dSide,
+                  edgeVal: best.edgeVal,
+                  x: best.x, y: best.y,
+                });
+                if (best.axis === 'h') {
+                  // Snap Y so dragged_side's edge meets target edge.
+                  newCy = best.edgeVal - (best.dSide === 'top' ? dh / 2 : -dh / 2);
+                } else {
+                  newCx = best.edgeVal - (best.dSide === 'right' ? dw / 2 : -dw / 2);
+                }
+              }
               // Translation applied to every co-mover.
               const tdx = newCx - drag.startCx;
               const tdy = newCy - drag.startCy;
@@ -1027,7 +1112,13 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     // that was used for visual previewing during the move). This gives a
     // smooth "drag-toward-something-and-let-go" gesture for connecting
     // components without entering the explicit snap-creation tool.
-    if (drag && drag.kind === 'move' && moveSnapHover) {
+    if (drag && drag.kind === 'move' && moveSnapHover && moveSnapHover.kind === 'anchor') {
+      // Only anchor-pair snaps install a persistent scene-level snap.
+      // Edge-alignment snaps are visual-only during the drag: on release
+      // we just keep the cluster at the edge-aligned position. If the
+      // user wants the relationship to persist, they can install a real
+      // snap from the inspector or via a second alt-drag landing on a
+      // specific anchor.
       const target = moveSnapHover;
       // The "dragged" component for snap purposes is the one the user
       // clicked on — typically the boolean itself when dragging a composite,
@@ -2328,10 +2419,64 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           onMouseUp). */}
       {drag && drag.kind === 'move' && moveSnapHover && (
         <g pointerEvents="none">
-          <circle cx={moveSnapHover.x} cy={-moveSnapHover.y} r={hr * 0.7}
-            fill="#67e8f9" stroke="#0891b2" strokeWidth={sw * 0.6} />
-          <circle cx={moveSnapHover.x} cy={-moveSnapHover.y} r={hr * 1.4}
-            fill="none" stroke="#0891b2" strokeWidth={sw * 0.5} opacity={0.6} />
+          {/* Anchor snap: a small target reticle on the chosen anchor. */}
+          {moveSnapHover.kind === 'anchor' && (
+            <>
+              <circle cx={moveSnapHover.x} cy={-moveSnapHover.y} r={hr * 0.7}
+                fill="#67e8f9" stroke="#0891b2" strokeWidth={sw * 0.6} />
+              <circle cx={moveSnapHover.x} cy={-moveSnapHover.y} r={hr * 1.4}
+                fill="none" stroke="#0891b2" strokeWidth={sw * 0.5} opacity={0.6} />
+            </>
+          )}
+          {/* Edge snap: extend a guide line along the aligned edge across
+              the union of the two bboxes, plus a thinner indicator at the
+              midpoint of the overlap so the user can see which two edges
+              are being matched. */}
+          {moveSnapHover.kind === 'edge' && (() => {
+            const tc = solved.find(c => c.id === moveSnapHover.targetCompId);
+            if (!tc) return null;
+            const tw = typeof tc.w === 'string' ? evalExpr(tc.w, paramValues) : tc.w;
+            const th = typeof tc.h === 'string' ? evalExpr(tc.h, paramValues) : tc.h;
+            if (!Number.isFinite(tw) || !Number.isFinite(th)) return null;
+            const tx0 = tc.cx - tw / 2, tx1 = tc.cx + tw / 2;
+            const ty0 = tc.cy - th / 2, ty1 = tc.cy + th / 2;
+            // Recompute the dragged cluster bbox at its CURRENT (post-snap) position by
+            // using drag.startCx/Cy + the current effective offset. Easier: the
+            // moveSnapHover.x/y is already the overlap midpoint, but we need
+            // the union of x-ranges (or y-ranges) for the guide. The drag's
+            // co-mover startCx/Cy plus the latest translation gives us that;
+            // approximate via the SOLVED bbox of the cluster's clickedId.
+            const dragId = drag.clickedId || drag.rootId;
+            const dc = solved.find(c => c.id === dragId);
+            if (!dc) return null;
+            const dw2 = typeof dc.w === 'string' ? evalExpr(dc.w, paramValues) : dc.w;
+            const dh2 = typeof dc.h === 'string' ? evalExpr(dc.h, paramValues) : dc.h;
+            const dx0 = dc.cx - dw2 / 2, dx1 = dc.cx + dw2 / 2;
+            const dy0 = dc.cy - dh2 / 2, dy1 = dc.cy + dh2 / 2;
+            const stroke = '#67e8f9';
+            if (moveSnapHover.axis === 'h') {
+              const x1 = Math.min(tx0, dx0), x2 = Math.max(tx1, dx1);
+              const y = moveSnapHover.edgeVal;
+              return (
+                <>
+                  <line x1={x1} y1={-y} x2={x2} y2={-y}
+                    stroke={stroke} strokeWidth={sw * 0.7} strokeDasharray={`${sw * 2},${sw * 1.4}`} opacity={0.85} />
+                  <circle cx={moveSnapHover.x} cy={-moveSnapHover.y} r={hr * 0.5}
+                    fill={stroke} stroke="#0891b2" strokeWidth={sw * 0.5} />
+                </>
+              );
+            }
+            const y1 = Math.min(ty0, dy0), y2 = Math.max(ty1, dy1);
+            const x = moveSnapHover.edgeVal;
+            return (
+              <>
+                <line x1={x} y1={-y1} x2={x} y2={-y2}
+                  stroke={stroke} strokeWidth={sw * 0.7} strokeDasharray={`${sw * 2},${sw * 1.4}`} opacity={0.85} />
+                <circle cx={moveSnapHover.x} cy={-moveSnapHover.y} r={hr * 0.5}
+                  fill={stroke} stroke="#0891b2" strokeWidth={sw * 0.5} />
+              </>
+            );
+          })()}
         </g>
       )}
 
