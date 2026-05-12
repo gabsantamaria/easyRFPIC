@@ -57,13 +57,17 @@ export function defaultStack() {
   // Substrates have negative Z, the WG layer is at Z=0..h_wg, conductor sits above.
   // Cladding fills the WG layer's XY footprint at Z=0..h_wg around any waveguides/electrodes.
   // Waveguide-role layers carry rib cross-section fields (core_width, slab_height, slab_width, etch_angle).
+  // The default-stack device level (waveguide + cladding + conductor)
+  // declares an explicit coplanarGroup id so it survives — and reads
+  // identically against — the new opt-in coplanar model. Layers
+  // without a coplanarGroup are sequential (each on top of the prev).
   return [
     { id: 'l_si',    name: 'Silicon handle',  thickness: 'h_si',    material: 'silicon',           color: '#5a6878', role: 'substrate' },
     { id: 'l_sio2',  name: 'Buried oxide',    thickness: 'h_sio2',  material: 'silicon_dioxide',   color: '#8da0c0', role: 'substrate' },
-    { id: 'l_lt',    name: 'Lithium tantalate WG', thickness: 'h_wg', material: 'lithium_tantalate', color: '#86efac', role: 'waveguide',
+    { id: 'l_lt',    name: 'Lithium tantalate WG', thickness: 'h_wg', material: 'lithium_tantalate', color: '#86efac', role: 'waveguide', coplanarGroup: 'device_0',
       core_width: 'w_wg', core_width_ref: 'top', slab_height: 'h_slab', slab_width: 'w_slab', etch_angle: 'etch_angle' },
-    { id: 'l_clad',  name: 'Cladding (SiO2)', thickness: 'h_wg',    material: 'silicon_dioxide',   color: '#cbd5e1', role: 'cladding' },
-    { id: 'l_cond',  name: 'Conductor',       thickness: 'h_cond',  material: 'gold',              color: '#daa520', role: 'conductor' },
+    { id: 'l_clad',  name: 'Cladding (SiO2)', thickness: 'h_wg',    material: 'silicon_dioxide',   color: '#cbd5e1', role: 'cladding', coplanarGroup: 'device_0' },
+    { id: 'l_cond',  name: 'Conductor',       thickness: 'h_cond',  material: 'gold',              color: '#daa520', role: 'conductor', coplanarGroup: 'device_0' },
   ];
 }
 
@@ -90,6 +94,36 @@ export function normalizeScene(s) {
       ...layer,
     };
   });
+  // Migrate legacy stacks to the explicit coplanar-group model. Older
+  // stacks auto-grouped adjacent waveguide / conductor / cladding
+  // role layers into one "device level" via role inspection in the
+  // LayersPanel. The new model makes coplanar grouping explicit via a
+  // `coplanarGroup` string id on each layer — sequential by default,
+  // coplanar only when the user opts in. To preserve existing scenes'
+  // visual + export behavior, here we detect runs of contiguous
+  // role∈{waveguide,conductor,cladding} layers in stacks that have
+  // NO coplanarGroup assignments anywhere, and assign them a shared
+  // id. Stacks that already declare coplanar groups (newly-created
+  // ones) are passed through untouched.
+  const isLegacyDeviceRole = (r) => r === 'waveguide' || r === 'conductor' || r === 'cladding';
+  const anyExplicitGroup = stack.some((l) => l.coplanarGroup);
+  if (!anyExplicitGroup) {
+    let groupNonce = 0;
+    let curGroupId = null;
+    stack = stack.map((layer) => {
+      if (!isLegacyDeviceRole(layer.role)) {
+        curGroupId = null;
+        return layer;
+      }
+      if (!curGroupId) curGroupId = `device_${groupNonce++}`;
+      return { ...layer, coplanarGroup: curGroupId };
+    });
+    // Single-member "groups" of one are degenerate — drop the id so
+    // those layers stay sequential.
+    const counts = {};
+    for (const l of stack) if (l.coplanarGroup) counts[l.coplanarGroup] = (counts[l.coplanarGroup] || 0) + 1;
+    stack = stack.map((l) => (l.coplanarGroup && counts[l.coplanarGroup] < 2) ? { ...l, coplanarGroup: undefined } : l);
+  }
   // Ensure every parameter referenced in stack fields exists with a
   // sensible default. Existing params win; only missing names get
   // populated from paramsForStack.

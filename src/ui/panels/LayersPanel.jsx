@@ -21,7 +21,19 @@ export function LayerCard({ layer, idx, scene, paramValues, updateScene, commitE
     ...prev,
     stack: prev.stack.map((l, i) => i === idx ? { ...l, ...patch } : l),
   }));
-  const deleteLayer = () => updateScene(prev => ({ ...prev, stack: prev.stack.filter((_, i) => i !== idx) }));
+  const deleteLayer = () => updateScene(prev => {
+    const removedGid = prev.stack[idx]?.coplanarGroup;
+    let next = prev.stack.filter((_, i) => i !== idx);
+    if (removedGid) {
+      // Collapse a stranded single-member group so the remaining layer
+      // doesn't sit alone inside a coplanar wrapper.
+      const remaining = next.filter((l) => l.coplanarGroup === removedGid);
+      if (remaining.length < 2) {
+        next = next.map((l) => l.coplanarGroup === removedGid ? { ...l, coplanarGroup: undefined } : l);
+      }
+    }
+    return { ...prev, stack: next };
+  });
   const moveUp = () => updateScene(prev => {
     if (idx >= prev.stack.length - 1) return prev;
     const s = [...prev.stack];
@@ -43,6 +55,43 @@ export function LayerCard({ layer, idx, scene, paramValues, updateScene, commitE
     conductor: 'text-amber-300',
   }[layer.role] || 'text-slate-300';
 
+  // Coplanar-group toggles. Merging "with above" means: take whatever
+  // coplanarGroup id the layer immediately above carries (creating a
+  // fresh id if it doesn't have one yet) and stamp it on both. The
+  // existing group's other members keep their id, so the new layer
+  // joins their level.
+  const layerAbove = scene.stack[idx + 1]; // physically above = next in array
+  const isCoplanarWithAbove = layerAbove && layer.coplanarGroup
+    && layer.coplanarGroup === layerAbove.coplanarGroup;
+  const mergeAbove = () => {
+    if (!layerAbove) return;
+    const aboveGid = layerAbove.coplanarGroup;
+    const gid = aboveGid || `device_${Math.random().toString(36).slice(2, 7)}`;
+    updateScene((prev) => ({
+      ...prev,
+      stack: prev.stack.map((l, i) => {
+        if (i === idx || i === idx + 1) return { ...l, coplanarGroup: gid };
+        return l;
+      }),
+    }));
+  };
+  const splitFromAbove = () => {
+    // Clear THIS layer's coplanarGroup. If that leaves the prior group
+    // with only one remaining member, clear that member's id too — a
+    // single-layer "group" is degenerate.
+    updateScene((prev) => {
+      const oldGid = layer.coplanarGroup;
+      let next = prev.stack.map((l, i) => i === idx ? { ...l, coplanarGroup: undefined } : l);
+      if (oldGid) {
+        const remaining = next.filter((l) => l.coplanarGroup === oldGid);
+        if (remaining.length < 2) {
+          next = next.map((l) => l.coplanarGroup === oldGid ? { ...l, coplanarGroup: undefined } : l);
+        }
+      }
+      return { ...prev, stack: next };
+    });
+  };
+
   return (
     <div className="rounded border border-slate-700" style={{ background: '#1e293b' }}>
       <div className="flex items-center gap-1 px-2 py-1 border-b border-slate-800">
@@ -53,6 +102,25 @@ export function LayerCard({ layer, idx, scene, paramValues, updateScene, commitE
           className={`bg-transparent font-bold text-[11px] outline-none flex-1 min-w-0 ${roleColor}`}
           spellCheck={false}
         />
+        {/* Coplanar toggle — merge with the layer immediately above
+            into the same level (same z-start), or split this one out
+            into its own sequential level. Hidden for the topmost
+            layer (no layer above to merge with). */}
+        {layerAbove && (
+          isCoplanarWithAbove ? (
+            <button
+              onClick={splitFromAbove}
+              className="text-violet-400 hover:text-violet-200 text-[10px] px-1"
+              title="Split this layer out of the coplanar group above (becomes its own sequential level)"
+            >⊟</button>
+          ) : (
+            <button
+              onClick={mergeAbove}
+              className="text-slate-500 hover:text-violet-300 text-[10px] px-1"
+              title="Merge with the layer above as coplanar — same z-start, possibly different thicknesses. Every coplanar group must contain a cladding layer."
+            >⊞</button>
+          )
+        )}
         <button onClick={moveUp} disabled={idx === scene.stack.length - 1} className="text-slate-500 hover:text-slate-200 disabled:opacity-20 text-[10px] px-1" title="Move up">▲</button>
         <button onClick={moveDown} disabled={idx === 0} className="text-slate-500 hover:text-slate-200 disabled:opacity-20 text-[10px] px-1" title="Move down">▼</button>
         <button onClick={deleteLayer} className="text-slate-500 hover:text-red-400" title="Delete layer"><Trash2 size={10} /></button>
@@ -234,24 +302,38 @@ export function LevelGroup({ level, scene, paramValues, updateScene, commitExpr 
     const blockEnd = level.layers[level.layers.length - 1].idx;
     const canMoveUp = blockEnd < scene.stack.length - 1;
     const canMoveDown = blockStart > 0;
+    const needsCladding = !!level.needsCladding;
+    // Coplanar groups missing a cladding get a red border + warning row
+    // so the user can see the rule at a glance: every coplanar group
+    // must contain a cladding so its volume fills around the structures
+    // on that level. The user can either change one of the layer's
+    // role to "cladding" (use material="air" for a dry / vacuum cap)
+    // or split the offending layer out of the group.
+    const borderClass = needsCladding ? 'border-red-500/70' : 'border-violet-700/40';
+    const bgStyle     = needsCladding ? { background: 'rgba(220,38,38,0.07)' } : { background: 'rgba(124,58,237,0.05)' };
     return (
-      <div className="rounded border-2 border-violet-700/40 p-1.5" style={{ background: 'rgba(124,58,237,0.05)' }}>
+      <div className={`rounded border-2 p-1.5 ${borderClass}`} style={bgStyle}>
         <div className="flex items-center justify-between gap-2 mb-1.5 px-1">
-          <span className="text-[9px] uppercase tracking-wider text-violet-300 font-semibold">Device level — coplanar</span>
+          <span className="text-[9px] uppercase tracking-wider text-violet-300 font-semibold">Coplanar group</span>
           <span className="text-[9px] text-slate-500 font-mono flex-1">{level.zLabel}</span>
           <button
             onClick={() => moveLevel(1)}
             disabled={!canMoveUp}
             className="text-violet-400 hover:text-violet-200 disabled:opacity-20 text-[10px] px-1"
-            title="Move whole device level up"
+            title="Move whole coplanar group up"
           >▲</button>
           <button
             onClick={() => moveLevel(-1)}
             disabled={!canMoveDown}
             className="text-violet-400 hover:text-violet-200 disabled:opacity-20 text-[10px] px-1"
-            title="Move whole device level down"
+            title="Move whole coplanar group down"
           >▼</button>
         </div>
+        {needsCladding && (
+          <p className="text-[10px] text-red-300 px-1 mb-1.5 leading-snug">
+            Missing cladding: every coplanar group needs a cladding-role layer (use material "air" if you want an open cap) so HFSS has a defined volume around the structures on this level.
+          </p>
+        )}
         <div className="grid grid-cols-1 gap-1.5">
           {level.layers.map(({ layer, idx }) => (
             <LayerCard

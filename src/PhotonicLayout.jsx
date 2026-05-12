@@ -3908,13 +3908,17 @@ export default function App() {
                   </div>
                 </div>
                 <p className="text-[10px] text-slate-500 italic px-1 leading-snug">
-                  Layer stack from bottom to top. Substrate layers are placed below Z=0; the waveguide layer is patterned wherever a waveguide component is defined; the cladding layer fills above. Thickness values are parameters — edit them in PARAMS or here.
+                  Layers stack sequentially from bottom to top — each layer's z-start is the previous layer's z-end. Use the "merge above" toggle on a layer card to make it COPLANAR with the layer above (same z-start, possibly different thicknesses); a coplanar group must contain a cladding so it can fill around its structures.
                 </p>
                 <button
                   onClick={() => updateScene(prev => ({
                     ...prev,
                     stack: [
                       ...prev.stack,
+                      // No coplanarGroup → the new layer sits sequentially
+                      // on top of whatever is currently at the top of the
+                      // stack. The user can opt it into the level below
+                      // via the "merge above" button on the card.
                       { id: `l_${Math.random().toString(36).slice(2, 7)}`, name: 'New layer', thickness: '1', material: 'silicon_dioxide', color: '#94a3b8', role: 'substrate' },
                     ],
                   }))}
@@ -3923,31 +3927,43 @@ export default function App() {
                   <Plus size={11} /> add layer
                 </button>
                 {(() => {
-                  // Group layers into vertically-stacked "levels". Layers with roles
-                  // 'waveguide', 'conductor', or 'cladding' are coplanar (Z=0..h_wg) and
-                  // form one level. Substrates each stand alone (each at its own Z slab).
-                  // Anything else is its own level.
-                  const isDeviceRole = (r) => r === 'waveguide' || r === 'conductor' || r === 'cladding';
-                  const levels = []; // [{ key, layers: [{layer, idx}], zLabel, isDevice }]
-                  let curDeviceLvl = null;
+                  // Group layers into vertically-stacked "levels" using
+                  // the EXPLICIT coplanarGroup id. Contiguous layers
+                  // sharing the same non-empty id form one level; layers
+                  // with no id stand alone. The order in scene.stack is
+                  // preserved within and across levels — sequential is
+                  // the default, coplanar is opt-in.
+                  const levels = [];
+                  let curLevel = null;
                   for (let i = 0; i < scene.stack.length; i++) {
                     const layer = scene.stack[i];
-                    if (isDeviceRole(layer.role)) {
-                      // Add to the most recent adjacent device level, or start a new one
-                      if (curDeviceLvl) {
-                        curDeviceLvl.layers.push({ layer, idx: i });
-                      } else {
-                        curDeviceLvl = {
-                          key: `device_${i}`,
-                          isDevice: true,
-                          layers: [{ layer, idx: i }],
-                          zLabel: 'coplanar',
-                        };
-                        levels.push(curDeviceLvl);
-                      }
+                    const gid = layer.coplanarGroup;
+                    if (gid && curLevel && curLevel.groupId === gid) {
+                      curLevel.layers.push({ layer, idx: i });
+                    } else if (gid) {
+                      curLevel = {
+                        key: gid,
+                        isDevice: true,
+                        groupId: gid,
+                        layers: [{ layer, idx: i }],
+                        zLabel: 'coplanar',
+                      };
+                      levels.push(curLevel);
                     } else {
-                      curDeviceLvl = null; // break the device run
+                      curLevel = null;
                       levels.push({ key: layer.id, isDevice: false, layers: [{ layer, idx: i }], zLabel: null });
+                    }
+                  }
+                  // Coplanar-cladding validation: every multi-member
+                  // coplanar group MUST contain at least one cladding-
+                  // role layer so it can fill around the structures on
+                  // that level (HFSS would otherwise get a void with
+                  // exposed surfaces). Stamp a warning flag on the
+                  // level so LevelGroup can render the hint.
+                  for (const lvl of levels) {
+                    if (lvl.isDevice && lvl.layers.length >= 2) {
+                      const hasCladding = lvl.layers.some(({ layer }) => layer.role === 'cladding');
+                      lvl.needsCladding = !hasCladding;
                     }
                   }
                   // Render top-down: reverse the levels array.
