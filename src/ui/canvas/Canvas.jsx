@@ -843,16 +843,26 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
               };
               if (xOverlap > 0) {
                 const midX = (Math.max(oxMin, dxMin) + Math.min(oxMax, dxMax)) / 2;
-                for (const [dSide, dY] of [['top', dyMax], ['bottom', dyMin]]) {
-                  for (const [tSide, tY] of [['top', oyMax], ['bottom', oyMin]]) {
+                // Each axis exposes both edge candidates and a CENTER
+                // candidate (the mid-line through the bbox center). The
+                // center maps to the C anchor on commit, so snaps like
+                // target.C → dragged.C with dx=offset, dy=0 give an
+                // axis-locked center-line constraint that survives a
+                // parametric sweep on either component's size.
+                const dSidesY = [['top', dyMax], ['bottom', dyMin], ['centerY', proposedCy]];
+                const tSidesY = [['top', oyMax], ['bottom', oyMin], ['centerY', oc.cy]];
+                for (const [dSide, dY] of dSidesY) {
+                  for (const [tSide, tY] of tSidesY) {
                     tryEdge('h', dSide, dY, tSide, tY, midX, tY);
                   }
                 }
               }
               if (yOverlap > 0) {
                 const midY = (Math.max(oyMin, dyMin) + Math.min(oyMax, dyMax)) / 2;
-                for (const [dSide, dX] of [['right', dxMax], ['left', dxMin]]) {
-                  for (const [tSide, tX] of [['right', oxMax], ['left', oxMin]]) {
+                const dSidesX = [['right', dxMax], ['left', dxMin], ['centerX', proposedCx]];
+                const tSidesX = [['right', oxMax], ['left', oxMin], ['centerX', oc.cx]];
+                for (const [dSide, dX] of dSidesX) {
+                  for (const [tSide, tX] of tSidesX) {
                     tryEdge('v', dSide, dX, tSide, tX, tX, midY);
                   }
                 }
@@ -885,11 +895,16 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   edgeVal: best.edgeVal,
                   x: best.x, y: best.y,
                 });
+                // Side → signed half-extent on the locked axis. 'top' /
+                // 'right' add +half, 'bottom' / 'left' add −half, and the
+                // 'center*' aliases sit on the bbox midpoint with no
+                // offset.
+                const dShiftY = (s) => s === 'top' ? dh / 2 : (s === 'bottom' ? -dh / 2 : 0);
+                const dShiftX = (s) => s === 'right' ? dw / 2 : (s === 'left' ? -dw / 2 : 0);
                 if (best.axis === 'h') {
-                  // Snap Y so dragged_side's edge meets target edge.
-                  newCy = best.edgeVal - (best.dSide === 'top' ? dh / 2 : -dh / 2);
+                  newCy = best.edgeVal - dShiftY(best.dSide);
                 } else {
-                  newCx = best.edgeVal - (best.dSide === 'right' ? dw / 2 : -dw / 2);
+                  newCx = best.edgeVal - dShiftX(best.dSide);
                 }
               }
               // Translation applied to every co-mover.
@@ -1144,9 +1159,15 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         targetAnchor  = target.anchor;
         draggedAnchor = target.dAnchor || 'C';
       } else {
-        // Edge alignment: choose the N/S/E/W anchor that lies on the
-        // aligned edge for each side.
+        // Edge alignment: choose the canonical anchor on the aligned
+        // line. Edges map to N / S / E / W; center-lines map to C
+        // (the 2-D bbox center, which lies on both the horizontal and
+        // vertical center lines). With dx (or dy) = the free-axis
+        // offset and the other axis = 0, a C → C snap locks one axis
+        // and frees the other — exactly the center-line behavior we
+        // want.
         const edgeAnchor = (axis, side) => {
+          if (side === 'centerY' || side === 'centerX') return 'C';
           if (axis === 'h') return side === 'top' ? 'N' : 'S';
           return side === 'right' ? 'E' : 'W';
         };
