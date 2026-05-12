@@ -26,7 +26,7 @@ import {
 } from './storage/library-items.js';
 import {
   fsAccessAPIPresent, openHandleDB,
-  getWorkspaceHandle, setWorkspaceHandle,
+  getWorkspaceHandle, setWorkspaceHandle as persistWorkspaceHandle,
   ensureWritePermission, writeBundleToHandle,
 } from './storage/file-handle.js';
 import { HoverTooltip } from './ui/HoverTooltip.jsx';
@@ -653,6 +653,9 @@ export default function App() {
       if (ok) {
         setSaveStatus('saved');
         setLastAutoSavedAt(Date.now());
+        // Mirror the workspace bundle to the linked file (if any) — autosave
+        // takes the same path as a manual save here.
+        mirrorWorkspaceToFileIfLinked();
       } else {
         setSaveStatus('unsaved');
       }
@@ -660,7 +663,7 @@ export default function App() {
     return () => {
       if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     };
-  }, [workspace, scene, history, future, designName, savedList, saveStatus]);
+  }, [workspace, scene, history, future, designName, savedList, saveStatus, mirrorWorkspaceToFileIfLinked]);
 
   // Tick to update "saved Xs ago" label every 5s
   const [tickNow, setTickNow] = useState(Date.now());
@@ -2282,8 +2285,9 @@ export default function App() {
       await alertDialog(`Could not open file picker: ${msg}`, 'Error');
       return;
     }
-    // Persist + write current bundle.
-    await setWorkspaceHandle(workspace, handle);
+    // Persist the handle in IndexedDB (so it survives reloads) and update
+    // the React state for the current session.
+    await persistWorkspaceHandle(workspace, handle);
     setWorkspaceHandle(handle);
     setWorkspaceFileLabel(handle.name || '');
     try {
@@ -2306,7 +2310,7 @@ export default function App() {
       'Unlink workspace file'
     );
     if (!ok) return;
-    await setWorkspaceHandle(workspace, null);
+    await persistWorkspaceHandle(workspace, null);
     setWorkspaceHandle(null);
     setWorkspaceFileLabel('');
   };
@@ -2398,7 +2402,7 @@ export default function App() {
           'Link to imported file'
         );
         if (linkIt) {
-          await setWorkspaceHandle(workspace, pickedHandle);
+          await persistWorkspaceHandle(workspace, pickedHandle);
           setWorkspaceHandle(pickedHandle);
           setWorkspaceFileLabel(pickedHandle.name || file.name || '');
           // Push current bundle to the file so it reflects the merged state.
