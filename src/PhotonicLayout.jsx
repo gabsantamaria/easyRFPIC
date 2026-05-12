@@ -42,6 +42,8 @@ import { Canvas } from './ui/canvas/Canvas.jsx';
 import { DeferredTextInput } from './ui/DeferredTextInput.jsx';
 import { ContextMenu } from './ui/ContextMenu.jsx';
 import { BUILTIN_TEMPLATES } from './templates/index.js';
+import { insertLibraryPayload } from './templates/_library-insert.js';
+import { generateTemplateModuleSource } from './templates/_codify.js';
 
 // =========================================================================
 // PHOTONIC IC LAYOUT TOOL — Phase 1.1
@@ -1816,169 +1818,31 @@ export default function App() {
     const item = await loadLibraryItem(workspace, name);
     if (!item) { await alertDialog('Failed to load library item.', 'Error'); return; }
 
-    updateScene(prev => {
-      const newParams = { ...prev.params };
-      const newComponents = [...prev.components];
-      const newSnaps = [...prev.snaps];
+    updateScene((prev) => insertLibraryPayload(prev, { viewport, paramValues }, item));
+  };
 
-      // Identify which params in the payload are "group-aliased" vs "global".
-      // Aliased params are the ones that appear as VALUES in some group's aliases map.
-      // Global params (e.g., w_wg, cap_gap) are everything else.
-      const aliasedParamNames = new Set();
-      for (const g of (item.groups || [])) {
-        for (const aliasName of Object.values(g.aliases || {})) {
-          aliasedParamNames.add(aliasName);
-        }
-      }
-
-      // Build paramMap with this rule:
-      //   - If the name is GLOBAL and already exists in the destination → reuse existing (no rename)
-      //   - If the name is GLOBAL and doesn't exist → add it (no rename)
-      //   - If the name is ALIASED → always create a fresh, unique alias name
-      //     (so each insertion gets its own group_x_<orig>, group_x_2_<orig>, ...)
-      const paramMap = {};
-      const usedParamNames = new Set(Object.keys(prev.params));
-      for (const pname of Object.keys(item.params || {})) {
-        if (aliasedParamNames.has(pname)) {
-          // Force a unique name for this aliased param
-          let newName = pname;
-          let i = 2;
-          while (usedParamNames.has(newName)) { newName = `${pname}_${i++}`; }
-          usedParamNames.add(newName);
-          paramMap[pname] = newName;
-        } else {
-          // Global: reuse if exists, otherwise add as-is
-          paramMap[pname] = pname;
-          if (!prev.params[pname]) usedParamNames.add(pname);
-        }
-      }
-
-      const idMap = {};
-      const usedCompIds = new Set(prev.components.map(c => c.id));
-      for (const c of item.components) {
-        let newId = c.id;
-        let i = 2;
-        while (usedCompIds.has(newId)) { newId = `${c.id}_${i++}`; }
-        usedCompIds.add(newId);
-        idMap[c.id] = newId;
-      }
-
-      const replaceIn = (expr) => {
-        if (typeof expr !== 'string') return expr;
-        let out = expr;
-        // Sort longer-first to avoid partial replacement
-        const keys = Object.keys(paramMap).filter(k => paramMap[k] !== k).sort((a, b) => b.length - a.length);
-        for (const k of keys) {
-          out = out.replace(new RegExp(`\\b${k}\\b`, 'g'), paramMap[k]);
-        }
-        return out;
-      };
-
-      // Add params: only the renamed (aliased) ones, OR globals that don't already exist.
-      // Don't overwrite an existing global with the payload's copy.
-      for (const [origName, p] of Object.entries(item.params || {})) {
-        const newName = paramMap[origName];
-        if (aliasedParamNames.has(origName)) {
-          // Aliased params: their `expr` typically references a global (e.g., "cap_gap").
-          // Apply replaceIn to handle the (rare) case where expr references something renamed.
-          newParams[newName] = { ...p, expr: replaceIn(p.expr) };
-        } else {
-          // Global param: only add if missing
-          if (!prev.params[newName]) {
-            newParams[newName] = { ...p, expr: replaceIn(p.expr) };
-          }
-        }
-      }
-
-
-      // Compute insertion offset: place around viewport center, offset from existing items
-      const cx0 = viewport.x;
-      const cy0 = viewport.y;
-      // Original bbox of imported item
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      for (const c of item.components) {
-        const w = evalExpr(c.w, paramValues) || 10;
-        const h = evalExpr(c.h, paramValues) || 10;
-        minX = Math.min(minX, c.cx - w / 2);
-        maxX = Math.max(maxX, c.cx + w / 2);
-        minY = Math.min(minY, c.cy - h / 2);
-        maxY = Math.max(maxY, c.cy + h / 2);
-      }
-      const itemCx = (minX + maxX) / 2;
-      const itemCy = (minY + maxY) / 2;
-      const dx = cx0 - itemCx;
-      const dy = cy0 - itemCy;
-
-      for (const c of item.components) {
-        newComponents.push({
-          ...c,
-          id: idMap[c.id],
-          cx: c.cx + dx,
-          cy: c.cy + dy,
-          w: replaceIn(c.w),
-          h: replaceIn(c.h),
-          cutouts: (c.cutouts || []).map(cu => ({
-            ...cu,
-            dx: replaceIn(cu.dx), dy: replaceIn(cu.dy),
-            w: replaceIn(cu.w), h: replaceIn(cu.h),
-          })),
-          // group is replaced with the freshly-renamed group below
-          group: undefined,
-        });
-      }
-      for (const s of (item.snaps || [])) {
-        newSnaps.push({
-          ...s,
-          id: `snap_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-          from: { ...s.from, compId: idMap[s.from.compId] },
-          to: { ...s.to, compId: idMap[s.to.compId] },
-          dx: replaceIn(s.dx),
-          dy: replaceIn(s.dy),
-        });
-      }
-
-      // Rebuild groups with fresh names + remapped member IDs + remapped alias names
-      const newGroups = [...prev.groups];
-      const usedGroupNames = new Set(prev.groups.map(g => g.name));
-      const groupNameMap = {};
-      for (const g of (item.groups || [])) {
-        let gname = g.name;
-        let i = 2;
-        while (usedGroupNames.has(gname)) { gname = `${g.name}_${i++}`; }
-        usedGroupNames.add(gname);
-        groupNameMap[g.name] = gname;
-
-        // Remap aliases. Each alias was a parameter name like `<groupName>_<orig>`.
-        // After paramMap remapping, the new alias name = paramMap[oldAliasName] (which may have changed
-        // for collision avoidance), and the original it points to = paramMap[orig] (the param it aliased).
-        const newAliases = {};
-        for (const [orig, oldAlias] of Object.entries(g.aliases || {})) {
-          const newOrig = paramMap[orig] || orig;
-          const newAlias = paramMap[oldAlias] || oldAlias;
-          newAliases[newOrig] = newAlias;
-        }
-        const newGroup = {
-          id: `group_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 5)}`,
-          name: gname,
-          memberIds: g.memberIds.map(id => idMap[id]).filter(Boolean),
-          aliases: newAliases,
-        };
-        newGroups.push(newGroup);
-        // Stamp components with new group name
-        for (const memberNewId of newGroup.memberIds) {
-          const idx = newComponents.findIndex(c => c.id === memberNewId);
-          if (idx >= 0) newComponents[idx] = { ...newComponents[idx], group: gname };
-        }
-      }
-
-      return {
-        ...prev,
-        params: newParams,
-        components: newComponents,
-        snaps: newSnaps,
-        groups: newGroups,
-      };
+  // "Save as built-in template": generate a JS module from the library
+  // item and trigger a download. The user drops the file under
+  // src/templates/ and adds it to BUILTIN_TEMPLATES (the generated file
+  // includes step-by-step instructions in its header comment).
+  const codifyLibraryItem = async (name) => {
+    const item = await loadLibraryItem(workspace, name);
+    if (!item) { await alertDialog('Failed to load library item.', 'Error'); return; }
+    const { filename, source } = generateTemplateModuleSource({
+      payload: item,
+      name,
     });
+    downloadFile(filename, source, 'application/javascript;charset=utf-8');
+    await alertDialog(
+      `Downloaded ${filename}.\n\n` +
+      `To finish making "${name}" a built-in template:\n` +
+      `  1. Move the file into src/templates/.\n` +
+      `  2. Edit src/templates/index.js — add\n` +
+      `       import myTpl from './${filename}';\n` +
+      `     and append \`myTpl\` to BUILTIN_TEMPLATES.\n\n` +
+      `It'll appear in the Library panel's "Built-in templates" section after the next reload.`,
+      'Codified as template'
+    );
   };
 
   // ----- Library export / import -----
@@ -4099,6 +3963,7 @@ export default function App() {
                         onInsert={() => insertLibraryItem(name)}
                         onArchive={() => archiveLibraryEntry(name)}
                         onRename={(newName) => renameLibraryEntry(name, newName)}
+                        onCodify={() => codifyLibraryItem(name)}
                       />
                     ))}
                   </>

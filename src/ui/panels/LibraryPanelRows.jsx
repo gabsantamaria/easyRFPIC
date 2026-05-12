@@ -5,7 +5,7 @@
 //
 // Extracted from PhotonicLayout.jsx as Stage 4.4 of the planned refactor.
 import React, { useState, useEffect } from 'react';
-import { Package, Pencil, Boxes } from 'lucide-react';
+import { Package, Pencil, Boxes, Download } from 'lucide-react';
 
 export function WorkspaceCreateRow({ currentWorkspace, onSwitch }) {
   const [draft, setDraft] = useState('');
@@ -35,7 +35,7 @@ export function WorkspaceCreateRow({ currentWorkspace, onSwitch }) {
   );
 }
 
-export function LibraryItemRow({ name, onInsert, onArchive, onRename }) {
+export function LibraryItemRow({ name, onInsert, onArchive, onRename, onCodify }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(name);
   useEffect(() => { if (!editing) setDraft(name); }, [name, editing]);
@@ -76,6 +76,15 @@ export function LibraryItemRow({ name, onInsert, onArchive, onRename }) {
       <button onClick={onInsert} className="text-[10px] px-2 py-0.5 rounded bg-cyan-700 hover:bg-cyan-600 text-white" title="Insert into scene">
         insert
       </button>
+      {onCodify && (
+        <button
+          onClick={onCodify}
+          className="text-slate-500 hover:text-violet-400"
+          title="Save as built-in template — download a JS module you can drop in src/templates/"
+        >
+          <Download size={11} />
+        </button>
+      )}
       <button onClick={onArchive} className="text-slate-500 hover:text-amber-400" title="Archive (can be restored later)">
         <Boxes size={11} />
       </button>
