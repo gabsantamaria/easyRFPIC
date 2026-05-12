@@ -2147,25 +2147,6 @@ export default function App() {
     });
   };
 
-  // Save the current scene.stack to the library under a name the user
-  // picks. If a stack already exists under that name, ask before
-  // overwriting. After save we also stamp scene.stackName so subsequent
-  // edits "belong" to the just-saved stack.
-  const saveCurrentStackAs = async () => {
-    const suggested = scene.stackName || 'LTOI600_NbN_EPFL';
-    const name = await promptDialog('Save current stack as:', suggested, 'Save stack');
-    if (!name || !name.trim()) return;
-    const trimmed = name.trim();
-    if (stackList.includes(trimmed)) {
-      const ok = await confirmDialog(`Overwrite existing stack "${trimmed}"?`, 'Overwrite stack');
-      if (!ok) return;
-    }
-    const ok = await saveStack(workspace, trimmed, { name: trimmed, stack: scene.stack });
-    if (!ok) { await alertDialog('Failed to save stack.', 'Error'); return; }
-    updateScene((prev) => ({ ...prev, stackName: trimmed }));
-    await refreshStackList();
-  };
-
   // Delete a named stack from the library. The currently-loaded
   // scene.stack is unaffected — only the library entry vanishes — so
   // the user doesn't lose their working stack if they delete the wrong
@@ -3853,17 +3834,10 @@ export default function App() {
                   <div className="flex items-center gap-1">
                     <button
                       onClick={newStack}
-                      className="text-[10px] px-2 py-0.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white"
+                      className="flex-1 text-[10px] px-2 py-0.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white"
                       title="Create a fresh stack from scratch (seeded with one conductor layer) and add it to the workspace library."
                     >
                       new…
-                    </button>
-                    <button
-                      onClick={saveCurrentStackAs}
-                      className="flex-1 text-[10px] px-2 py-0.5 rounded bg-cyan-700 hover:bg-cyan-600 text-white"
-                      title="Save the current stack to the workspace library under a name."
-                    >
-                      save as…
                     </button>
                     <button
                       onClick={importStackFromFile}
