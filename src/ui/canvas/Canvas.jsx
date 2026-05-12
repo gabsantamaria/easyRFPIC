@@ -89,8 +89,16 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     const booleanComps = allBooleanComps.filter(c => !c.consumedBy);
     const operandIds = new Set();
     const operandToBooleanId = {};
+    const compById0 = Object.fromEntries(scene.components.map(c => [c.id, c]));
     for (const b of allBooleanComps) {
       for (const id of (b.operandIds || [])) {
+        // Only treat an operand as "consumed by a boolean" if it actually
+        // is — i.e., its consumedBy points back at THIS boolean. Punch's
+        // tool operands are intentionally left non-consumed so they keep
+        // rendering as standalone primitives even though they participate
+        // in the boolean's geometry.
+        const opComp = compById0[id];
+        if (!opComp || opComp.consumedBy !== b.id) continue;
         operandIds.add(id);
         operandToBooleanId[id] = b.id;
       }
