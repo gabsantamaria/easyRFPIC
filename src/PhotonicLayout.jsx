@@ -2177,6 +2177,105 @@ export default function App() {
     await refreshStackList();
   };
 
+  // Create a fresh stack from scratch — pick a name, seed with one
+  // conductor layer, save into the library, and switch the scene to
+  // it. Cheaper than "save as" + manually deleting all existing layers
+  // when the user wants a clean slate.
+  const newStack = async () => {
+    const name = await promptDialog('Name for the new stack:', 'new_stack', 'New stack');
+    if (!name || !name.trim()) return;
+    const trimmed = name.trim();
+    if (stackList.includes(trimmed)) {
+      const ok = await confirmDialog(`"${trimmed}" already exists in the library. Overwrite?`, 'Overwrite stack');
+      if (!ok) return;
+    }
+    const seedStack = [
+      { id: `l_cond_${Math.random().toString(36).slice(2, 6)}`, name: 'Conductor', thickness: 'h_cond', material: 'gold', color: '#daa520', role: 'conductor' },
+    ];
+    const ok = await saveStack(workspace, trimmed, { name: trimmed, stack: seedStack });
+    if (!ok) { await alertDialog('Failed to create stack.', 'Error'); return; }
+    await refreshStackList();
+    await switchStack(trimmed);
+  };
+
+  // Download the currently-loaded stack as a JSON file the user can
+  // re-import on another machine / share with collaborators. Format
+  // mirrors the in-storage shape so the importer is a straight passthrough.
+  const exportStackToFile = () => {
+    const payload = {
+      format: 'photonic_layout_stack',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      name: scene.stackName || 'stack',
+      stack: scene.stack,
+    };
+    const safe = (scene.stackName || 'stack').replace(/[^A-Za-z0-9_\-]+/g, '_') || 'stack';
+    downloadFile(`${safe}.json`, JSON.stringify(payload, null, 2), 'application/json;charset=utf-8');
+  };
+
+  // Import a stack from a JSON file picked by the user. Accepts the
+  // exported shape above OR a bare stack array (older or hand-rolled
+  // files). Save into the library, then switch the scene to it.
+  const importStackFromFile = async () => {
+    const pickFile = () => new Promise((resolve) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'application/json,.json';
+      input.onchange = (e) => resolve(e.target.files?.[0] || null);
+      input.click();
+    });
+    let file = null;
+    try {
+      if ('showOpenFilePicker' in window && !fsBlockedAtRuntime) {
+        try {
+          const [h] = await window.showOpenFilePicker({
+            types: [{ description: 'PhotonicLayout stack', accept: { 'application/json': ['.json'] } }],
+            multiple: false,
+          });
+          file = await h.getFile();
+        } catch (e) {
+          if (e?.name === 'AbortError') return;
+          // Cross-origin / sandboxed iframe: fall back to file input.
+          file = await pickFile();
+        }
+      } else {
+        file = await pickFile();
+      }
+      if (!file) return;
+      const text = await file.text();
+      let parsed;
+      try { parsed = JSON.parse(text); }
+      catch (e) { await alertDialog(`File is not valid JSON: ${e.message}`, 'Import failed'); return; }
+      // Normalize: { format, name, stack } or bare [layers].
+      const rawStack = Array.isArray(parsed) ? parsed : parsed?.stack;
+      const rawName = Array.isArray(parsed) ? (file.name.replace(/\.json$/i, '') || 'imported_stack') : (parsed?.name || file.name.replace(/\.json$/i, '') || 'imported_stack');
+      if (!Array.isArray(rawStack) || rawStack.length === 0) {
+        await alertDialog('No stack layers found in the file.', 'Import failed');
+        return;
+      }
+      // Disambiguate name if it already exists in the library.
+      let finalName = rawName;
+      if (stackList.includes(finalName)) {
+        const ok = await confirmDialog(
+          `A stack named "${finalName}" already exists. Overwrite, or cancel to skip?`,
+          'Overwrite stack'
+        );
+        if (!ok) {
+          // Auto-disambiguate with a numeric suffix
+          let i = 2;
+          while (stackList.includes(`${rawName}_${i}`)) i++;
+          finalName = `${rawName}_${i}`;
+        }
+      }
+      const ok = await saveStack(workspace, finalName, { name: finalName, stack: rawStack });
+      if (!ok) { await alertDialog('Failed to save imported stack.', 'Error'); return; }
+      await refreshStackList();
+      await switchStack(finalName);
+    } catch (e) {
+      await alertDialog(`Import failed: ${e.message}`, 'Error');
+    }
+  };
+
   // Archive a library item: move it from the active prefix to the archive prefix.
   const archiveLibraryEntry = async (name) => {
     const item = await loadLibraryItem(workspace, name);
@@ -3753,17 +3852,38 @@ export default function App() {
                   </div>
                   <div className="flex items-center gap-1">
                     <button
+                      onClick={newStack}
+                      className="text-[10px] px-2 py-0.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white"
+                      title="Create a fresh stack from scratch (seeded with one conductor layer) and add it to the workspace library."
+                    >
+                      new…
+                    </button>
+                    <button
                       onClick={saveCurrentStackAs}
                       className="flex-1 text-[10px] px-2 py-0.5 rounded bg-cyan-700 hover:bg-cyan-600 text-white"
-                      title="Save the current stack to the library under a name. Stacks are stored per workspace."
+                      title="Save the current stack to the workspace library under a name."
                     >
                       save as…
+                    </button>
+                    <button
+                      onClick={importStackFromFile}
+                      className="text-[10px] px-2 py-0.5 rounded border border-slate-600 hover:border-cyan-400 hover:text-cyan-300 text-slate-300"
+                      title="Import a stack from a JSON file (will be added to this workspace's library and switched to)."
+                    >
+                      import…
+                    </button>
+                    <button
+                      onClick={exportStackToFile}
+                      className="text-[10px] px-2 py-0.5 rounded border border-slate-600 hover:border-cyan-400 hover:text-cyan-300 text-slate-300"
+                      title="Download the current stack as a JSON file."
+                    >
+                      export
                     </button>
                     <button
                       onClick={() => deleteStackEntry(scene.stackName)}
                       disabled={!stackList.includes(scene.stackName)}
                       className="text-[10px] px-2 py-0.5 rounded border border-slate-600 hover:border-red-400 hover:text-red-300 text-slate-300 disabled:opacity-30 disabled:cursor-not-allowed"
-                      title="Remove the currently-loaded stack from the library. The working stack in the scene is kept."
+                      title="Remove the currently-loaded stack from the workspace library. The working stack in the scene is kept."
                     >
                       delete
                     </button>
