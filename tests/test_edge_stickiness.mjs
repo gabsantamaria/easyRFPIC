@@ -74,7 +74,7 @@ function computeBest({ targetCx, targetCy, ow, oh, proposedCx, proposedCy, dw, d
   // Stickiness override (index-paired natural alignments only).
   if (best && best.kind === 'edge') {
     const freeAxisLen = best.axis === 'h' ? ow : oh;
-    const STICKY = Math.max(worldThresh, freeAxisLen * 0.05);
+    const STICKY = Math.max(worldThresh, freeAxisLen * 0.03);
     const edgeAnchorMap = {
       h: { top: ['NW','N','NE'], bottom: ['SW','S','SE'], centerY: ['W','C','E'] },
       v: { left: ['NW','W','SW'], right: ['NE','E','SE'], centerX: ['N','C','S'] },
