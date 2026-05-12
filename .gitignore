@@ -15,6 +15,9 @@ dist-ssr
 # Generated test outputs
 tests/out/
 
+# Claude Code session metadata and worktrees
+.claude/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
