@@ -65,7 +65,11 @@ export function resolveParams(params, extraValues = null) {
         for (const fn of MATH_FNS) {
           s = s.replace(new RegExp(`\\b${fn}\\s*\\(`, 'g'), `Math.${fn}(`);
         }
-        s = s.replace(/\bpi\b/g, 'Math.PI').replace(/\bPI\b/g, 'Math.PI');
+        // Single-pass replacement: chaining two .replace() calls would
+        // let the second match the `PI` inside the `Math.PI` produced by
+        // the first, turning `pi` into `Math.Math.PI` (which evaluates
+        // to undefined). One regex with alternation is collision-proof.
+        s = s.replace(/\b(?:pi|PI)\b/g, 'Math.PI');
         if (!/^[\d\s+\-*/.()A-Za-z,]+$/.test(s) && s.trim() !== '') {
           errors[name] = `Unresolved or invalid: ${s}`;
           remaining.delete(name);
@@ -122,7 +126,10 @@ export function evalExpr(expr, paramValues) {
     for (const fn of MATH_FNS) {
       s = s.replace(new RegExp(`\\b${fn}\\s*\\(`, 'g'), `Math.${fn}(`);
     }
-    s = s.replace(/\bpi\b/g, 'Math.PI').replace(/\bPI\b/g, 'Math.PI');
+    // See note above the same line in resolveParams: chained .replace()
+    // would let the second match the `PI` inside the `Math.PI` produced
+    // by the first, garbling `pi` to `Math.Math.PI`.
+    s = s.replace(/\b(?:pi|PI)\b/g, 'Math.PI');
     if (!/^[\d\s+\-*/.()A-Za-z,]+$/.test(s)) return 0;
     // eslint-disable-next-line no-new-func
     const v = Function(`"use strict"; return (${s})`)();
