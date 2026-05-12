@@ -1,9 +1,14 @@
-// EXPERIMENTAL ± 50 % parameter tuner.
+// EXPERIMENTAL multiplicative parameter tuner.
 //
 // One slider per parameter row. Live-drives the parameter's expression
-// while you drag, in ± 50 % of whatever the resolved numeric value was
-// at the start of the drag. Releasing snaps the thumb back to center
-// and re-anchors the next ± 50 % range to the (just-tuned) value.
+// while you drag, in [1/RANGE_FACTOR, RANGE_FACTOR] times whatever the
+// resolved numeric value was at the start of the drag. The slider is
+// log-spaced so the center is exactly ×1, both ends are equidistant in
+// log space, and the slope is continuous through the middle.
+//
+// Releasing snaps the thumb back to center and re-anchors the range
+// to the (just-tuned) value. Escape during a drag rolls the value back
+// to the pre-drag nominal.
 //
 // Caveat: tuning replaces the parameter's expression with a numeric
 // literal. If the original expression referenced other parameters
@@ -16,10 +21,12 @@
 //      line and the single `<ParamTuner ... />` JSX render.
 import React, { useState, useRef } from 'react';
 
-const RANGE_PERCENT = 50;
+// Multiplier at the slider's right end. Left end is 1/RANGE_FACTOR.
+// 1.5 → [0.667×, 1.5×]; 2 → [0.5×, 2×]; etc.
+const RANGE_FACTOR = 1.5;
 
 export function ParamTuner({ value, onUpdateExpr }) {
-  // Slider position in percent, range [-RANGE_PERCENT, +RANGE_PERCENT].
+  // Slider position in [-1, +1]; multiplier = RANGE_FACTOR ** pos.
   // Returns to 0 on release so the next drag is anchored to the new value.
   const [pos, setPos] = useState(0);
   // The value at the START of the current drag — the anchor for the ±
@@ -54,7 +61,7 @@ export function ParamTuner({ value, onUpdateExpr }) {
     setPos(next);
     const nominal = nominalRef.current;
     if (!Number.isFinite(nominal)) return;
-    const tuned = nominal * (1 + next / 100);
+    const tuned = nominal * Math.pow(RANGE_FACTOR, next);
     // Commit as a numeric literal. The deferred-text-input pattern
     // elsewhere is bypassed here because the whole point of a slider is
     // live continuous feedback.
@@ -89,16 +96,17 @@ export function ParamTuner({ value, onUpdateExpr }) {
     e.currentTarget.blur();
   };
 
-  const tooltip = `Tune ±${RANGE_PERCENT}% from ${Number.isFinite(value) ? value.toFixed(3) : '?'}. Releasing re-anchors the range to the new value; Escape cancels and reverts.`;
+  const multiplier = Math.pow(RANGE_FACTOR, pos);
+  const tooltip = `Tune ×${(1 / RANGE_FACTOR).toFixed(2)} to ×${RANGE_FACTOR.toFixed(2)} from ${Number.isFinite(value) ? value.toFixed(3) : '?'}. Releasing re-anchors the range to the new value; Escape cancels and reverts.`;
 
   return (
     <div className="flex items-center px-1.5 pb-0.5">
       <input
         ref={inputRef}
         type="range"
-        min={-RANGE_PERCENT}
-        max={RANGE_PERCENT}
-        step={0.1}
+        min={-1}
+        max={1}
+        step={0.005}
         value={pos}
         onPointerDown={onPointerDown}
         onChange={onChange}
@@ -111,8 +119,8 @@ export function ParamTuner({ value, onUpdateExpr }) {
       />
       {/* Readout only while tuning, so the row stays calm at rest. */}
       {pos !== 0 && (
-        <span className="ml-1 text-[8px] font-mono text-slate-400 w-9 text-right tabular-nums">
-          {pos > 0 ? '+' : ''}{pos.toFixed(1)}%
+        <span className="ml-1 text-[8px] font-mono text-slate-400 w-10 text-right tabular-nums">
+          ×{multiplier.toFixed(2)}
         </span>
       )}
     </div>
