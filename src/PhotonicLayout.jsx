@@ -690,11 +690,11 @@ export default function App() {
         } else {
           createGroupRef.current && createGroupRef.current();
         }
-      } else if (e.key === '+' || e.key === '-') {
-        // Boolean shortcuts: union (+) / subtract (-) act on the current
-        // selection. Skip when typing in any input so users can enter
-        // expressions like "x + y" or negative numbers without triggering
-        // a boolean op.
+      } else if (e.key === '+' || e.key === '-' || e.key === '*') {
+        // Boolean shortcuts: union (+), subtract (-), punch (*) act on
+        // the current selection. Skip when typing in any input so users
+        // can enter expressions like "x + y" or negative numbers without
+        // triggering a boolean op.
         const tag = e.target?.tagName;
         if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target?.isContentEditable) return;
         // No modifier keys (avoid clashing with browser zoom on Cmd/Ctrl +/-).
@@ -708,6 +708,7 @@ export default function App() {
         if (selectedIds.size < 2) return;
         e.preventDefault();
         if (e.key === '+') fn('union');
+        else if (e.key === '*') fn('punch');
         else fn('subtract');
       }
     };
@@ -3152,11 +3153,71 @@ export default function App() {
     let n = 1;
     while (scene.components.some(c => c.id === `${prefix}${n}`)) n++;
     const newId = `${prefix}${n}`;
+    // For 'punch' we mirror HFSS's "Subtract with clone tool object
+    // before operation" workflow: clone each tool to a hidden internal
+    // primitive at the tool's current position, then run the subtract
+    // on the BASE and the CLONES. The clones get consumedBy=punch so
+    // they're hidden from SHAPES + standalone rendering; the original
+    // tools stay untouched in scene.components as fully independent
+    // shapes (visible, selectable, snap targets, exportable as their
+    // own primitives). Effect: a hole is cut into the base in the shape
+    // of the tool at creation time. Moving the original tool afterward
+    // does NOT move the hole — the hole is baked into the clone,
+    // exactly like in HFSS.
+    const isPunch = op === 'punch';
+    const usedNames = new Set(scene.components.map(c => c.id));
+    const freshCloneId = (baseTool) => {
+      let i = 1;
+      let candidate = `${baseTool.id}_clone${i}`;
+      while (usedNames.has(candidate)) {
+        i++;
+        candidate = `${baseTool.id}_clone${i}`;
+      }
+      usedNames.add(candidate);
+      return candidate;
+    };
+    let derivedOperandIds = ids;
+    const clonesToAdd = [];
+    if (isPunch) {
+      // First operand is the base (consumed). Each subsequent operand
+      // gets cloned; the clone takes the operand slot, the original
+      // stays standalone.
+      derivedOperandIds = [ids[0]];
+      for (const toolId of ids.slice(1)) {
+        const tool = scene.components.find(c => c.id === toolId);
+        if (!tool) continue;
+        const cloneId = freshCloneId(tool);
+        const cloneCx = solvedNow.find(cc => cc.id === toolId)?.cx ?? tool.cx;
+        const cloneCy = solvedNow.find(cc => cc.id === toolId)?.cy ?? tool.cy;
+        // Strip snap-chain participation: a clone is a standalone copy.
+        // Keep shape-specific fields (r, rx, ry, n, R, L_straight, p,
+        // wgWidth) so non-rect tools clone correctly.
+        const { id: _omitId, consumedBy: _omitC, ...toolBody } = tool;
+        const clone = {
+          ...toolBody,
+          id: cloneId,
+          cx: cloneCx,
+          cy: cloneCy,
+          // Mark the clone as consumed by the new punch boolean. It
+          // becomes part of the boolean's history sub-tree and never
+          // renders as a top-level primitive on its own.
+          consumedBy: newId,
+          // Tag the clone so deleteBoolean can clean it up rather than
+          // re-surface it as a top-level orphan.
+          cloneOf: toolId,
+          // Clones start with no transforms — the user's transforms on
+          // the original tool aren't retroactively baked in.
+          transforms: [],
+        };
+        clonesToAdd.push(clone);
+        derivedOperandIds.push(cloneId);
+      }
+    }
     const derived = {
       id: newId,
       kind: 'boolean',
       op,
-      operandIds: ids,
+      operandIds: derivedOperandIds,
       layer,
       cx, cy,
       // Width/height aren't independent here — they're derived from the
@@ -3169,11 +3230,6 @@ export default function App() {
       label: '',
       ...(conductorLayerId ? { conductorLayerId } : {}),
     };
-    // For 'punch' (subtract-keep): only the BASE operand gets consumedBy.
-    // Tools stay independent so they remain visible, selectable, and
-    // exportable as their own primitives — mirrors HFSS Subtract with
-    // KeepOriginals=True. For every other op, all operands are consumed.
-    const consumesAllOperands = op !== 'punch';
     updateScene(prev => ({
       ...prev,
       components: [
@@ -3181,12 +3237,14 @@ export default function App() {
         // snap targets, and standalone rendering. They still live in
         // scene.components so their cx/cy/w/h/transforms remain editable
         // through the boolean's history sub-section.
+        // For 'punch' only the BASE (operandIds[0]) is consumed from the
+        // existing components; the tools were cloned, not consumed.
         ...prev.components.map(c => {
           if (!ids.includes(c.id)) return c;
-          // Punch: consume only the base (first operand).
-          if (!consumesAllOperands && c.id !== ids[0]) return c;
+          if (isPunch && c.id !== ids[0]) return c;
           return { ...c, consumedBy: newId };
         }),
+        ...clonesToAdd,
         derived,
       ],
     }));
@@ -3200,12 +3258,16 @@ export default function App() {
 
   // Delete a boolean component. Its operands get released (consumedBy
   // cleared) so they return to the standalone SHAPES list. The boolean
-  // entry itself is removed.
+  // entry itself is removed. For 'punch' the internal tool clones (tagged
+  // with cloneOf) are DROPPED entirely rather than released — they were
+  // synthetic primitives created by the punch and have no meaning outside
+  // it; releasing them would surface a duplicate of the original tool.
   const deleteBoolean = (id) => {
     updateScene(prev => ({
       ...prev,
       components: prev.components
         .filter(c => c.id !== id)
+        .filter(c => !(c.consumedBy === id && c.cloneOf))
         .map(c => c.consumedBy === id ? { ...c, consumedBy: undefined } : c),
     }));
   };
