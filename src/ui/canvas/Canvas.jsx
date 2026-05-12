@@ -489,7 +489,29 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
 
     // Component click
     if (target.dataset?.compId) {
-      const id = target.dataset.compId;
+      let id = target.dataset.compId;
+
+      // Click-through for stacked overlap. The two-pass renderer
+      // promotes the currently-selected component to the top so its
+      // halo / handles stay visible — but that also makes it intercept
+      // clicks that would otherwise hit a smaller, unselected component
+      // sitting underneath. When the topmost SVG hit is already in our
+      // selection, walk the document's element stack at the cursor and
+      // prefer the first element under it that points at a different,
+      // unselected component. That lets you build a multi-selection in
+      // the natural visual order (e.g. large, then small for a subtract)
+      // even when the small one is fully covered by the large one's bbox.
+      if (selectedIds.has(id) && typeof document !== 'undefined' && typeof document.elementsFromPoint === 'function') {
+        const stack = document.elementsFromPoint(e.clientX, e.clientY);
+        for (const el of stack) {
+          const cid = el?.dataset?.compId;
+          if (cid && cid !== id && !selectedIds.has(cid)) {
+            id = cid;
+            break;
+          }
+        }
+      }
+
       const wp = screenToWorld(e.clientX, e.clientY);
 
       // Cmd/Ctrl-click: toggle in selection (no drag)
