@@ -14,6 +14,7 @@
 import React from 'react';
 import { Move, RotateCw, Repeat, Trash2, Eye, EyeOff, ArrowUp, ArrowDown } from 'lucide-react';
 import { evalExpr } from '../../scene/params.js';
+import { DeferredTextInput } from '../DeferredTextInput.jsx';
 
 function TransformRow({
   transform, idx, total,
@@ -28,11 +29,12 @@ function TransformRow({
   const ExprField = ({ label, value, onChange, fieldKey }) => (
     <div className="flex-1 min-w-0">
       <label className="text-[9px] uppercase tracking-wider text-slate-500">{label}</label>
-      <input
+      <DeferredTextInput
         value={value ?? ''}
-        onChange={(e) => onChange(e.target.value)}
-        onBlur={(e) => commitExpr && commitExpr(e.target.value, '0', 'µm', `Auto-created (transform.${fieldKey})`)}
-        onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+        onCommit={(v) => {
+          onChange(v);
+          commitExpr && commitExpr(v, '0', 'µm', `Auto-created (transform.${fieldKey})`);
+        }}
         className="w-full bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-[11px] font-mono text-white outline-none focus:border-cyan-400"
         spellCheck={false}
       />

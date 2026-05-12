@@ -14,6 +14,7 @@
 import React from 'react';
 import { Trash2 } from 'lucide-react';
 import { evalExpr } from '../../scene/params.js';
+import { DeferredTextInput } from '../DeferredTextInput.jsx';
 
 export function LayerCard({ layer, idx, scene, paramValues, updateScene, commitExpr, compact }) {
   const updateLayer = (patch) => updateScene(prev => ({
@@ -72,11 +73,12 @@ export function LayerCard({ layer, idx, scene, paramValues, updateScene, commitE
         </div>
         <div className="flex items-center gap-1">
           <label className="text-[9px] text-slate-500 w-16">thickness</label>
-          <input
+          <DeferredTextInput
             value={layer.thickness}
-            onChange={(e) => updateLayer({ thickness: e.target.value })}
-            onBlur={(e) => commitExpr(e.target.value, '1', 'µm', `Auto-created (layer ${layer.name} thickness)`)}
-            onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+            onCommit={(v) => {
+              updateLayer({ thickness: v });
+              commitExpr(v, '1', 'µm', `Auto-created (layer ${layer.name} thickness)`);
+            }}
             placeholder="expr (e.g. 4.7 or h_sio2)"
             className="flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-cyan-300 outline-none focus:border-cyan-400"
             spellCheck={false}
@@ -125,11 +127,12 @@ export function LayerCard({ layer, idx, scene, paramValues, updateScene, commitE
                     {ref === 'top' ? '↑top' : '↓bot'}
                   </button>
                 </label>
-                <input
+                <DeferredTextInput
                   value={layer.core_width || ''}
-                  onChange={(e) => updateLayer({ core_width: e.target.value })}
-                  onBlur={(e) => commitExpr(e.target.value, '1', 'µm', `Auto-created (layer ${layer.name} core_width)`)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+                  onCommit={(v) => {
+                    updateLayer({ core_width: v });
+                    commitExpr(v, '1', 'µm', `Auto-created (layer ${layer.name} core_width)`);
+                  }}
                   placeholder={`rib ${ref} width`}
                   className="flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-cyan-300 outline-none focus:border-cyan-400"
                   spellCheck={false}
@@ -140,11 +143,12 @@ export function LayerCard({ layer, idx, scene, paramValues, updateScene, commitE
               </div>
               <div className="flex items-center gap-1">
                 <label className="text-[9px] text-slate-500 w-16">slab h</label>
-                <input
+                <DeferredTextInput
                   value={layer.slab_height || ''}
-                  onChange={(e) => updateLayer({ slab_height: e.target.value })}
-                  onBlur={(e) => commitExpr(e.target.value, '0.1', 'µm', `Auto-created (layer ${layer.name} slab_height)`)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+                  onCommit={(v) => {
+                    updateLayer({ slab_height: v });
+                    commitExpr(v, '0.1', 'µm', `Auto-created (layer ${layer.name} slab_height)`);
+                  }}
                   placeholder="unetched slab height"
                   className="flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-cyan-300 outline-none focus:border-cyan-400"
                   spellCheck={false}
@@ -155,11 +159,12 @@ export function LayerCard({ layer, idx, scene, paramValues, updateScene, commitE
               </div>
               <div className="flex items-center gap-1">
                 <label className="text-[9px] text-slate-500 w-16">slab w</label>
-                <input
+                <DeferredTextInput
                   value={layer.slab_width || ''}
-                  onChange={(e) => updateLayer({ slab_width: e.target.value })}
-                  onBlur={(e) => commitExpr(e.target.value, '5', 'µm', `Auto-created (layer ${layer.name} slab_width)`)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+                  onCommit={(v) => {
+                    updateLayer({ slab_width: v });
+                    commitExpr(v, '5', 'µm', `Auto-created (layer ${layer.name} slab_width)`);
+                  }}
                   placeholder="slab width around rib"
                   className="flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-cyan-300 outline-none focus:border-cyan-400"
                   spellCheck={false}
@@ -170,11 +175,12 @@ export function LayerCard({ layer, idx, scene, paramValues, updateScene, commitE
               </div>
               <div className="flex items-center gap-1">
                 <label className="text-[9px] text-slate-500 w-16">etch ang</label>
-                <input
+                <DeferredTextInput
                   value={layer.etch_angle || ''}
-                  onChange={(e) => updateLayer({ etch_angle: e.target.value })}
-                  onBlur={(e) => commitExpr(e.target.value, '70', 'deg', `Auto-created (layer ${layer.name} etch_angle)`)}
-                  onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+                  onCommit={(v) => {
+                    updateLayer({ etch_angle: v });
+                    commitExpr(v, '70', 'deg', `Auto-created (layer ${layer.name} etch_angle)`);
+                  }}
                   placeholder="degrees from horizontal"
                   className="flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-cyan-300 outline-none focus:border-cyan-400"
                   spellCheck={false}

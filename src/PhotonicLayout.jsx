@@ -39,6 +39,7 @@ import { TransformChainEditor } from './ui/panels/TransformChainEditor.jsx';
 import { GroupTreeItem } from './ui/panels/GroupTreeItem.jsx';
 import { LayerCard, LevelGroup } from './ui/panels/LayersPanel.jsx';
 import { Canvas } from './ui/canvas/Canvas.jsx';
+import { DeferredTextInput } from './ui/DeferredTextInput.jsx';
 
 // =========================================================================
 // PHOTONIC IC LAYOUT TOOL — Phase 1.1
@@ -3955,11 +3956,11 @@ export default function App() {
                     <div className="grid grid-cols-2 gap-1 mt-1">
                       <div>
                         <label className="text-[9px] text-slate-500">dx</label>
-                        <input value={s.dx} onChange={(e) => updateSnap(s.id, { dx: e.target.value })} className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-white outline-none focus:border-cyan-400" />
+                        <DeferredTextInput value={s.dx} onCommit={(v) => updateSnap(s.id, { dx: v })} className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-white outline-none focus:border-cyan-400" />
                       </div>
                       <div>
                         <label className="text-[9px] text-slate-500">dy</label>
-                        <input value={s.dy} onChange={(e) => updateSnap(s.id, { dy: e.target.value })} className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-white outline-none focus:border-cyan-400" />
+                        <DeferredTextInput value={s.dy} onCommit={(v) => updateSnap(s.id, { dy: v })} className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-white outline-none focus:border-cyan-400" />
                       </div>
                     </div>
                   </div>
@@ -4200,8 +4201,7 @@ export default function App() {
               <div className="space-y-3">
                 <div>
                   <label className="text-[10px] uppercase tracking-wider text-slate-500">ID</label>
-                  <input value={selected.id} onChange={(e) => {
-                    const newId = e.target.value;
+                  <DeferredTextInput value={selected.id} onCommit={(newId) => {
                     if (!newId || scene.components.some(c => c.id === newId && c.id !== selected.id)) return;
                     updateScene(prev => ({
                       ...prev,
@@ -4258,11 +4258,12 @@ export default function App() {
                     const fieldRow = (key, label, value, onChange, parse = null) => (
                       <div>
                         <label className="text-[10px] uppercase tracking-wider text-slate-500">{label}</label>
-                        <input
+                        <DeferredTextInput
                           value={value}
-                          onChange={(e) => onChange(e.target.value)}
-                          onBlur={(e) => commitExpr(e.target.value, '1', 'µm', `Auto-created (${selected.id}.${key})`)}
-                          onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+                          onCommit={(v) => {
+                            onChange(v);
+                            commitExpr(v, '1', 'µm', `Auto-created (${selected.id}.${key})`);
+                          }}
                           className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-white outline-none focus:border-cyan-400"
                         />
                         <p className="text-[9px] text-slate-500 mt-0.5 font-mono">= {(() => {
@@ -4321,11 +4322,11 @@ export default function App() {
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="text-[10px] uppercase tracking-wider text-slate-500">cx ({selectedHasIncoming ? 'solved' : 'free'})</label>
-                    <input type="number" step="0.5" value={selected.cx?.toFixed?.(2) ?? selected.cx} disabled={selectedHasIncoming} onChange={(e) => updateComp(selected.id, { cx: parseFloat(e.target.value) || 0 })} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-white outline-none focus:border-cyan-400 disabled:opacity-50" />
+                    <DeferredTextInput type="number" step="0.5" numeric value={selected.cx?.toFixed?.(2) ?? selected.cx} disabled={selectedHasIncoming} onCommit={(v) => updateComp(selected.id, { cx: v })} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-white outline-none focus:border-cyan-400 disabled:opacity-50" />
                   </div>
                   <div>
                     <label className="text-[10px] uppercase tracking-wider text-slate-500">cy ({selectedHasIncoming ? 'solved' : 'free'})</label>
-                    <input type="number" step="0.5" value={selected.cy?.toFixed?.(2) ?? selected.cy} disabled={selectedHasIncoming} onChange={(e) => updateComp(selected.id, { cy: parseFloat(e.target.value) || 0 })} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-white outline-none focus:border-cyan-400 disabled:opacity-50" />
+                    <DeferredTextInput type="number" step="0.5" numeric value={selected.cy?.toFixed?.(2) ?? selected.cy} disabled={selectedHasIncoming} onCommit={(v) => updateComp(selected.id, { cy: v })} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-white outline-none focus:border-cyan-400 disabled:opacity-50" />
                   </div>
                 </div>
 

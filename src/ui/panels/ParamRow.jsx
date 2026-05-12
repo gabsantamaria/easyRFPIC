@@ -16,9 +16,19 @@ export function ParamRow({ name, p, onRename, onUpdateExpr, onCommitExpr, onUpda
   const [editingName, setEditingName] = useState(name);
   const [expanded, setExpanded] = useState(false);
   const [exprFocused, setExprFocused] = useState(false);
+  // Local draft for the expression — see notes on the textarea below.
+  // While the textarea is focused, every keystroke updates this draft only;
+  // the scene-level expression is left alone until the user commits via
+  // Enter or blur. Geometry therefore doesn't re-solve on every keystroke.
+  const [exprDraft, setExprDraft] = useState(p.expr ?? '');
   const inputRef = useRef(null);
   const exprTextareaRef = useRef(null);
   useEffect(() => { setEditingName(name); }, [name]);
+  // Keep the draft in sync with props when the textarea isn't focused, so
+  // sibling edits / undo-redo / programmatic changes flow through.
+  useEffect(() => {
+    if (!exprFocused) setExprDraft(p.expr ?? '');
+  }, [p.expr, exprFocused]);
   useEffect(() => {
     if (autoFocus && inputRef.current) {
       inputRef.current.focus();
@@ -28,12 +38,20 @@ export function ParamRow({ name, p, onRename, onUpdateExpr, onCommitExpr, onUpda
   }, [autoFocus, onAutoFocusDone]);
   // Auto-grow the expression textarea while it's focused so the user can see
   // the full expression. Resets to single-line height when unfocused.
+  // Tracks the draft (not p.expr) so the height keeps up with what the user
+  // is currently typing, even though p.expr only changes at commit time.
   useEffect(() => {
     const el = exprTextareaRef.current;
     if (!el || !exprFocused) return;
     el.style.height = 'auto';
     el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
-  }, [exprFocused, p.expr]);
+  }, [exprFocused, exprDraft]);
+
+  const commitExprDraft = () => {
+    if (exprDraft !== (p.expr ?? '')) onUpdateExpr(exprDraft);
+    onCommitExpr?.(exprDraft);
+    setExprFocused(false);
+  };
 
   // Visual treatment when this parameter is involved in the selected
   // component's definition: cyan border + faint cyan tint, so the row
@@ -82,14 +100,15 @@ export function ParamRow({ name, p, onRename, onUpdateExpr, onCommitExpr, onUpda
           <div className="flex-1 min-w-0 relative">
             <textarea
               ref={exprTextareaRef}
-              value={p.expr}
+              value={exprDraft}
               autoFocus
-              onChange={(e) => onUpdateExpr(e.target.value)}
-              onBlur={(e) => { onCommitExpr && onCommitExpr(e.target.value); setExprFocused(false); }}
+              onChange={(e) => setExprDraft(e.target.value)}
+              onBlur={commitExprDraft}
               onKeyDown={(e) => {
                 // Enter commits and exits (unless Shift held — newline).
                 if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.target.blur(); }
-                if (e.key === 'Escape') { e.target.blur(); }
+                // Escape reverts the draft and exits without committing.
+                if (e.key === 'Escape') { setExprDraft(p.expr ?? ''); e.target.blur(); }
               }}
               className={`w-full bg-slate-900 border rounded px-1.5 py-1 text-[11px] font-mono outline-none resize-none whitespace-pre-wrap break-words ${error ? 'border-red-500 text-red-300' : 'border-cyan-400 text-white'}`}
               spellCheck={false}
