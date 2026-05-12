@@ -1,9 +1,9 @@
-// EXPERIMENTAL ± 20 % parameter tuner.
+// EXPERIMENTAL ± 50 % parameter tuner.
 //
 // One slider per parameter row. Live-drives the parameter's expression
-// while you drag, in ± 20 % of whatever the resolved numeric value was
+// while you drag, in ± 50 % of whatever the resolved numeric value was
 // at the start of the drag. Releasing snaps the thumb back to center
-// and re-anchors the next ± 20 % range to the (just-tuned) value.
+// and re-anchors the next ± 50 % range to the (just-tuned) value.
 //
 // Caveat: tuning replaces the parameter's expression with a numeric
 // literal. If the original expression referenced other parameters
@@ -16,21 +16,23 @@
 //      line and the single `<ParamTuner ... />` JSX render.
 import React, { useState, useRef } from 'react';
 
+const RANGE_PERCENT = 50;
+
 export function ParamTuner({ value, onUpdateExpr }) {
-  // Slider position in percent, range [-20, 20]. Always returns to 0 on
-  // release so the next drag is anchored to the current value.
+  // Slider position in percent, range [-RANGE_PERCENT, +RANGE_PERCENT].
+  // Returns to 0 on release so the next drag is anchored to the new value.
   const [pos, setPos] = useState(0);
-  // The value at the START of the current drag — the anchor for ± 20 %.
-  // Captured on pointerdown, not on each render, so partial drags compound
-  // sensibly (the user sees ± 20 % of the value they're staring at, not of
-  // some stale snapshot).
+  // The value at the START of the current drag — the anchor for the ±
+  // range. Captured on pointerdown so partial drags compound sensibly
+  // (the user sees ± of the value they're staring at, not of some stale
+  // snapshot).
   const nominalRef = useRef(0);
 
   const onPointerDown = (e) => {
     nominalRef.current = Number.isFinite(value) ? value : 0;
-    // Pointer capture: subsequent pointermove/up events are routed to the
-    // slider even if the cursor leaves the element. Without this, dragging
-    // fast off the slider strands `pos` at a non-zero value.
+    // Pointer capture: subsequent pointermove/up events are routed here
+    // even if the cursor leaves the element. Without this, fast drags
+    // can strand `pos` at a non-zero value when the cursor exits.
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
   };
 
@@ -48,29 +50,30 @@ export function ParamTuner({ value, onUpdateExpr }) {
 
   const reset = () => { if (pos !== 0) setPos(0); };
 
-  const label = (pos === 0)
-    ? '0%'
-    : `${pos > 0 ? '+' : ''}${pos.toFixed(1)}%`;
-  const tooltip = `Tune ±20% from ${Number.isFinite(value) ? value.toFixed(3) : '?'}. Releasing snaps back to center and re-anchors the range.`;
+  const tooltip = `Tune ±${RANGE_PERCENT}% from ${Number.isFinite(value) ? value.toFixed(3) : '?'}. Releasing re-anchors the range to the new value.`;
 
   return (
-    <div className="flex items-center gap-1 px-1.5 pb-1 pt-0">
-      <span className="text-[8px] text-slate-600 uppercase tracking-wider w-8" title={tooltip}>tune</span>
+    <div className="flex items-center px-1.5 pb-0.5">
       <input
         type="range"
-        min={-20}
-        max={20}
+        min={-RANGE_PERCENT}
+        max={RANGE_PERCENT}
         step={0.1}
         value={pos}
         onPointerDown={onPointerDown}
         onChange={onChange}
         onPointerUp={reset}
         onPointerCancel={reset}
-        className="flex-1 h-1 accent-violet-500 cursor-ew-resize"
+        className="flex-1 h-0.5 accent-slate-500 cursor-ew-resize opacity-50 hover:opacity-100"
         title={tooltip}
         disabled={!Number.isFinite(value) || value === 0}
       />
-      <span className="text-[9px] font-mono text-slate-500 w-10 text-right tabular-nums">{label}</span>
+      {/* Readout only while tuning, so the row stays calm at rest. */}
+      {pos !== 0 && (
+        <span className="ml-1 text-[8px] font-mono text-slate-400 w-9 text-right tabular-nums">
+          {pos > 0 ? '+' : ''}{pos.toFixed(1)}%
+        </span>
+      )}
     </div>
   );
 }
