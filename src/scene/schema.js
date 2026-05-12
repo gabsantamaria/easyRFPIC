@@ -209,6 +209,18 @@ export function normalizeScene(s) {
     });
   }
 
+  // Simulation setup: HFSS-side knobs that aren't part of the layout
+  // geometry but need to ride along with the design (so an export from
+  // any machine produces a consistent script). Currently:
+  //   - fnominal: the nominal frequency (GHz) used to size the
+  //     automatic open-region radiation box. HFSS pads each face by
+  //     ~λ/4 at this frequency. Stored as a string so it can be a
+  //     parametric expression in the future.
+  const simSetup = {
+    fnominal: '4',
+    ...(s.simSetup || {}),
+  };
+
   return {
     params,
     components: migratedComponents,
@@ -223,6 +235,7 @@ export function normalizeScene(s) {
     // can recognize which stack a design is wearing. Loading a stack
     // from the library overwrites both this field and `stack`.
     stackName: s.stackName || 'LTOI600_NbN_EPFL',
+    simSetup,
   };
 }
 

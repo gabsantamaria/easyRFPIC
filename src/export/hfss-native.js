@@ -1286,7 +1286,50 @@ except Exception as e:
     }
   }
 
+  // ===== Open-region radiation boundary =====
+  // The simulation setup carries an `fnominal` (GHz) used to size the
+  // open region. HFSS's CreateOpenRegion automatically creates an air
+  // box around the geometry padded by ~λ/4 at this frequency and
+  // assigns the Radiation boundary to its outer faces. Wave-ports and
+  // lumped-ports on port-layer sheets remain assignable underneath.
+  const fnominalRaw = (scene.simSetup && scene.simSetup.fnominal) || '4';
+  // Trim whitespace; accept "4", "4.0", "4 GHz" etc. We always
+  // re-stamp the unit suffix when handing to HFSS so the user can
+  // type either form.
+  const fnominalStripped = String(fnominalRaw).trim().replace(/\s*ghz\s*$/i, '');
+  const fnominalExpr = `${fnominalStripped}GHz`;
   code += `
+# ===== Open-region radiation boundary =====
+# Wraps the geometry with an air box that has Radiation boundaries on
+# its outer faces. Box size is auto-computed by HFSS as ~λ/4 at the
+# nominal frequency in each direction. Edit f_open_region below (or in
+# the project's variables list) to retune.
+try:
+    oDesign.ChangeProperty(
+        ["NAME:AllTabs",
+         ["NAME:LocalVariableTab",
+          ["NAME:PropServers", "LocalVariables"],
+          ["NAME:NewProps",
+           ["NAME:f_open_region", "PropType:=", "VariableProp",
+            "UserDef:=", True, "Value:=", "${fnominalExpr}"]]]])
+except Exception as e:
+    try:
+        oDesktop.AddMessage("", "", 1, "f_open_region var setup: " + str(e))
+    except:
+        pass
+try:
+    oBoundarySetup = oDesign.GetModule("BoundarySetup")
+    oBoundarySetup.CreateOpenRegion(
+        ["NAME:CreateOpenRegionData",
+         "Frequency:=", "f_open_region",
+         "Boundary:=", "Radiation",
+         "ApplyInfiniteGP:=", False])
+except Exception as e:
+    try:
+        oDesktop.AddMessage("", "", 1, "Open region failed: " + str(e))
+    except:
+        pass
+
 # ===== Setup =====
 oModule = oDesign.GetModule("AnalysisSetup")
 oModule.InsertSetup("HfssDriven",

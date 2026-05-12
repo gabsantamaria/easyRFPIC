@@ -369,7 +369,23 @@ def build_wg(name, cx, cy, w, h):
     }
   }
 
+  // Open-region radiation boundary, sized automatically by pyAEDT
+  // based on the nominal frequency from scene.simSetup. Padding is
+  // ~λ/4 at this frequency.
+  const fnominalRaw = (scene.simSetup && scene.simSetup.fnominal) || '4';
+  const fnominalStripped = String(fnominalRaw).trim().replace(/\s*ghz\s*$/i, '');
+  const fnominalExpr = `${fnominalStripped}GHz`;
   code += `
+# ===== Open-region radiation boundary =====
+try:
+    hfss[\"f_open_region\"] = \"${fnominalExpr}\"
+except Exception:
+    pass
+try:
+    hfss.create_open_region(frequency=\"f_open_region\", boundary=\"Radiation\")
+except Exception as e:
+    print(\"Open region failed:\", e)
+
 setup = hfss.create_setup(name="Setup1")
 setup.props["Frequency"] = "20GHz"
 setup.props["MaximumPasses"] = 12

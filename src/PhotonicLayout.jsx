@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { Plus, Trash2, RotateCcw, RotateCw, Download, Upload, Lock, Unlock, FlipHorizontal, FlipVertical, Layers, Settings2, Box, Square, Link2, Link2Off, Grid3x3, AlertTriangle, Maximize2, Save, FileText, FilePlus, Copy, FolderTree, BookOpen, Package, Boxes, Pencil, Ruler, Eye, EyeOff, ArrowDown, ArrowUp, Move, Repeat, Combine, Minus, X as XIcon, Circle, Hexagon } from 'lucide-react';
+import { Plus, Trash2, RotateCcw, RotateCw, Download, Upload, Lock, Unlock, FlipHorizontal, FlipVertical, Layers, Settings2, Box, Square, Link2, Link2Off, Grid3x3, AlertTriangle, Maximize2, Save, FileText, FilePlus, Copy, FolderTree, BookOpen, Package, Boxes, Pencil, Ruler, Eye, EyeOff, ArrowDown, ArrowUp, Move, Repeat, Combine, Minus, X as XIcon, Circle, Hexagon, Radio } from 'lucide-react';
 import { eulerBend180Centerline, buildRacetrackCenterline, offsetCenterlineToBand } from './geometry/racetrack.js';
 import { tokenizeIdents, tokenizeComponentExprs, resolveParams, evalExpr, RESERVED_IDENTS } from './scene/params.js';
 import { ANCHORS, parseAnchor, anchorLocal, anchorWorld } from './scene/anchors.js';
@@ -3915,6 +3915,7 @@ export default function App() {
               { id: 'snaps', label: 'SNAPS', icon: Link2 },
               { id: 'mirrors', label: 'MIRRORS', icon: FlipHorizontal },
               { id: 'library', label: 'LIBRARY', icon: BookOpen },
+              { id: 'setup', label: 'SETUP', icon: Radio },
               { id: 'code', label: 'CODE', icon: Box },
             ].map(t => {
               const Icon = t.icon;
@@ -4536,6 +4537,63 @@ export default function App() {
                 )}
               </div>
             )}
+
+            {activePanel === 'setup' && (() => {
+              // HFSS / pyAEDT simulation-setup knobs. Currently the only
+              // knob is `fnominal` (GHz) used by the auto-sized open
+              // region. Compute the resulting lateral padding in real
+              // units so the user knows how much room they need to
+              // leave around the chip.
+              const fStr = (scene.simSetup && scene.simSetup.fnominal) || '4';
+              const fNum = parseFloat(String(fStr).replace(/\s*ghz\s*$/i, '')) || 0;
+              // λ = c / f. c in mm/ns = 299.792458. f in GHz.
+              // → λ (mm) = 299.792458 / f(GHz). λ/4 = 74.948 / f(GHz).
+              const c_mm_per_ns = 299.792458;
+              const lambdaMm = fNum > 0 ? c_mm_per_ns / fNum : 0;
+              const padMm = lambdaMm / 4;
+              const padUm = padMm * 1000;
+              const setFnominal = (v) => updateScene(prev => ({
+                ...prev,
+                simSetup: { ...(prev.simSetup || { fnominal: '4' }), fnominal: v },
+              }));
+              return (
+                <div className="space-y-3">
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wider text-slate-400 mb-1 flex items-center gap-1">
+                      <Radio size={11} /> Open-region radiation boundary
+                    </div>
+                    <p className="text-[10px] text-slate-500 leading-snug mb-2">
+                      HFSS wraps the geometry with an air box that has
+                      Radiation boundaries on its outer faces. The box
+                      is auto-sized to roughly λ/4 at the nominal
+                      frequency you set below.
+                    </p>
+                    <label className="block text-[10px] text-slate-400 mb-0.5">f<sub>nominal</sub> (GHz)</label>
+                    <input
+                      type="text"
+                      defaultValue={fStr}
+                      key={fStr}
+                      onBlur={(e) => setFnominal(e.target.value.trim() || '4')}
+                      onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); if (e.key === 'Escape') { e.target.value = fStr; e.target.blur(); } }}
+                      className="w-28 px-1.5 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 text-xs font-mono"
+                    />
+                  </div>
+                  <div className="border-t border-slate-800 pt-2">
+                    <div className="text-[10px] uppercase tracking-wider text-slate-400 mb-1">Computed padding (per face)</div>
+                    <div className="font-mono text-xs text-slate-300 leading-relaxed">
+                      λ = {lambdaMm.toFixed(2)} mm<br />
+                      λ/4 = <span className="text-cyan-300 font-bold">{padMm.toFixed(2)} mm</span> ({padUm.toFixed(0)} µm)
+                    </div>
+                    <p className="text-[10px] text-slate-500 mt-2 leading-snug">
+                      Each lateral face of the geometry needs at least
+                      this much clearance to the chip edge so the
+                      radiation box can fit. Adjust f<sub>nominal</sub>
+                      lower → more padding; higher → less.
+                    </p>
+                  </div>
+                </div>
+              );
+            })()}
 
             {activePanel === 'code' && (
               <pre className="text-[9px] font-mono leading-relaxed text-slate-300 whitespace-pre-wrap break-all">{code}</pre>
