@@ -2147,6 +2147,43 @@ export default function App() {
     });
   };
 
+  // Rename the currently-loaded stack. Two paths:
+  //   - If the current name IS a library entry, atomically write the
+  //     contents under the new name then drop the old key — so the
+  //     library never sees an in-flight collision and the user's
+  //     stack doesn't briefly disappear.
+  //   - If the current name ISN'T a library entry (an unsaved draft,
+  //     e.g. after editing without yet saving), it's a pure label
+  //     change on scene.stackName. Nothing in storage moves.
+  // Either way, scene.stackName updates so the dropdown reflects the
+  // new label.
+  const renameCurrentStack = async () => {
+    const oldName = scene.stackName || '';
+    const next = await promptDialog('Rename stack to:', oldName, 'Rename stack');
+    if (next == null) return;
+    const trimmed = String(next).trim();
+    if (!trimmed || trimmed === oldName) return;
+    if (stackList.includes(trimmed)) {
+      const ok = await confirmDialog(
+        `A stack named "${trimmed}" already exists in the library. Overwrite it with the current stack?`,
+        'Overwrite stack'
+      );
+      if (!ok) return;
+    }
+    // Persist under the new name (always — captures the working
+    // scene.stack even if the rename comes from a draft).
+    const ok = await saveStack(workspace, trimmed, { name: trimmed, stack: scene.stack });
+    if (!ok) { await alertDialog('Failed to rename stack.', 'Error'); return; }
+    // If the old name was a library entry distinct from the new one,
+    // drop it. Skip when oldName === trimmed (handled above) or when
+    // oldName wasn't in the library to begin with.
+    if (oldName && oldName !== trimmed && stackList.includes(oldName)) {
+      await deleteStack(workspace, oldName);
+    }
+    updateScene((prev) => ({ ...prev, stackName: trimmed }));
+    await refreshStackList();
+  };
+
   // Delete a named stack from the library. The currently-loaded
   // scene.stack is unaffected — only the library entry vanishes — so
   // the user doesn't lose their working stack if they delete the wrong
@@ -3838,6 +3875,13 @@ export default function App() {
                       title="Create a fresh stack from scratch (seeded with one conductor layer) and add it to the workspace library."
                     >
                       new…
+                    </button>
+                    <button
+                      onClick={renameCurrentStack}
+                      className="text-[10px] px-2 py-0.5 rounded border border-slate-600 hover:border-cyan-400 hover:text-cyan-300 text-slate-300"
+                      title="Rename the currently-loaded stack. If it's in the workspace library, the library entry is moved under the new name; if not, only the display label updates."
+                    >
+                      rename…
                     </button>
                     <button
                       onClick={importStackFromFile}
