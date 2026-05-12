@@ -1224,6 +1224,15 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
   const hr = Math.max(viewport.w, viewport.h) / 250;
   const sw = Math.max(viewport.w, viewport.h) / 1500; // baseline 1px-ish stroke in world units
   const HALO_W = sw * 3.6; // selection halo width — also used for snap-network dashes
+  // Minimum hit-target footprint in world units, derived from the current
+  // viewport / SVG ratio. Below this threshold each component gets an
+  // invisible "hit pad" rect that extends its clickable area so the user
+  // can grab very thin shapes (sub-pixel-tall waveguides, thin cutouts,
+  // etc.) without accidentally missing onto the background — which
+  // otherwise turns an intended alt-drag into a marquee selection.
+  const MIN_HIT_PX = 8;
+  const pxPerWorld = (svgRef.current?.clientWidth || 1) / viewport.w;
+  const minHitWorld = pxPerWorld > 0 ? MIN_HIT_PX / pxPerWorld : 0;
 
   return (
     <svg
@@ -1818,8 +1827,33 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                 // For polygons and racetracks the ring/path already includes
                 // rotation; skip double-rotating via the wrapping group.
                 const wrapTransform = (shapeKind === 'polygon' || shapeKind === 'racetrack') ? undefined : rotAttr;
+                // Hit-pad: a transparent rect sized to at least
+                // MIN_HIT_PX on each axis, rendered BELOW the visible
+                // shape with the same data-comp-id. Only emitted when
+                // the instance is actually narrower than the minimum on
+                // one or both axes, so it's a no-op on normally-sized
+                // shapes. Catches near-misses on sub-pixel-thin
+                // waveguides and the like — without it, those near-
+                // misses would land on the background and turn an
+                // intended alt-drag into a marquee.
+                const hitW = Math.max(inst.w, minHitWorld);
+                const hitH = Math.max(inst.h, minHitWorld);
+                const needsHitPad = hitW > inst.w + 1e-9 || hitH > inst.h + 1e-9;
+                const hitPad = needsHitPad ? (
+                  <rect
+                    x={inst.cx - hitW / 2}
+                    y={-(inst.cy + hitH / 2)}
+                    width={hitW}
+                    height={hitH}
+                    fill="transparent"
+                    pointerEvents="all"
+                    data-comp-id={c.id}
+                    style={{ cursor: 'move' }}
+                  />
+                ) : null;
                 return (
                   <g key={inst.transformPath} transform={wrapTransform}>
+                    {hitPad}
                     {shapeElement}
                     {(c.cutouts || []).map((cut, i) => {
                       const cw = evalExpr(cut.w, paramValues);
