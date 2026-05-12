@@ -819,15 +819,30 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
               const oyMin = oc.cy - oh / 2, oyMax = oc.cy + oh / 2;
               const xOverlap = Math.min(oxMax, dxMax) - Math.max(oxMin, dxMin);
               const yOverlap = Math.min(oyMax, dyMax) - Math.max(oyMin, dyMin);
+              // Edge candidates get a constant ranking penalty on top
+              // of their raw 1-D distance. Without this, an edge pair
+              // would always beat an anchor pair whenever they exist
+              // together (the 2-D anchor distance is, by construction,
+              // at least the 1-D edge distance). The penalty makes the
+              // closest anchor pair win when it's within roughly half
+              // a snap-threshold of the target — i.e. when the user
+              // is clearly aiming at a corner / midpoint — and lets
+              // edge alignment take over only when the cursor's
+              // orthogonal offset is too big for any anchor to win.
+              // Doesn't affect the threshold gate: an edge candidate
+              // still has to be within worldThresh of the target
+              // before being considered at all.
+              const EDGE_RANK_PENALTY = worldThresh * 0.4;
               const tryEdge = (axis, dSide, dEdgeVal, tSide, tEdgeVal, midX, midY) => {
-                const dist = Math.abs(dEdgeVal - tEdgeVal);
-                if (dist > worldThresh) return;
+                const rawDist = Math.abs(dEdgeVal - tEdgeVal);
+                if (rawDist > worldThresh) return;
                 const cand = {
                   kind: 'edge',
-                  dist,
+                  dist: rawDist + EDGE_RANK_PENALTY,
+                  rawDist,
                   axis,                  // 'h' = horizontal edges, snap Y
                   targetCompId: oc.id,
-                  targetSide: tSide,     // 'top'/'bottom' or 'left'/'right'
+                  targetSide: tSide,     // 'top'/'bottom'/'centerY' or 'left'/'right'/'centerX'
                   dSide,                 // dragged-side equivalent
                   edgeVal: tEdgeVal,     // axis-aligned coord to snap to
                   x: midX, y: midY,      // representative point for the hover marker
