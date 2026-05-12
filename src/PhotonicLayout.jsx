@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Plus, Trash2, RotateCcw, RotateCw, Download, Upload, Lock, Unlock, FlipHorizontal, FlipVertical, Layers, Settings2, Box, Square, Link2, Link2Off, Grid3x3, AlertTriangle, Maximize2, Save, FileText, FilePlus, Copy, FolderTree, BookOpen, Package, Boxes, Pencil, Ruler, Eye, EyeOff, ArrowDown, ArrowUp, Move, Repeat, Combine, Minus, X as XIcon, Circle, Hexagon } from 'lucide-react';
 import { eulerBend180Centerline, buildRacetrackCenterline, offsetCenterlineToBand } from './geometry/racetrack.js';
-import { tokenizeIdents, resolveParams, evalExpr, RESERVED_IDENTS } from './scene/params.js';
+import { tokenizeIdents, tokenizeComponentExprs, resolveParams, evalExpr, RESERVED_IDENTS } from './scene/params.js';
 import { ANCHORS, parseAnchor, anchorLocal, anchorWorld } from './scene/anchors.js';
 import { rectInstanceToRing, shapeInstanceToRing } from './geometry/rings.js';
 import { expandTransforms } from './scene/transforms.js';
@@ -2406,20 +2406,13 @@ export default function App() {
         // its own snap chain — surface in the highlight when the
         // boolean is selected.
         for (const opId of (c.operandIds || [])) walkComp(opId);
-      } else {
-        // Primitive geometry: tokenize w / h plus every cutout's
-        // dx / dy / w / h expressions.
-        for (const expr of [c.w, c.h]) {
-          if (typeof expr !== 'string') continue;
-          for (const id of tokenizeIdents(expr)) frontier.push(id);
-        }
-        for (const cu of (c.cutouts || [])) {
-          for (const expr of [cu.dx, cu.dy, cu.w, cu.h]) {
-            if (typeof expr !== 'string') continue;
-            for (const id of tokenizeIdents(expr)) frontier.push(id);
-          }
-        }
       }
+      // Geometry + cutout + transform-chain idents. Centralized so the
+      // unused-param scanner and the highlight walker stay in sync.
+      // For booleans, this picks up their own transforms (dx/dy on a
+      // grouped repeat, etc.); the boolean's w/h are literal '0' so
+      // they contribute nothing.
+      for (const id of tokenizeComponentExprs(c)) frontier.push(id);
       // Snap that positions this component (if any) brings in its dx/dy
       // and recursively the parent component's chain. Applies to both
       // primitives and booleans — a boolean can be snapped to another
@@ -2468,10 +2461,10 @@ export default function App() {
       const idents = tokenizeIdents(p.expr || '');
       for (const id of idents) if (id !== name) referenced.add(id);
     }
-    // From components
+    // From components — geometry + cutouts + transforms + per-kind
+    // fields, via the shared tokenizeComponentExprs helper.
     for (const c of scene.components) {
-      collect(c.w); collect(c.h);
-      for (const cu of (c.cutouts || [])) { collect(cu.dx); collect(cu.dy); collect(cu.w); collect(cu.h); }
+      for (const id of tokenizeComponentExprs(c)) referenced.add(id);
     }
     // From snaps
     for (const s of scene.snaps) { collect(s.dx); collect(s.dy); }

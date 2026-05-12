@@ -33,6 +33,46 @@ export function tokenizeIdents(expr) {
   return matches;
 }
 
+// Every parameter-referencing expression on a component, flattened to a
+// list of identifiers. Centralizes the "what fields can hold an
+// expression" question so the param-highlight walker, the unused-param
+// scanner, and any future code that needs the same answer don't drift
+// out of sync.
+//
+// Covered fields:
+//   - Geometry / shape-specific knobs: w, h, r, rx, ry, R, L_straight,
+//     p, wgWidth, n. Some are redundantly captured via w/h (which
+//     reference the kind-specific fields) but we collect them directly
+//     too, so a user who has rewritten w/h still has their per-kind
+//     knobs counted.
+//   - Cutouts: each cutout's dx / dy / w / h.
+//   - Transform chain: each transform's dx / dy / angle / n.
+//
+// Boolean operands and snap-chain expressions are NOT included — those
+// live OFF the component (operandIds → other components; snap.dx/dy
+// → the snap record). Callers that need the full closure walk the
+// graph themselves.
+export function tokenizeComponentExprs(c) {
+  if (!c) return [];
+  const out = [];
+  const push = (expr) => {
+    if (typeof expr !== 'string') return;
+    for (const id of tokenizeIdents(expr)) out.push(id);
+  };
+  push(c.w); push(c.h);
+  push(c.r); push(c.rx); push(c.ry);
+  push(c.R); push(c.L_straight); push(c.p); push(c.wgWidth);
+  push(c.n);
+  for (const cu of (c.cutouts || [])) {
+    push(cu.dx); push(cu.dy); push(cu.w); push(cu.h);
+  }
+  for (const t of (c.transforms || [])) {
+    if (!t) continue;
+    push(t.dx); push(t.dy); push(t.angle); push(t.n);
+  }
+  return out;
+}
+
 // Resolve all parameter values, given that params can depend on other params.
 // Returns { values: { name: number }, errors: { name: string } }
 export function resolveParams(params, extraValues = null) {

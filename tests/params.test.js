@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   tokenizeIdents,
+  tokenizeComponentExprs,
   resolveParams,
   evalExpr,
   RESERVED_IDENTS,
@@ -107,6 +108,50 @@ describe('resolveParams', () => {
       bad: { expr: 'not_a_thing + ;' },
     });
     expect(errors.bad).toBeDefined();
+  });
+});
+
+describe('tokenizeComponentExprs', () => {
+  it('returns geometry idents from a rect', () => {
+    const ids = tokenizeComponentExprs({ kind: 'rect', w: 'cap_w', h: 'cap_h' });
+    expect(ids).toEqual(expect.arrayContaining(['cap_w', 'cap_h']));
+  });
+  it('returns shape-specific idents from a polygon (covers c.n which w/h does not)', () => {
+    const ids = tokenizeComponentExprs({ kind: 'polygon', r: 'r_poly', n: 'n_poly', w: '2*r_poly', h: '2*r_poly' });
+    expect(ids).toEqual(expect.arrayContaining(['r_poly', 'n_poly']));
+  });
+  it('returns racetrack-specific idents', () => {
+    const ids = tokenizeComponentExprs({
+      kind: 'racetrack',
+      R: 'rt_R', L_straight: 'rt_L', p: 'rt_p', wgWidth: 'w_wg',
+      w: '0', h: '0',
+    });
+    expect(ids).toEqual(expect.arrayContaining(['rt_R', 'rt_L', 'rt_p', 'w_wg']));
+  });
+  it('returns cutout-expression idents', () => {
+    const ids = tokenizeComponentExprs({
+      kind: 'rect', w: '0', h: '0',
+      cutouts: [{ dx: 'pad_x', dy: 'pad_y', w: 'pad_w', h: 'pad_h' }],
+    });
+    expect(ids).toEqual(expect.arrayContaining(['pad_x', 'pad_y', 'pad_w', 'pad_h']));
+  });
+  it('returns transform-chain idents — the bug the user hit', () => {
+    const ids = tokenizeComponentExprs({
+      kind: 'rect', w: '0', h: '0',
+      transforms: [
+        { kind: 'repeat', enabled: true, n: 'n_copies', dx: 'pitch_x', dy: '0', includeOriginal: true },
+        { kind: 'rotate', enabled: true, angle: 'theta', pivot: 'C' },
+        { kind: 'displace', enabled: true, dx: 'shift_x', dy: 'shift_y' },
+      ],
+    });
+    expect(ids).toEqual(expect.arrayContaining([
+      'n_copies', 'pitch_x', 'theta', 'shift_x', 'shift_y',
+    ]));
+  });
+  it('handles missing / undefined / null components without throwing', () => {
+    expect(tokenizeComponentExprs(null)).toEqual([]);
+    expect(tokenizeComponentExprs(undefined)).toEqual([]);
+    expect(tokenizeComponentExprs({})).toEqual([]);
   });
 });
 
