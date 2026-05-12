@@ -16,6 +16,64 @@ import { Trash2 } from 'lucide-react';
 import { evalExpr } from '../../scene/params.js';
 import { DeferredTextInput } from '../DeferredTextInput.jsx';
 
+// Split a stack into ordered "levels". Each level is either a solo
+// layer (coplanarGroup absent) or a contiguous run of layers sharing
+// a coplanarGroup id. Returns [{ groupId, indices: [stackIdx, ...] }].
+function computeStackLevels(stack) {
+  const levels = [];
+  let cur = null;
+  for (let i = 0; i < stack.length; i++) {
+    const l = stack[i];
+    const gid = l.coplanarGroup;
+    if (gid && cur && cur.groupId === gid) {
+      cur.indices.push(i);
+    } else if (gid) {
+      cur = { groupId: gid, indices: [i] };
+      levels.push(cur);
+    } else {
+      cur = null;
+      levels.push({ groupId: null, indices: [i] });
+    }
+  }
+  return levels;
+}
+
+function levelIndexOf(levels, stackIdx) {
+  for (let li = 0; li < levels.length; li++) {
+    if (levels[li].indices.includes(stackIdx)) return li;
+  }
+  return -1;
+}
+
+// Swap two adjacent levels' index blocks in the stack. dir: +1 to move
+// `levelIdx` up (toward the top), −1 to move it down. Group integrity
+// is preserved because each level's indices form a contiguous block.
+function swapLevels(stack, levelIdx, dir) {
+  const levels = computeStackLevels(stack);
+  const other = levelIdx + dir;
+  if (other < 0 || other >= levels.length) return stack;
+  const lvlA = levels[levelIdx];
+  const lvlB = levels[other];
+  // The two blocks are ordered by stack index; sort so we always
+  // splice the lower-index block first.
+  const [first, second] = lvlA.indices[0] < lvlB.indices[0] ? [lvlA, lvlB] : [lvlB, lvlA];
+  const blockFirst  = first.indices.map((i) => stack[i]);
+  const blockSecond = second.indices.map((i) => stack[i]);
+  const next = [...stack];
+  next.splice(first.indices[0], blockFirst.length + blockSecond.length, ...blockSecond, ...blockFirst);
+  return next;
+}
+
+// Reorder a layer within its coplanar group (no group crossing).
+function swapWithinGroup(stack, idx, dir) {
+  const other = idx + dir;
+  if (other < 0 || other >= stack.length) return stack;
+  if (stack[other].coplanarGroup !== stack[idx].coplanarGroup) return stack;
+  const next = [...stack];
+  [next[idx], next[other]] = [next[other], next[idx]];
+  return next;
+}
+
 export function LayerCard({ layer, idx, scene, paramValues, updateScene, commitExpr, compact }) {
   const updateLayer = (patch) => updateScene(prev => ({
     ...prev,
@@ -34,18 +92,39 @@ export function LayerCard({ layer, idx, scene, paramValues, updateScene, commitE
     }
     return { ...prev, stack: next };
   });
-  const moveUp = () => updateScene(prev => {
-    if (idx >= prev.stack.length - 1) return prev;
-    const s = [...prev.stack];
-    [s[idx], s[idx + 1]] = [s[idx + 1], s[idx]];
-    return { ...prev, stack: s };
+  // Layer move semantics:
+  //  - If this layer is one of ≥ 2 members in a coplanar group AND
+  //    the neighbor in the direction is the same group, swap the two
+  //    within the group (within-group reorder).
+  //  - Otherwise the layer's whole LEVEL (a solo layer is a 1-member
+  //    level) moves past the next level — coplanar groups stay
+  //    intact and the layer hops over a neighboring group rather than
+  //    breaking into it.
+  const moveLayer = (dir /* +1 up, -1 down */) => updateScene((prev) => {
+    const cur = prev.stack[idx];
+    const neighborIdx = idx + dir;
+    const neighbor = prev.stack[neighborIdx];
+    if (cur?.coplanarGroup && neighbor?.coplanarGroup === cur.coplanarGroup) {
+      return { ...prev, stack: swapWithinGroup(prev.stack, idx, dir) };
+    }
+    const levels = computeStackLevels(prev.stack);
+    const myLvl = levelIndexOf(levels, idx);
+    if (myLvl < 0) return prev;
+    return { ...prev, stack: swapLevels(prev.stack, myLvl, dir) };
   });
-  const moveDown = () => updateScene(prev => {
-    if (idx <= 0) return prev;
-    const s = [...prev.stack];
-    [s[idx], s[idx - 1]] = [s[idx - 1], s[idx]];
-    return { ...prev, stack: s };
-  });
+  const moveUp = () => moveLayer(+1);
+  const moveDown = () => moveLayer(-1);
+
+  // Disabled when there's nothing to swap with. Within-group: when this
+  // is the top (or bottom) member. At a level boundary: when this is
+  // already in the topmost (or bottommost) level.
+  const stack = scene.stack;
+  const levelsCurrent = computeStackLevels(stack);
+  const myLevelIdx = levelIndexOf(levelsCurrent, idx);
+  const aboveSameGroup = stack[idx + 1] && stack[idx + 1].coplanarGroup === layer.coplanarGroup && !!layer.coplanarGroup;
+  const belowSameGroup = stack[idx - 1] && stack[idx - 1].coplanarGroup === layer.coplanarGroup && !!layer.coplanarGroup;
+  const canMoveUp   = aboveSameGroup || (myLevelIdx >= 0 && myLevelIdx < levelsCurrent.length - 1);
+  const canMoveDown = belowSameGroup || (myLevelIdx > 0);
 
   const thicknessVal = evalExpr(layer.thickness, paramValues);
   const roleColor = {
@@ -121,8 +200,8 @@ export function LayerCard({ layer, idx, scene, paramValues, updateScene, commitE
             >⊞</button>
           )
         )}
-        <button onClick={moveUp} disabled={idx === scene.stack.length - 1} className="text-slate-500 hover:text-slate-200 disabled:opacity-20 text-[10px] px-1" title="Move up">▲</button>
-        <button onClick={moveDown} disabled={idx === 0} className="text-slate-500 hover:text-slate-200 disabled:opacity-20 text-[10px] px-1" title="Move down">▼</button>
+        <button onClick={moveUp} disabled={!canMoveUp} className="text-slate-500 hover:text-slate-200 disabled:opacity-20 text-[10px] px-1" title="Move up (within a coplanar group, swap with the next member; otherwise hop past the next level)">▲</button>
+        <button onClick={moveDown} disabled={!canMoveDown} className="text-slate-500 hover:text-slate-200 disabled:opacity-20 text-[10px] px-1" title="Move down (within a coplanar group, swap with the previous member; otherwise hop past the previous level)">▼</button>
         <button onClick={deleteLayer} className="text-slate-500 hover:text-red-400" title="Delete layer"><Trash2 size={10} /></button>
       </div>
       <div className="px-2 py-1 space-y-1">
@@ -266,42 +345,27 @@ export function LayerCard({ layer, idx, scene, paramValues, updateScene, commitE
 }
 
 export function LevelGroup({ level, scene, paramValues, updateScene, commitExpr }) {
-  // Move all layers in this level together within the underlying stack array.
-  // direction: +1 to move up (later in array = higher Z), -1 to move down.
-  const moveLevel = (direction) => {
-    updateScene(prev => {
-      const indices = level.layers.map(l => l.idx).sort((a, b) => a - b);
-      const blockSize = indices.length;
-      const blockStart = indices[0];
-      const blockEnd = indices[indices.length - 1];
-      const stackLen = prev.stack.length;
-      // Verify the block is contiguous in the array (should be, since we group adjacent only)
-      for (let i = 0; i < blockSize; i++) {
-        if (indices[i] !== blockStart + i) return prev;
-      }
-      if (direction > 0) {
-        // Move up: swap with the layer at blockEnd+1, if any
-        if (blockEnd + 1 >= stackLen) return prev;
-        const newStack = [...prev.stack];
-        const above = newStack.splice(blockEnd + 1, 1)[0];
-        newStack.splice(blockStart, 0, above);
-        return { ...prev, stack: newStack };
-      } else {
-        // Move down: swap with the layer at blockStart-1, if any
-        if (blockStart - 1 < 0) return prev;
-        const newStack = [...prev.stack];
-        const below = newStack.splice(blockStart - 1, 1)[0];
-        newStack.splice(blockEnd, 0, below);
-        return { ...prev, stack: newStack };
-      }
+  // Move the whole coplanar group up/down by swapping its level
+  // with the adjacent level — using computeStackLevels so the
+  // neighbor (which may itself be a coplanar group of N layers) is
+  // moved as a single block. The old per-index splice approach
+  // could pull a single layer out of a neighboring group, breaking
+  // the neighbor's coplanarity.
+  const moveLevel = (direction /* +1 up, -1 down */) => {
+    updateScene((prev) => {
+      const levels = computeStackLevels(prev.stack);
+      const indices = level.layers.map((l) => l.idx);
+      const li = levelIndexOf(levels, indices[0]);
+      if (li < 0) return prev;
+      return { ...prev, stack: swapLevels(prev.stack, li, direction) };
     });
   };
 
   if (level.isDevice && level.layers.length > 1) {
-    const blockStart = level.layers[0].idx;
-    const blockEnd = level.layers[level.layers.length - 1].idx;
-    const canMoveUp = blockEnd < scene.stack.length - 1;
-    const canMoveDown = blockStart > 0;
+    const allLevels = computeStackLevels(scene.stack);
+    const myLvlIdx = levelIndexOf(allLevels, level.layers[0].idx);
+    const canMoveUp   = myLvlIdx >= 0 && myLvlIdx < allLevels.length - 1;
+    const canMoveDown = myLvlIdx > 0;
     const needsCladding = !!level.needsCladding;
     // Coplanar groups missing a cladding get a red border + warning row
     // so the user can see the rule at a glance: every coplanar group
