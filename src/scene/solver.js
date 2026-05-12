@@ -170,11 +170,15 @@ export function solveLayout(components, snaps, paramValues) {
         const dxShift = targetCx - toComp.cx;
         const dyShift = targetCy - toComp.cy;
         if (Math.abs(dxShift) > 1e-9 || Math.abs(dyShift) > 1e-9) {
-          const shiftCluster = (cid) => {
+          // Only shift CONSUMED operands. A punch keeps its tool
+          // independent, so a snap on the boolean must not drag the
+          // tool along — that would mimic KeepOriginals=False semantics.
+          const shiftCluster = (cid, parentBoolId) => {
             const c = byId[cid];
             if (!c) return;
+            if (parentBoolId && c.consumedBy !== parentBoolId) return;
             if (c.kind === 'boolean') {
-              for (const opid of (c.operandIds || [])) shiftCluster(opid);
+              for (const opid of (c.operandIds || [])) shiftCluster(opid, c.id);
             } else {
               c.cx += dxShift;
               c.cy += dyShift;
@@ -184,7 +188,7 @@ export function solveLayout(components, snaps, paramValues) {
               }
             }
           };
-          for (const opid of (toComp.operandIds || [])) shiftCluster(opid);
+          for (const opid of (toComp.operandIds || [])) shiftCluster(opid, toComp.id);
           refreshBooleanBbox(toComp);
         }
       } else {

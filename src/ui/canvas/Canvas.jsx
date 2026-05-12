@@ -103,9 +103,12 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         operandToBooleanId[id] = b.id;
       }
     }
-    // Cluster = top-level boolean's id + ALL transitively reachable operands.
-    // We recurse through nested booleans so dragging a top-level subtract
-    // moves the union (and its primitives) along with it.
+    // Cluster = top-level boolean's id + ALL transitively reachable
+    // CONSUMED operands. Non-consumed operands (punch tools) stay
+    // outside the cluster — they're true standalone shapes that just
+    // happen to participate in this boolean's geometry. In HFSS terms,
+    // this matches Subtract with "clone tool object before operation":
+    // the tool keeps its identity and isn't dragged with the result.
     const memberToCluster = {};
     const compById = Object.fromEntries(scene.components.map(c => [c.id, c]));
     const collectMembers = (id, acc) => {
@@ -113,7 +116,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       acc.add(id);
       const c = compById[id];
       if (c && c.kind === 'boolean') {
-        for (const opid of (c.operandIds || [])) collectMembers(opid, acc);
+        for (const opid of (c.operandIds || [])) {
+          const opC = compById[opid];
+          if (!opC || opC.consumedBy !== c.id) continue;
+          collectMembers(opid, acc);
+        }
       }
     };
     for (const b of booleanComps) {
@@ -599,6 +606,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         if (visitedBooleans.has(rid)) return;
         visitedBooleans.add(rid);
         for (const opid of (c.operandIds || [])) {
+          // Skip operands that aren't actually consumed by this boolean.
+          // Punch keeps its tools independent — they shouldn't be dragged
+          // along when the boolean moves (HFSS "clone tool" semantics).
+          const opC = compById[opid];
+          if (!opC || opC.consumedBy !== c.id) continue;
           expandBooleanRoot(findSnapRoot(opid), acc, visitedBooleans);
         }
       };
