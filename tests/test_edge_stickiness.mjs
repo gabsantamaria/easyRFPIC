@@ -74,7 +74,7 @@ function computeBest({ targetCx, targetCy, ow, oh, proposedCx, proposedCy, dw, d
   // Stickiness override (index-paired natural alignments only).
   if (best && best.kind === 'edge') {
     const freeAxisLen = best.axis === 'h' ? ow : oh;
-    const STICKY = Math.max(worldThresh * 2, freeAxisLen * 0.2);
+    const STICKY = Math.max(worldThresh, freeAxisLen * 0.05);
     const edgeAnchorMap = {
       h: { top: ['NW','N','NE'], bottom: ['SW','S','SE'], centerY: ['W','C','E'] },
       v: { left: ['NW','W','SW'], right: ['NE','E','SE'], centerX: ['N','C','S'] },
@@ -106,7 +106,7 @@ function computeBest({ targetCx, targetCy, ow, oh, proposedCx, proposedCy, dw, d
 }
 
 // Scenario: target 100x100 at origin. Cluster 20x20.
-// worldThresh = 10. STICKY = max(20, ow*0.2) = max(20, 20) = 20.
+// worldThresh = 10. STICKY = max(10, ow*0.05) = max(10, 5) = 10.
 const ctx = { targetCx: 0, targetCy: 0, ow: 100, oh: 100, dw: 20, dh: 20, worldThresh: 10 };
 
 console.log('Scenario A: small target, cluster sliding along top.');
@@ -117,16 +117,10 @@ console.log('Scenario A: small target, cluster sliding along top.');
   assert(b && b.kind === 'anchor' && b.target.anchor === 'N', `centered: anchor N (got ${b && b.kind} ${b && b.target && b.target.anchor})`);
 }
 
-// Slid 15 right. N-S freeDist=15 (in STICKY=20). NE-SE freeDist=25 (out). N wins.
+// Slid 5 right. N-S freeDist=5 (in STICKY=10). N wins.
 {
-  const b = computeBest({ ...ctx, proposedCx: 15, proposedCy: 60 });
-  assert(b && b.kind === 'anchor' && b.target.anchor === 'N', `slid right 15: stick to N (got ${b && b.kind} ${b && b.target && b.target.anchor})`);
-}
-
-// Slid 30 right. N-S freeDist=30 (out). NE-SE freeDist=10 (in). NE wins.
-{
-  const b = computeBest({ ...ctx, proposedCx: 30, proposedCy: 60 });
-  assert(b && b.kind === 'anchor' && b.target.anchor === 'NE', `slid right 30: stick to NE (got ${b && b.kind} ${b && b.target && b.target.anchor})`);
+  const b = computeBest({ ...ctx, proposedCx: 5, proposedCy: 60 });
+  assert(b && b.kind === 'anchor' && b.target.anchor === 'N', `slid right 5: stick to N (got ${b && b.kind} ${b && b.target && b.target.anchor})`);
 }
 
 // Slid 40 right. NE-SE freeDist=0. NE wins.
@@ -142,27 +136,27 @@ console.log('Scenario A: small target, cluster sliding along top.');
 }
 
 // Scenario B: user's reported case — long thin top edge, small cluster sliding.
-// Top target: 1000 wide, 30 tall at origin. STICKY = max(20, 200) = 200.
+// Top target: 1000 wide, 30 tall at origin. STICKY = max(10, 50) = 50.
 console.log('\nScenario B: long top edge, small cluster sliding (user case).');
 const ctxB = { targetCx: 0, targetCy: 0, ow: 1000, oh: 30, dw: 80, dh: 250, worldThresh: 10 };
 // Cluster top edge on target bottom edge: cluster.cy = -15 - 125 = -140.
-
-// Slid to proposedCx=300 (cursor far from anywhere). NE freeDist=200 (boundary). N freeDist=300 (out). NE wins.
-{
-  const b = computeBest({ ...ctxB, proposedCx: 300, proposedCy: -140 });
-  assert(b && b.kind === 'anchor' && b.target.anchor === 'SE', `slid right 300: stick to SE corner (got ${b && b.kind} ${b && b.target && b.target.anchor})`);
-}
-
-// Slid to proposedCx=200. N freeDist=200 (boundary). SE freeDist=300 (out). N wins (S anchor).
-{
-  const b = computeBest({ ...ctxB, proposedCx: 200, proposedCy: -140 });
-  assert(b && b.kind === 'anchor' && b.target.anchor === 'S', `slid right 200: stick to S midpoint (got ${b && b.kind} ${b && b.target && b.target.anchor})`);
-}
 
 // At target midpoint (proposedCx=0): S freeDist=0. Sticks hard.
 {
   const b = computeBest({ ...ctxB, proposedCx: 0, proposedCy: -140 });
   assert(b && b.kind === 'anchor' && b.target.anchor === 'S', `at midpoint: stick to S (got ${b && b.kind} ${b && b.target && b.target.anchor})`);
+}
+
+// At proposedCx=30, S freeDist=30 (within STICKY=50). Still sticks to S.
+{
+  const b = computeBest({ ...ctxB, proposedCx: 30, proposedCy: -140 });
+  assert(b && b.kind === 'anchor' && b.target.anchor === 'S', `slid right 30: stick to S (got ${b && b.kind} ${b && b.target && b.target.anchor})`);
+}
+
+// At proposedCx=80 (well outside S zone, far from SE corner at 500). No sticky.
+{
+  const b = computeBest({ ...ctxB, proposedCx: 80, proposedCy: -140 });
+  assert(b && b.kind === 'edge', `slid right 80: free edge slide (got ${b && b.kind})`);
 }
 
 console.log(`\n${failures === 0 ? 'PASS' : 'FAIL'}: ${failures} failures`);

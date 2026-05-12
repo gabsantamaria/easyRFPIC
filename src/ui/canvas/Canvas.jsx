@@ -957,7 +957,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                     // detent. A short edge falls back to worldThresh*2
                     // so we still get a screen-pixel detent.
                     const freeAxisLen = ctxAxis === 'h' ? ow : oh;
-                    const STICKY = Math.max(worldThresh * 2, freeAxisLen * 0.2);
+                    const STICKY = Math.max(worldThresh, freeAxisLen * 0.05);
                     let stickBest = null;
                     // Index-pair the anchor lists so we only consider
                     // NATURAL alignments along the edge:
