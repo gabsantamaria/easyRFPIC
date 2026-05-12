@@ -16,17 +16,13 @@ import { Move, RotateCw, Repeat, Trash2, Eye, EyeOff, ArrowUp, ArrowDown } from 
 import { evalExpr } from '../../scene/params.js';
 import { DeferredTextInput } from '../DeferredTextInput.jsx';
 
-function TransformRow({
-  transform, idx, total,
-  onUpdate, onToggle, onMoveUp, onMoveDown, onDelete,
-  paramValues, commitExpr,
-}) {
-  const t = transform;
-  const enabled = t.enabled !== false;
-  // Field renderer: a single labeled expression input. Mirrors the pattern
-  // used elsewhere (component w/h, snap dx/dy) so commitExpr auto-creates
-  // any missing identifiers.
-  const ExprField = ({ label, value, onChange, fieldKey }) => (
+// One labeled expression input. Hoisted to a module-level component so
+// React keeps the same DeferredTextInput identity across TransformRow
+// re-renders — defining it inside TransformRow's body created a fresh
+// function each render, which caused remounts that could wipe the
+// deferred-commit local draft mid-type.
+function ExprField({ label, value, onChange, fieldKey, paramValues, commitExpr }) {
+  return (
     <div className="flex-1 min-w-0">
       <label className="text-[9px] uppercase tracking-wider text-slate-500">{label}</label>
       <DeferredTextInput
@@ -44,6 +40,15 @@ function TransformRow({
       })()}</p>
     </div>
   );
+}
+
+function TransformRow({
+  transform, idx, total,
+  onUpdate, onToggle, onMoveUp, onMoveDown, onDelete,
+  paramValues, commitExpr,
+}) {
+  const t = transform;
+  const enabled = t.enabled !== false;
   // Style the row dimmer when disabled so it's visually clear it's not in the chain.
   const dimClass = enabled ? '' : 'opacity-50';
   // Pick a kind-specific accent color
@@ -78,13 +83,13 @@ function TransformRow({
       {/* Per-kind fields */}
       {t.kind === 'displace' && (
         <div className="flex gap-1.5">
-          <ExprField label="dx" value={t.dx} onChange={(v) => onUpdate({ dx: v })} fieldKey="dx" />
-          <ExprField label="dy" value={t.dy} onChange={(v) => onUpdate({ dy: v })} fieldKey="dy" />
+          <ExprField label="dx" value={t.dx} onChange={(v) => onUpdate({ dx: v })} fieldKey="dx" paramValues={paramValues} commitExpr={commitExpr} />
+          <ExprField label="dy" value={t.dy} onChange={(v) => onUpdate({ dy: v })} fieldKey="dy" paramValues={paramValues} commitExpr={commitExpr} />
         </div>
       )}
       {t.kind === 'rotate' && (
         <div className="flex gap-1.5">
-          <ExprField label="angle (deg)" value={t.angle} onChange={(v) => onUpdate({ angle: v })} fieldKey="angle" />
+          <ExprField label="angle (deg)" value={t.angle} onChange={(v) => onUpdate({ angle: v })} fieldKey="angle" paramValues={paramValues} commitExpr={commitExpr} />
           <div className="flex-1 min-w-0">
             <label className="text-[9px] uppercase tracking-wider text-slate-500">pivot</label>
             <select
@@ -110,9 +115,9 @@ function TransformRow({
       {t.kind === 'repeat' && (
         <div className="space-y-1">
           <div className="flex gap-1.5">
-            <ExprField label="N copies" value={t.n} onChange={(v) => onUpdate({ n: v })} fieldKey="n" />
-            <ExprField label="dx" value={t.dx} onChange={(v) => onUpdate({ dx: v })} fieldKey="dx" />
-            <ExprField label="dy" value={t.dy} onChange={(v) => onUpdate({ dy: v })} fieldKey="dy" />
+            <ExprField label="N copies" value={t.n} onChange={(v) => onUpdate({ n: v })} fieldKey="n" paramValues={paramValues} commitExpr={commitExpr} />
+            <ExprField label="dx" value={t.dx} onChange={(v) => onUpdate({ dx: v })} fieldKey="dx" paramValues={paramValues} commitExpr={commitExpr} />
+            <ExprField label="dy" value={t.dy} onChange={(v) => onUpdate({ dy: v })} fieldKey="dy" paramValues={paramValues} commitExpr={commitExpr} />
           </div>
           <label className="flex items-center gap-1 text-[10px] text-slate-400">
             <input type="checkbox" checked={t.includeOriginal !== false} onChange={(e) => onUpdate({ includeOriginal: e.target.checked })} />

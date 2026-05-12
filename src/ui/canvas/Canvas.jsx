@@ -23,6 +23,8 @@ import { ringToSvgPath } from '../../geometry/paths.js';
 // CANVAS
 // =========================================================================
 export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelection, viewport, setViewport, snapMode, setSnapMode, gridSize, gridSnapEnabled, paramValues, addParam, updateParamExpr, rulerMode, setRulerMode, rulerMeasurements, setRulerMeasurements, rulerInProgress, setRulerInProgress, rulerSnapPoint, setRulerSnapPoint, alertDialog, setInteractionStatus, showDimensions, addMode, setAddMode, commitDragAdd, onComponentContextMenu }) {
+  // Drop a single committed ruler measurement by id.
+  const deleteRuler = (id) => setRulerMeasurements((prev) => prev.filter((m) => m.id !== id));
   const svgRef = useRef(null);
 
   const solved = useMemo(() => {
@@ -2529,31 +2531,57 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         );
       })()}
 
-      {/* Ruler tool: committed measurements */}
+      {/* Ruler tool: committed measurements. The line + endpoints are
+          visual only (pointer-events="none" so they don't interfere
+          with selecting components underneath). A small × button on
+          the right side of the readout deletes that one measurement;
+          the toolbar's "clear (N)" button still clears them all in
+          bulk. */}
       {rulerMeasurements.map(m => {
         const dx = m.p2.x - m.p1.x;
         const dy = m.p2.y - m.p1.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
         const mx = (m.p1.x + m.p2.x) / 2;
         const my = (m.p1.y + m.p2.y) / 2;
+        const xBtnX = mx + 13;
+        const xBtnY = -my - 2.6;
         return (
-          <g key={m.id} pointerEvents="none">
-            <line
-              x1={m.p1.x} y1={-m.p1.y} x2={m.p2.x} y2={-m.p2.y}
-              stroke="#22d3ee" strokeWidth={0.5} opacity={0.95}
-            />
-            <circle cx={m.p1.x} cy={-m.p1.y} r={0.9} fill="#22d3ee" stroke="white" strokeWidth={0.2} />
-            <circle cx={m.p2.x} cy={-m.p2.y} r={0.9} fill="#22d3ee" stroke="white" strokeWidth={0.2} />
+          <g key={m.id}>
+            <g pointerEvents="none">
+              <line
+                x1={m.p1.x} y1={-m.p1.y} x2={m.p2.x} y2={-m.p2.y}
+                stroke="#22d3ee" strokeWidth={0.5} opacity={0.95}
+              />
+              <circle cx={m.p1.x} cy={-m.p1.y} r={0.9} fill="#22d3ee" stroke="white" strokeWidth={0.2} />
+              <circle cx={m.p2.x} cy={-m.p2.y} r={0.9} fill="#22d3ee" stroke="white" strokeWidth={0.2} />
+              {dist > 0.01 && (
+                <g>
+                  <rect x={mx - 11} y={-my - 4.6} width={22} height={4} fill="rgba(15,23,42,0.9)" rx={0.5} />
+                  <text x={mx} y={-my - 1.4} fontSize={2.6} fontFamily="monospace" fill="#67e8f9" textAnchor="middle">
+                    {`${dist.toFixed(2)}um`}
+                  </text>
+                  <rect x={mx - 13} y={-my - 0.4} width={26} height={3.2} fill="rgba(15,23,42,0.85)" rx={0.5} />
+                  <text x={mx} y={-my + 1.95} fontSize={2.1} fontFamily="monospace" fill="#94a3b8" textAnchor="middle">
+                    {`Δx=${dx.toFixed(2)} Δy=${dy.toFixed(2)}`}
+                  </text>
+                </g>
+              )}
+            </g>
+            {/* Delete affordance — its own clickable group sitting on top of
+                the readout's right edge. cursor:pointer to telegraph it. */}
             {dist > 0.01 && (
-              <g>
-                <rect x={mx - 11} y={-my - 4.6} width={22} height={4} fill="rgba(15,23,42,0.9)" rx={0.5} />
-                <text x={mx} y={-my - 1.4} fontSize={2.6} fontFamily="monospace" fill="#67e8f9" textAnchor="middle">
-                  {`${dist.toFixed(2)}um`}
-                </text>
-                <rect x={mx - 13} y={-my - 0.4} width={26} height={3.2} fill="rgba(15,23,42,0.85)" rx={0.5} />
-                <text x={mx} y={-my + 1.95} fontSize={2.1} fontFamily="monospace" fill="#94a3b8" textAnchor="middle">
-                  {`Δx=${dx.toFixed(2)} Δy=${dy.toFixed(2)}`}
-                </text>
+              <g
+                onMouseDown={(e) => { e.stopPropagation(); }}
+                onClick={(e) => { e.stopPropagation(); deleteRuler(m.id); }}
+                style={{ cursor: 'pointer' }}
+              >
+                <circle cx={xBtnX} cy={xBtnY} r={1.6} fill="#0f172a" stroke="#475569" strokeWidth={0.18} />
+                <text
+                  x={xBtnX} y={xBtnY + 0.85}
+                  fontSize={2.1} fontFamily="monospace" fill="#cbd5e1"
+                  textAnchor="middle" pointerEvents="none"
+                >×</text>
+                <title>Remove this measurement</title>
               </g>
             )}
           </g>
