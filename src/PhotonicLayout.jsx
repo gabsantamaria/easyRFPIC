@@ -3147,7 +3147,8 @@ export default function App() {
     const layer = baseOp?.layer || 'waveguide';
     const conductorLayerId = baseOp?.conductorLayerId;
     // Choose a fresh ID. Format: `<op><n>` so it reads like a normal comp.
-    const prefix = op === 'union' ? 'union' : (op === 'intersect' ? 'isect' : 'diff');
+    const prefix = op === 'union' ? 'union' : (op === 'intersect' ? 'isect'
+      : (op === 'punch' ? 'punch' : 'diff'));
     let n = 1;
     while (scene.components.some(c => c.id === `${prefix}${n}`)) n++;
     const newId = `${prefix}${n}`;
@@ -3168,6 +3169,11 @@ export default function App() {
       label: '',
       ...(conductorLayerId ? { conductorLayerId } : {}),
     };
+    // For 'punch' (subtract-keep): only the BASE operand gets consumedBy.
+    // Tools stay independent so they remain visible, selectable, and
+    // exportable as their own primitives — mirrors HFSS Subtract with
+    // KeepOriginals=True. For every other op, all operands are consumed.
+    const consumesAllOperands = op !== 'punch';
     updateScene(prev => ({
       ...prev,
       components: [
@@ -3175,7 +3181,12 @@ export default function App() {
         // snap targets, and standalone rendering. They still live in
         // scene.components so their cx/cy/w/h/transforms remain editable
         // through the boolean's history sub-section.
-        ...prev.components.map(c => ids.includes(c.id) ? { ...c, consumedBy: newId } : c),
+        ...prev.components.map(c => {
+          if (!ids.includes(c.id)) return c;
+          // Punch: consume only the base (first operand).
+          if (!consumesAllOperands && c.id !== ids[0]) return c;
+          return { ...c, consumedBy: newId };
+        }),
         derived,
       ],
     }));
@@ -3556,6 +3567,7 @@ export default function App() {
                 { label: 'Union', icon: Combine, onClick: () => createBoolean('union'), hint: `${selectedIds.size} selected`, title: 'Combine all selected shapes into one. Native HFSS/pyAEDT exports use Unite. Canvas keeps showing operands separately (no in-browser polygon clipping yet).' },
                 { label: 'Intersect', icon: XIcon, onClick: () => createBoolean('intersect'), hint: `${selectedIds.size} selected`, title: 'Keep only the overlap of all selected shapes. Native HFSS/pyAEDT exports use Intersect.' },
                 { label: 'Subtract', icon: Minus, onClick: () => createBoolean('subtract'), hint: `${selectedIds.size} selected`, title: 'Subtract later-selected shapes from the FIRST one. The first selected component is the base; the rest are tools. Native HFSS/pyAEDT exports use Subtract.' },
+                { label: 'Punch', icon: Minus, onClick: () => createBoolean('punch'), hint: `${selectedIds.size} selected`, title: 'Same as Subtract, but the tool shapes are kept (the hole is cut into the FIRST shape, the others remain visible and exportable). HFSS export uses Subtract with KeepOriginals=True.' },
                 { divider: true },
                 { label: 'Manage in BOOL panel…', icon: Combine, onClick: () => setActivePanel('booleans'), title: 'Open the BOOL panel to view/edit/toggle all boolean operations defined in this scene.' },
               ]}
@@ -4107,7 +4119,10 @@ export default function App() {
                 // step in HFSS terms — the "leaf" of the history). Shown
                 // collapsed so the user can read the kind at a glance.
                 const headerSummary = isBoolean
-                  ? `${c.op === 'union' ? 'Unite' : c.op === 'intersect' ? 'Intersect' : 'Subtract'}(${(c.operandIds || []).join(', ')})`
+                  ? `${c.op === 'union' ? 'Unite'
+                      : c.op === 'intersect' ? 'Intersect'
+                      : c.op === 'punch' ? 'Punch'
+                      : 'Subtract'}(${(c.operandIds || []).join(', ')})`
                   : `Box(w=${c.w}, h=${c.h})`;
                 return (
                   <div key={c.id}>
@@ -4148,12 +4163,26 @@ export default function App() {
                     {isExpanded && (
                       <div className="text-[9px] font-mono leading-tight" style={{ paddingLeft: 4 + indent + 12 }}>
                         {/* For booleans: nested operand sub-trees come FIRST
-                            (they're prerequisites in HFSS history order). */}
+                            (they're prerequisites in HFSS history order).
+                            For 'punch' the tool operands aren't consumed —
+                            they appear standalone at the top level, so here
+                            we only nest operands whose consumedBy points
+                            back at THIS boolean. The non-consumed tools are
+                            shown as a one-line reference instead so the
+                            user still sees what the punch uses. */}
                         {isBoolean && (c.operandIds || []).map(opid => {
                           const opC = byId[opid];
                           if (!opC) return (
                             <div key={opid} className="text-slate-600 italic">missing operand: {opid}</div>
                           );
+                          if (opC.consumedBy !== c.id) {
+                            return (
+                              <div key={opid} className="text-slate-500 py-0.5">
+                                <span className="text-slate-600">└─</span>{' '}
+                                tool (kept): <span className="font-bold" style={{ color: accentFor(opC) }}>{opid}</span>
+                              </div>
+                            );
+                          }
                           return renderObject(opC, depth + 1);
                         })}
                         {/* The creation step itself: CreateBox or Unite/etc. */}
@@ -4221,6 +4250,14 @@ export default function App() {
                       title={selectedIds.size < 2 ? 'Select 2+' : 'Subtract first − rest (−)'}
                     >
                       <Minus size={10} /> −
+                    </button>
+                    <button
+                      onClick={() => createBoolean('punch')}
+                      disabled={selectedIds.size < 2}
+                      className="flex items-center gap-1 px-2 py-1 rounded text-[10px] border border-amber-700 hover:border-amber-500 disabled:opacity-30 text-amber-300"
+                      title={selectedIds.size < 2 ? 'Select 2+' : 'Punch a hole in the first shape using the rest (tools kept)'}
+                    >
+                      <Minus size={10} /> ⌀
                     </button>
                   </div>
 
@@ -4555,16 +4592,19 @@ export default function App() {
                   <div className="border border-slate-700 rounded p-2" style={{ background: 'rgba(15,23,42,0.5)' }}>
                     <div className="flex items-center gap-1 mb-1">
                       <span className="text-[10px] font-bold uppercase tracking-wider" style={{
-                        color: selected.op === 'union' ? '#10b981' : (selected.op === 'intersect' ? '#22d3ee' : '#f59e0b'),
+                        color: selected.op === 'union' ? '#10b981'
+                          : (selected.op === 'intersect' ? '#22d3ee' : '#f59e0b'),
                       }}>derived · {selected.op}</span>
                     </div>
                     <p className="text-[10px] text-slate-400 font-mono leading-snug">
-                      {selected.op === 'subtract'
+                      {(selected.op === 'subtract' || selected.op === 'punch')
                         ? <>{(selected.operandIds || [])[0]}{(selected.operandIds || []).slice(1).map((id, i) => <span key={i}> − {id}</span>)}</>
                         : (selected.operandIds || []).join(selected.op === 'union' ? ' + ' : ' ∩ ')}
                     </p>
                     <p className="text-[9px] text-slate-500 mt-1 italic">
-                      Operands were consumed when this component was created (HFSS-style). They no longer appear in SHAPES. Delete this component to release them.
+                      {selected.op === 'punch'
+                        ? 'Punch: only the base (first operand) was consumed. Tool shapes remain standalone — they render outside the boolean too. HFSS export uses Subtract with KeepOriginals=True.'
+                        : 'Operands were consumed when this component was created (HFSS-style). They no longer appear in SHAPES. Delete this component to release them.'}
                     </p>
                   </div>
                 ) : (

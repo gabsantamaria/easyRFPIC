@@ -1713,9 +1713,12 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
               </g>
             );
           }
-          if (comp.op === 'subtract') {
+          if (comp.op === 'subtract' || comp.op === 'punch') {
             // base operand drawn in `fillColor`, with a mask that has the
             // base's interior in white minus subtractors' interiors in black.
+            // 'punch' is rendered identically to 'subtract' here — the
+            // distinction only matters for consumedBy tagging and the
+            // keep_originals export flag.
             const maskId = nextDefId(`${keyBase}-submask`);
             const bbox = collectBbox(comp);
             const pad = Math.max(bbox.maxX - bbox.minX, bbox.maxY - bbox.minY) * 0.1 + 1;
@@ -1830,9 +1833,10 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
               </g>
             );
           }
-          if (comp.op === 'subtract') {
+          if (comp.op === 'subtract' || comp.op === 'punch') {
             // Base operand outline masked by NOT(subtractors), plus each
-            // subtractor's outline clipped by base interior.
+            // subtractor's outline clipped by base interior. 'punch' is
+            // rendered identically to 'subtract' here.
             const maskId = nextDefId(`${keyBase}-subout`);
             const baseClipId = nextDefId(`${keyBase}-baseclip`);
             const bbox = collectBbox(comp);

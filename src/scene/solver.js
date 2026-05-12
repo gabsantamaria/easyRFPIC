@@ -74,7 +74,7 @@ export function solveLayout(components, snaps, paramValues) {
     for (const opid of (b.operandIds || [])) visit(opid);
     if (!Number.isFinite(minX)) return false;
     // For SUBTRACT and INTERSECT, restrict the bbox to operand 0 (the base).
-    if (b.op === 'subtract' || b.op === 'intersect') {
+    if (b.op === 'subtract' || b.op === 'intersect' || b.op === 'punch') {
       minX = Infinity; maxX = -Infinity; minY = Infinity; maxY = -Infinity;
       const base = byId[b.operandIds?.[0]];
       if (base) {
@@ -361,7 +361,7 @@ export function resolveBooleanBboxes(solved, paramValues) {
       // than the full operand-union bbox. INTERSECT is bounded by the
       // intersection of operands, but that requires polygon math; we use
       // the base bbox as a safe over-approximation.
-      if (c.op === 'subtract' || c.op === 'intersect') {
+      if (c.op === 'subtract' || c.op === 'intersect' || c.op === 'punch') {
         const bb0 = bboxOfComponent(ops[0]);
         if (bb0) {
           minX = bb0.minX; maxX = bb0.maxX;

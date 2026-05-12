@@ -1151,6 +1151,14 @@ except Exception as e:
 except Exception as e:
     oDesktop.AddMessage("", "", 1, "Subtract failed: " + str(e))
 `;
+      } else if (b.op === 'punch') {
+        code += `try:
+    oEditor.Subtract(
+        ["NAME:Selections", "Blank Parts:=", "${safeIds[0]}", "Tool Parts:=", "${safeIds.slice(1).join(',')}"],
+        ["NAME:SubtractParameters", "KeepOriginals:=", True])
+except Exception as e:
+    oDesktop.AddMessage("", "", 1, "Punch failed: " + str(e))
+`;
       }
       // Rename the surviving part (first operand's name) to the boolean's id
       // so post-boolean transforms target the right name.
