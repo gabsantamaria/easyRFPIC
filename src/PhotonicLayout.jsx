@@ -1100,10 +1100,39 @@ export default function App() {
   };
 
   const updateComp = (id, patch) => {
-    updateScene(prev => ({
-      ...prev,
-      components: prev.components.map(c => c.id === id ? { ...c, ...patch } : c),
-    }));
+    updateScene(prev => {
+      const target = prev.components.find(c => c.id === id);
+      if (!target) return prev;
+      // Group transform propagation: groups act like a composite object,
+      // so a transform-chain edit on any one member should apply to
+      // every member. Otherwise a Repeat / Rotate / Displace on a
+      // grouped primitive would visibly affect only that primitive and
+      // tear the group apart (each member at a different repeat phase).
+      // Other patch fields stay per-component — only `transforms`
+      // propagates, so layer / w / h / cx / cy / label / etc. on a
+      // grouped member still edit that single member.
+      const groupName = target.group;
+      const propagateTransforms = groupName && Object.prototype.hasOwnProperty.call(patch, 'transforms');
+      // Deep-clone the transforms list per recipient so each member has
+      // its own array identity (the solver mutates per-instance state
+      // off the transform records via expandTransforms, and aliasing
+      // could in theory bite us on a future change).
+      const cloneTransforms = (ts) => (ts || []).map((t) => ({ ...t }));
+      return {
+        ...prev,
+        components: prev.components.map(c => {
+          if (c.id === id) return { ...c, ...patch };
+          // Propagate to group members EXCEPT operands of a boolean
+          // (consumedBy != null). A consumed operand inherits its
+          // transform stream from its parent boolean's cluster, so
+          // copying transforms onto it directly would double-apply.
+          if (propagateTransforms && c.group === groupName && !c.consumedBy) {
+            return { ...c, transforms: cloneTransforms(patch.transforms) };
+          }
+          return c;
+        }),
+      };
+    });
   };
 
   const deleteComp = (idOrSet) => {
