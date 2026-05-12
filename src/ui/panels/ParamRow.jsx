@@ -11,6 +11,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Trash2, AlertTriangle } from 'lucide-react';
 import { HoverTooltip } from '../HoverTooltip.jsx';
+import { ParamTuner } from './ParamTuner.jsx'; // EXPERIMENTAL — see ParamTuner.jsx for removal instructions
 
 export function ParamRow({ name, p, onRename, onUpdateExpr, onCommitExpr, onUpdateUnit, onUpdateDesc, onDelete, value, error, isUnused, isInvolved, autoFocus, onAutoFocusDone }) {
   const [editingName, setEditingName] = useState(name);
@@ -139,6 +140,9 @@ export function ParamRow({ name, p, onRename, onUpdateExpr, onCommitExpr, onUpda
         </button>
         <button onClick={onDelete} className="text-slate-600 hover:text-red-400"><Trash2 size={10} /></button>
       </div>
+      {/* EXPERIMENTAL — ± 20 % tuner. Remove this single line plus the
+          ParamTuner import to drop the experiment. */}
+      <ParamTuner value={value} onUpdateExpr={onUpdateExpr} />
       {expanded && (
         <div className="flex items-center gap-1 px-1.5 pb-1 pt-0">
           <input
