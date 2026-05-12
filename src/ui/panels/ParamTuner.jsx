@@ -25,11 +25,23 @@ export function ParamTuner({ value, onUpdateExpr }) {
   // The value at the START of the current drag — the anchor for the ±
   // range. Captured on pointerdown so partial drags compound sensibly
   // (the user sees ± of the value they're staring at, not of some stale
-  // snapshot).
+  // snapshot). Also the rollback target if the user presses Escape.
   const nominalRef = useRef(0);
+  // Drag bookkeeping. `isDragging` lets the Escape handler know whether
+  // it should treat the keypress as a cancel. `isCancelled` short-circuits
+  // any further onChange events fired after Escape (the browser keeps
+  // firing them as long as the user holds the mouse and moves it).
+  // `pointerId` is held so we can releasePointerCapture on cancel.
+  const isDraggingRef = useRef(false);
+  const isCancelledRef = useRef(false);
+  const pointerIdRef = useRef(null);
+  const inputRef = useRef(null);
 
   const onPointerDown = (e) => {
     nominalRef.current = Number.isFinite(value) ? value : 0;
+    isDraggingRef.current = true;
+    isCancelledRef.current = false;
+    pointerIdRef.current = e.pointerId;
     // Pointer capture: subsequent pointermove/up events are routed here
     // even if the cursor leaves the element. Without this, fast drags
     // can strand `pos` at a non-zero value when the cursor exits.
@@ -37,6 +49,7 @@ export function ParamTuner({ value, onUpdateExpr }) {
   };
 
   const onChange = (e) => {
+    if (isCancelledRef.current) return;
     const next = parseFloat(e.target.value) || 0;
     setPos(next);
     const nominal = nominalRef.current;
@@ -48,13 +61,40 @@ export function ParamTuner({ value, onUpdateExpr }) {
     onUpdateExpr(tuned.toFixed(4));
   };
 
-  const reset = () => { if (pos !== 0) setPos(0); };
+  const reset = () => {
+    isDraggingRef.current = false;
+    isCancelledRef.current = false;
+    pointerIdRef.current = null;
+    if (pos !== 0) setPos(0);
+  };
 
-  const tooltip = `Tune ±${RANGE_PERCENT}% from ${Number.isFinite(value) ? value.toFixed(3) : '?'}. Releasing re-anchors the range to the new value.`;
+  // Escape during a drag: roll the value back to the pre-drag nominal and
+  // end the drag, ignoring any further onChange events until the user
+  // releases the pointer. Only fires when the slider has focus, which it
+  // does for the duration of a click-and-drag.
+  const onKeyDown = (e) => {
+    if (e.key !== 'Escape' || !isDraggingRef.current) return;
+    e.preventDefault();
+    isCancelledRef.current = true;
+    const nominal = nominalRef.current;
+    if (Number.isFinite(nominal)) onUpdateExpr(nominal.toFixed(4));
+    setPos(0);
+    // Release pointer capture so the slider stops grabbing pointer events
+    // — the user is still holding the mouse, but we no longer want to
+    // track it.
+    if (inputRef.current && pointerIdRef.current != null) {
+      try { inputRef.current.releasePointerCapture(pointerIdRef.current); } catch {}
+    }
+    // Blur so a subsequent Escape doesn't keep firing on stale focus.
+    e.currentTarget.blur();
+  };
+
+  const tooltip = `Tune ±${RANGE_PERCENT}% from ${Number.isFinite(value) ? value.toFixed(3) : '?'}. Releasing re-anchors the range to the new value; Escape cancels and reverts.`;
 
   return (
     <div className="flex items-center px-1.5 pb-0.5">
       <input
+        ref={inputRef}
         type="range"
         min={-RANGE_PERCENT}
         max={RANGE_PERCENT}
@@ -64,6 +104,7 @@ export function ParamTuner({ value, onUpdateExpr }) {
         onChange={onChange}
         onPointerUp={reset}
         onPointerCancel={reset}
+        onKeyDown={onKeyDown}
         className="flex-1 h-0.5 accent-slate-500 cursor-ew-resize opacity-50 hover:opacity-100"
         title={tooltip}
         disabled={!Number.isFinite(value) || value === 0}
