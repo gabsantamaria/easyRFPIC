@@ -22,7 +22,7 @@ import { ringToSvgPath } from '../../geometry/paths.js';
 // =========================================================================
 // CANVAS
 // =========================================================================
-export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelection, viewport, setViewport, snapMode, setSnapMode, gridSize, gridSnapEnabled, paramValues, addParam, updateParamExpr, rulerMode, setRulerMode, rulerMeasurements, setRulerMeasurements, rulerInProgress, setRulerInProgress, rulerSnapPoint, setRulerSnapPoint, alertDialog, setInteractionStatus, showDimensions, addMode, setAddMode, commitDragAdd }) {
+export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelection, viewport, setViewport, snapMode, setSnapMode, gridSize, gridSnapEnabled, paramValues, addParam, updateParamExpr, rulerMode, setRulerMode, rulerMeasurements, setRulerMeasurements, rulerInProgress, setRulerInProgress, rulerSnapPoint, setRulerSnapPoint, alertDialog, setInteractionStatus, showDimensions, addMode, setAddMode, commitDragAdd, onComponentContextMenu }) {
   const svgRef = useRef(null);
 
   const solved = useMemo(() => {
@@ -415,6 +415,10 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
   };
 
   const onMouseDown = (e) => {
+    // Only left-button starts drags / selection. Right-click is reserved
+    // for the context menu (handled in onContextMenu below); middle-click
+    // is currently a no-op.
+    if (e.button !== 0) return;
     const target = e.target;
 
     // Ruler tool: clicks pick measurement endpoints
@@ -1211,6 +1215,21 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       onMouseUp={onMouseUp}
       onMouseLeave={onMouseUp}
       onWheel={onWheel}
+      onContextMenu={(e) => {
+        // Right-click on a component opens the App-level context menu.
+        // Right-click on the bare canvas falls through to the browser's
+        // own menu (no preventDefault) so DevTools / "save image" stay
+        // accessible during dev.
+        const cid = e.target?.dataset?.compId;
+        if (!cid || !onComponentContextMenu) return;
+        e.preventDefault();
+        // Replace the selection with this component if it isn't already
+        // included, so the menu operations have a clear target.
+        if (!selectedIds.has(cid)) {
+          setSelection({ ids: new Set([cid]), primary: cid });
+        }
+        onComponentContextMenu({ compId: cid, x: e.clientX, y: e.clientY });
+      }}
     >
       <defs>
         <pattern id="grid" width={gridSize} height={gridSize} patternUnits="userSpaceOnUse">

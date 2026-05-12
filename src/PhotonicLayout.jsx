@@ -40,6 +40,7 @@ import { GroupTreeItem } from './ui/panels/GroupTreeItem.jsx';
 import { LayerCard, LevelGroup } from './ui/panels/LayersPanel.jsx';
 import { Canvas } from './ui/canvas/Canvas.jsx';
 import { DeferredTextInput } from './ui/DeferredTextInput.jsx';
+import { ContextMenu } from './ui/ContextMenu.jsx';
 
 // =========================================================================
 // PHOTONIC IC LAYOUT TOOL — Phase 1.1
@@ -1126,6 +1127,105 @@ export default function App() {
 
   const deleteSelected = () => {
     if (selectedIds.size > 0) deleteComp(selectedIds);
+  };
+
+  // Z-order ops. The render order is the array order in scene.components
+  // (later entries paint on top), so all four are list-reorder operations
+  // on a single component. Multi-select isn't reordered — apply one at a
+  // time if you need that.
+  const bringToFront = (id) => updateScene(prev => {
+    const target = prev.components.find(c => c.id === id);
+    if (!target) return prev;
+    const others = prev.components.filter(c => c.id !== id);
+    return { ...prev, components: [...others, target] };
+  });
+  const sendToBack = (id) => updateScene(prev => {
+    const target = prev.components.find(c => c.id === id);
+    if (!target) return prev;
+    const others = prev.components.filter(c => c.id !== id);
+    return { ...prev, components: [target, ...others] };
+  });
+  const bringForward = (id) => updateScene(prev => {
+    const idx = prev.components.findIndex(c => c.id === id);
+    if (idx < 0 || idx >= prev.components.length - 1) return prev;
+    const next = [...prev.components];
+    [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
+    return { ...prev, components: next };
+  });
+  const sendBackward = (id) => updateScene(prev => {
+    const idx = prev.components.findIndex(c => c.id === id);
+    if (idx <= 0) return prev;
+    const next = [...prev.components];
+    [next[idx], next[idx - 1]] = [next[idx - 1], next[idx]];
+    return { ...prev, components: next };
+  });
+
+  // Duplicate a set of ids in place — inline so it doesn't have to round-trip
+  // through clipboard state (handleCopy + handlePaste would work but their
+  // closures only see the post-setClipboard value on the next render).
+  // Mirrors handleCopy + handlePaste's id-renaming and offset behavior.
+  const duplicateIds = (idSet) => {
+    const ids = idSet instanceof Set ? idSet : new Set([idSet]);
+    if (ids.size === 0) return;
+    const comps = scene.components.filter(c => ids.has(c.id))
+      .map(c => ({ ...c, cutouts: (c.cutouts || []).map(cu => ({ ...cu })) }));
+    const internalSnaps = scene.snaps
+      .filter(s => ids.has(s.from.compId) && ids.has(s.to.compId))
+      .map(s => ({ ...s }));
+    const idMap = {};
+    const existingIds = new Set(scene.components.map(c => c.id));
+    for (const c of comps) {
+      let candidate = `${c.id}_copy`;
+      let i = 2;
+      while (existingIds.has(candidate)) candidate = `${c.id}_copy${i++}`;
+      existingIds.add(candidate);
+      idMap[c.id] = candidate;
+    }
+    const offset = gridSize * 5;
+    const newComps = comps.map(c => ({
+      ...c,
+      id: idMap[c.id],
+      cx: c.cx + offset,
+      cy: c.cy - offset,
+    }));
+    const newSnaps = internalSnaps.map(s => ({
+      ...s,
+      id: `snap_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      from: { ...s.from, compId: idMap[s.from.compId] },
+      to: { ...s.to, compId: idMap[s.to.compId] },
+    }));
+    updateScene(prev => ({
+      ...prev,
+      components: [...prev.components, ...newComps],
+      snaps: [...prev.snaps, ...newSnaps],
+    }));
+    const newSel = new Set(newComps.map(c => c.id));
+    setSelection({ ids: newSel, primary: newComps[newComps.length - 1].id });
+  };
+
+  // Right-click context menu state (right-clicking a component opens it).
+  // null when closed; otherwise { x, y, items }.
+  const [contextMenu, setContextMenu] = useState(null);
+  const openComponentContextMenu = ({ compId, x, y }) => {
+    const comp = scene.components.find(c => c.id === compId);
+    if (!comp) return;
+    const idx = scene.components.findIndex(c => c.id === compId);
+    const isFront = idx === scene.components.length - 1;
+    const isBack = idx === 0;
+    const multi = selectedIds.has(compId) && selectedIds.size > 1;
+    const items = [
+      { label: 'Bring to front', icon: ArrowUp, onClick: () => bringToFront(compId), disabled: isFront },
+      { label: 'Bring forward', onClick: () => bringForward(compId), disabled: isFront, hint: '↑' },
+      { label: 'Send backward', onClick: () => sendBackward(compId), disabled: isBack, hint: '↓' },
+      { label: 'Send to back', icon: ArrowDown, onClick: () => sendToBack(compId), disabled: isBack },
+      { divider: true },
+      { label: multi ? `Duplicate (${selectedIds.size})` : 'Duplicate', icon: Copy,
+        onClick: () => duplicateIds(multi ? selectedIds : new Set([compId])) },
+      { divider: true },
+      { label: multi ? `Delete (${selectedIds.size})` : 'Delete', icon: Trash2,
+        onClick: () => deleteComp(multi ? selectedIds : new Set([compId])), hint: 'Del' },
+    ];
+    setContextMenu({ x, y, items });
   };
 
   const deleteSnap = (snapId) => updateScene(prev => ({ ...prev, snaps: prev.snaps.filter(s => s.id !== snapId) }));
@@ -4133,6 +4233,7 @@ export default function App() {
             addMode={addMode}
             setAddMode={setAddMode}
             commitDragAdd={commitDragAdd}
+            onComponentContextMenu={openComponentContextMenu}
           />
           <div className="absolute top-2 left-2 px-2 py-1 rounded text-[10px] font-mono pointer-events-none" style={{ background: 'rgba(15,23,42,0.85)', color: '#e2e8f0' }}>
             wheel = zoom · drag = pan/move · ⌥/Alt+drag = marquee · ⌘+click = toggle · ⌘+drag = no grid · F = fit · ⌘Z/⇧Z = undo/redo · ⌘C/V = copy/paste · ⌘S = save
@@ -4438,6 +4539,16 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      {/* Right-click context menu (rendered as a fixed-positioned overlay) */}
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          items={contextMenu.items}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
 
       {/* Modal dialog (confirm/prompt/alert) */}
       <ModalDialog
