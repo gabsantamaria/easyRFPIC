@@ -41,6 +41,7 @@ import { LayerCard, LevelGroup } from './ui/panels/LayersPanel.jsx';
 import { Canvas } from './ui/canvas/Canvas.jsx';
 import { DeferredTextInput } from './ui/DeferredTextInput.jsx';
 import { ContextMenu } from './ui/ContextMenu.jsx';
+import { BUILTIN_TEMPLATES } from './templates/index.js';
 
 // =========================================================================
 // PHOTONIC IC LAYOUT TOOL — Phase 1.1
@@ -1802,83 +1803,12 @@ export default function App() {
     await refreshLibrary();
   };
 
-  // Insert a built-in template: a racetrack optical waveguide loop using
-  // partial-Euler bends. Default parameters:
-  //   R = 100 µm           (minimum radius of curvature in the bends)
-  //   L_straight = 300 µm  (length of each straight section)
-  //   p = 1                (full Euler — no constant-radius arc segment)
-  //
-  // Each parameter is added as a named scene parameter prefixed with the
-  // racetrack's id, so the user can edit them through the inspector or the
-  // PARAMS panel and the geometry updates live. The component's AABB
-  // (w, h) is set to a parametric over-approximation using the empirical
-  // linear-in-p fit; the actual waveguide band is computed exactly at
-  // render time from R, L_straight, p, and the waveguide width.
-  const insertBuiltinRacetrack = () => {
-    updateScene(prev => {
-      // Pick a fresh component id.
-      let idBase = 'racetrack';
-      let id = idBase;
-      let suffix = 0;
-      while (prev.components.some(c => c.id === id)) { suffix++; id = `${idBase}_${suffix}`; }
-
-      // Allocate fresh parameter names. R and L_straight are unique-per-
-      // instance so duplicating the racetrack gives each its own knobs.
-      const pickName = (base) => {
-        let n = base; let i = 2;
-        while (prev.params[n]) { n = `${base}_${i++}`; }
-        return n;
-      };
-      const pR = pickName(`${id}_R`);
-      const pL = pickName(`${id}_L_straight`);
-      const pP = pickName(`${id}_p`);
-      const newParams = {
-        ...prev.params,
-        [pR]: { expr: '100', unit: 'µm', desc: `${id} min radius of curvature` },
-        [pL]: { expr: '300', unit: 'µm', desc: `${id} straight section length` },
-        [pP]: { expr: '1',   unit: '',    desc: `${id} Euler split (0 = pure arc, 1 = pure Euler)` },
-      };
-      // Waveguide width: prefer the waveguide layer's core_width if defined,
-      // else fall back to the conventional `w_wg` parameter.
-      const wgLayer = (prev.stack || []).find(l => l.role === 'waveguide');
-      const wgWidthExpr = (wgLayer && wgLayer.core_width) ? wgLayer.core_width : 'w_wg';
-      // If the referenced parameter doesn't exist in the scene yet, create
-      // a default one. Without this, the racetrack would silently render at
-      // zero width on a blank scene (the wgWidth expression evaluates to
-      // NaN → 0). Picking 1.2 matches the rest of the default params.
-      if (!newParams[wgWidthExpr] && /^[A-Za-z_][A-Za-z0-9_]*$/.test(wgWidthExpr)) {
-        newParams[wgWidthExpr] = { expr: '1.2', unit: 'µm', desc: 'WG core width (rib bottom)' };
-      }
-
-      // Parametric AABB. Bend extension formulas (empirical linear-in-p
-      // fits; exact at p=0 and within ~1% at p=1):
-      //   bend_x_extent ≈ R * (1 + 1.45 * p)   — max |x| of the bend curve
-      //   bend_y_span   ≈ R * (2 + 0.754 * p)  — vertical distance between
-      //                                          the two straight centerlines
-      // The full racetrack footprint adds the waveguide width to each axis
-      // since the band extends ±width/2 beyond the centerline.
-      const wExpr = `(${pL}) + 2 * (${pR}) * (1 + 1.45 * (${pP})) + (${wgWidthExpr})`;
-      const hExpr = `(${pR}) * (2 + 0.754 * (${pP})) + (${wgWidthExpr})`;
-
-      const newComp = {
-        id,
-        kind: 'racetrack',
-        layer: 'waveguide',
-        // Centroid placed at the viewport center so the user sees it
-        // appear where they're looking.
-        cx: viewport.x, cy: viewport.y,
-        R: pR, L_straight: pL, p: pP,
-        wgWidth: wgWidthExpr,
-        w: wExpr, h: hExpr,
-        cutouts: [], transforms: [],
-        label: id,
-      };
-      return {
-        ...prev,
-        params: newParams,
-        components: [...prev.components, newComp],
-      };
-    });
+  // Insert a built-in template by id. Each template knows how to assemble
+  // its own params/components/snaps; we just hand it the current scene and
+  // viewport and merge the result.
+  const insertBuiltinTemplate = (template) => {
+    if (!template || typeof template.insert !== 'function') return;
+    updateScene((prev) => template.insert(prev, { viewport }));
   };
 
   // Drop a library item into the current scene at viewport center
@@ -4130,24 +4060,32 @@ export default function App() {
                 </p>
 
                 {/* Built-in templates: a small set of parameterized
-                    components shipped with the app. They're inserted into
-                    the scene with sensible default parameters and can then
-                    be edited normally. */}
+                    components shipped with the app, registered in
+                    src/templates/index.js. Each entry knows how to drop
+                    its own params + components into the current scene. */}
                 <div className="border-t border-slate-800 pt-2 mt-2">
                   <p className="text-[10px] uppercase tracking-wider text-slate-500 px-1 mb-1">Built-in templates</p>
-                  <div className="rounded border border-slate-800 px-2 py-1.5 flex items-center gap-2" style={{ background: 'rgba(30,41,59,0.5)' }}>
-                    <Package size={11} className="text-cyan-400 flex-shrink-0" />
-                    <div className="flex-1 min-w-0">
-                      <p className="font-mono text-xs text-cyan-300 truncate">Euler racetrack</p>
-                      <p className="text-[9px] text-slate-500 truncate">R=100µm · L=300µm · p=1 (pure Euler)</p>
-                    </div>
-                    <button
-                      onClick={insertBuiltinRacetrack}
-                      className="text-[10px] px-2 py-0.5 rounded border border-cyan-700 text-cyan-300 hover:bg-cyan-900/40"
-                      title="Insert a racetrack optical waveguide with partial-Euler bends. Parameters: R (min curvature radius), L_straight (straight section length), p (Euler split parameter ∈ [0,1])."
-                    >
-                      insert
-                    </button>
+                  <div className="space-y-1">
+                    {BUILTIN_TEMPLATES.map((t) => (
+                      <div
+                        key={t.id}
+                        className="rounded border border-slate-800 px-2 py-1.5 flex items-center gap-2"
+                        style={{ background: 'rgba(30,41,59,0.5)' }}
+                      >
+                        <Package size={11} className="text-cyan-400 flex-shrink-0" />
+                        <div className="flex-1 min-w-0">
+                          <p className="font-mono text-xs text-cyan-300 truncate">{t.name}</p>
+                          <p className="text-[9px] text-slate-500 truncate">{t.description}</p>
+                        </div>
+                        <button
+                          onClick={() => insertBuiltinTemplate(t)}
+                          className="text-[10px] px-2 py-0.5 rounded border border-cyan-700 text-cyan-300 hover:bg-cyan-900/40"
+                          title={t.description}
+                        >
+                          insert
+                        </button>
+                      </div>
+                    ))}
                   </div>
                 </div>
 
