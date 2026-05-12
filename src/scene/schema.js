@@ -185,6 +185,30 @@ export function normalizeScene(s) {
     migratedComponents = [...migratedComponents, ...newDerived];
   }
 
+  // Migrate punch clones: in early versions of the 'punch' op the clone
+  // inherited the TOOL's layer, which caused the HFSS exporter to emit a
+  // sheet when the base was a box (subtract then failed on
+  // dimensionality). The clone's layer must match the BASE's layer so
+  // the subtract works. Detect any clone (cloneOf set) whose layer
+  // differs from its boolean-base and fix it.
+  {
+    const byId = Object.fromEntries(migratedComponents.map(c => [c.id, c]));
+    migratedComponents = migratedComponents.map(c => {
+      if (!c.cloneOf || !c.consumedBy) return c;
+      const parent = byId[c.consumedBy];
+      if (!parent || parent.kind !== 'boolean') return c;
+      const baseId = (parent.operandIds || [])[0];
+      const base = baseId ? byId[baseId] : null;
+      if (!base) return c;
+      if (c.layer === base.layer && c.conductorLayerId === base.conductorLayerId) return c;
+      return {
+        ...c,
+        layer: base.layer,
+        conductorLayerId: base.conductorLayerId,
+      };
+    });
+  }
+
   return {
     params,
     components: migratedComponents,

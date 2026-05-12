@@ -540,6 +540,7 @@ def safe_create_box(box_params, attributes, name):
   // WGs are named "<id>_rib", electrodes are named "<id>".
   const emittedWgNames = [];
   const emittedElecNames = [];
+  const emittedPortNames = [];
   for (const c of solved) {
     // Boolean components are emitted separately AFTER all primitives are
     // built (see the Boolean operations section below). Their operands are
@@ -590,14 +591,17 @@ def safe_create_box(box_params, attributes, name):
           zSize = layerZ[elecLayer.id].thickness;
         }
       } else if (c.layer === 'port') {
-        // Lumped ports sit at the waveguide top by default; thickness is
-        // a small slab to make the port a flat sheet at one Z level.
+        // Ports are 2-D sheets — needed for lumped/wave port excitation.
+        // Place at the waveguide top by default; skip the sweep so the
+        // result stays a sheet instead of a slab. zSize=0 signals "no
+        // sweep" to the conditional emission below.
         zBottom = evalExpr('h_wg', paramValues) || 0.6;
-        zSize = 0.01;
+        zSize = 0;
       }
       const materialName = c.layer === 'waveguide'
         ? (wgLayer ? wgLayer.material : 'lithium_niobate')
-        : (c.layer === 'electrode' ? 'gold' : 'pec');
+        : (c.layer === 'electrode' ? 'gold'
+        : (c.layer === 'port' ? 'vacuum' : 'pec'));
       // Build the points list. CreatePolyline expects a sequence of
       // PolylinePoint records.
       const ptRecords = ring.map(([px, py]) =>
@@ -606,7 +610,11 @@ def safe_create_box(box_params, attributes, name):
       const segRecords = ring.map((_, i) =>
         `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", ${i}, "NoOfPoints:=", 2]`
       ).join(', ');
-      code += `# ${c.id}: ${shapeKind} as polygonal sheet (tessellation = ${ring.length} verts)\n`;
+      // For ports (zSize=0) the closed polyline IS the final geometry —
+      // a 2-D sheet usable as a port assignment. For everything else we
+      // also SweepAlongVector to extrude into a 3-D body.
+      const isPortSheet = (c.layer === 'port');
+      code += `# ${c.id}: ${shapeKind} as polygonal ${isPortSheet ? 'sheet (port)' : 'sheet'} (tessellation = ${ring.length} verts)\n`;
       code += `try:
     oEditor.CreatePolyline(
         ["NAME:PolylineParameters",
@@ -625,11 +633,11 @@ def safe_create_box(box_params, attributes, name):
         ["NAME:Attributes",
          "Name:=", "${id}",
          "Flags:=", "",
-         "Color:=", "(200 200 200)",
-         "Transparency:=", 0.0,
+         "Color:=", "${isPortSheet ? '(255 100 100)' : '(200 200 200)'}",
+         "Transparency:=", ${isPortSheet ? '0.5' : '0.0'},
          "PartCoordinateSystem:=", "Global",
          "MaterialValue:=", "\\"${ascii(materialName)}\\"",
-         "SolveInside:=", ${c.layer === 'waveguide' ? 'True' : 'False'}])
+         "SolveInside:=", ${c.layer === 'waveguide' ? 'True' : (isPortSheet ? 'True' : 'False')})${isPortSheet ? '' : `
     oEditor.SweepAlongVector(
         ["NAME:Selections", "Selections:=", "${id}", "NewPartsModelFlag:=", "Model"],
         ["NAME:VectorSweepParameters",
@@ -637,7 +645,7 @@ def safe_create_box(box_params, attributes, name):
          "CheckFaceFaceIntersection:=", False,
          "SweepVectorX:=", "0um",
          "SweepVectorY:=", "0um",
-         "SweepVectorZ:=", "${zSize.toFixed(4)}um"])
+         "SweepVectorZ:=", "${zSize.toFixed(4)}um"])`}
 except Exception as e:
     try:
         oDesktop.AddMessage("", "", 1, "Failed to build ${shapeKind} ${id}: " + str(e))
@@ -646,6 +654,7 @@ except Exception as e:
 `;
       if (c.layer === 'electrode') emittedElecNames.push(id);
       else if (c.layer === 'waveguide') emittedWgNames.push(id);
+      else if (c.layer === 'port') emittedPortNames.push(id);
       // For racetracks: the outer ring above is the OUTER perimeter of
       // the waveguide band. We also need to subtract an INNER cylinder-
       // like body so the result is the hollow band, not a filled disc.
@@ -933,6 +942,32 @@ except Exception as e:
     except:
         pass
 `;
+    } else if (c.layer === 'port') {
+      // Port-layer rects are emitted as 2-D sheet rectangles (axis-aligned
+      // to the Z plane). HFSS uses 2-D sheets as the geometry for lumped
+      // ports and wave ports — a box would not be assignable as an
+      // excitation. The sheet sits at the top of the waveguide layer by
+      // default; the user can move it in Z via a displace transform if
+      // they want it on a different face.
+      emittedPortNames.push(id);
+      const portZ_um = `(h_wg)um`;
+      code += `try:
+    oEditor.CreateRectangle(
+        ["NAME:RectangleParameters",
+         "IsCovered:=", True,
+         "XStart:=", "${xLoExprUm}", "YStart:=", "${yLoExprUm}", "ZStart:=", "${portZ_um}",
+         "Width:=", "${wExprUm}", "Height:=", "${hExprUm}",
+         "WhichAxis:=", "Z"],
+        ["NAME:Attributes",
+         "Name:=", "${id}", "Flags:=", "", "Color:=", "(255 100 100)",
+         "Transparency:=", 0.5, "PartCoordinateSystem:=", "Global",
+         "MaterialValue:=", "\\"vacuum\\"", "SolveInside:=", True])
+except Exception as e:
+    try:
+        oDesktop.AddMessage("", "", 1, "Failed to build port sheet ${id}: " + str(e))
+    except:
+        pass
+`;
     } else {
       emittedElecNames.push(id);
       // Pick the conductor layer this component is bound to (or fall back to default)
@@ -1152,10 +1187,13 @@ except Exception as e:
     oDesktop.AddMessage("", "", 1, "Subtract failed: " + str(e))
 `;
       } else if (b.op === 'punch') {
+        // The clones are consumed by the subtract; the original tools
+        // live outside the boolean and were emitted as their own
+        // primitives earlier — so KeepOriginals=False is correct here.
         code += `try:
     oEditor.Subtract(
         ["NAME:Selections", "Blank Parts:=", "${safeIds[0]}", "Tool Parts:=", "${safeIds.slice(1).join(',')}"],
-        ["NAME:SubtractParameters", "KeepOriginals:=", True])
+        ["NAME:SubtractParameters", "KeepOriginals:=", False])
 except Exception as e:
     oDesktop.AddMessage("", "", 1, "Punch failed: " + str(e))
 `;
@@ -1180,6 +1218,31 @@ except Exception as e:
       const bW = typeof solvedB.w === 'number' ? solvedB.w : evalExpr(solvedB.w, paramValues);
       const bH = typeof solvedB.h === 'number' ? solvedB.h : evalExpr(solvedB.h, paramValues);
       emitTransformChainHfss(b.transforms || [], [safeBoolId], solvedB.cx, solvedB.cy, bW || 0, bH || 0);
+      // ----------------------------------------------------------------
+      // After the boolean: operand 0 has been renamed to the boolean's
+      // id, and (for everything except 'punch' with KeepOriginals) the
+      // other operands have been consumed. Reflect that in the tracked
+      // primitive-name lists so downstream operations (cladding
+      // subtract, port-sheet excitation) reference parts that actually
+      // still exist in HFSS.
+      // ----------------------------------------------------------------
+      const renameInList = (list, oldName, newName) => {
+        const idx = list.indexOf(oldName);
+        if (idx >= 0) list[idx] = newName;
+      };
+      const removeFromList = (list, name) => {
+        const idx = list.indexOf(name);
+        if (idx >= 0) list.splice(idx, 1);
+      };
+      renameInList(emittedElecNames, safeIds[0], safeBoolId);
+      renameInList(emittedWgNames, safeIds[0], safeBoolId);
+      // Non-first operands are consumed by the subtract (and clones in
+      // a punch are consumed too — they're the "Tool Parts" of the
+      // KeepOriginals=False subtract).
+      for (const oldId of safeIds.slice(1)) {
+        removeFromList(emittedElecNames, oldId);
+        removeFromList(emittedWgNames, oldId);
+      }
     }
   }
 

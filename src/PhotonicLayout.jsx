@@ -3183,6 +3183,13 @@ export default function App() {
       // gets cloned; the clone takes the operand slot, the original
       // stays standalone.
       derivedOperandIds = [ids[0]];
+      // The clone inherits the BASE's layer so it has the same Z
+      // extent (and exports as the same primitive kind) as the base.
+      // Without this a port-layer tool would emit as a sheet, and the
+      // HFSS Subtract(box, sheet) call would fail. The clone only
+      // matters for the subtract — once the op runs it's consumed.
+      const baseLayer = baseOp?.layer || layer;
+      const baseConductorLayerId = baseOp?.conductorLayerId;
       for (const toolId of ids.slice(1)) {
         const tool = scene.components.find(c => c.id === toolId);
         if (!tool) continue;
@@ -3198,6 +3205,14 @@ export default function App() {
           id: cloneId,
           cx: cloneCx,
           cy: cloneCy,
+          // Force the clone onto the BASE's layer (and conductor binding,
+          // if any). This guarantees the clone matches the base's
+          // Z extent in HFSS so the Subtract operates on objects of the
+          // same dimensionality.
+          layer: baseLayer,
+          ...(baseConductorLayerId
+            ? { conductorLayerId: baseConductorLayerId }
+            : { conductorLayerId: undefined }),
           // Mark the clone as consumed by the new punch boolean. It
           // becomes part of the boolean's history sub-tree and never
           // renders as a top-level primitive on its own.

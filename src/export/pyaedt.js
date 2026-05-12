@@ -349,7 +349,11 @@ def build_wg(name, cx, cy, w, h):
       if (b.op === 'union') code += `hfss.modeler.unite([${idsStr}])\n`;
       else if (b.op === 'intersect') code += `hfss.modeler.intersect([${idsStr}], keep_originals=False)\n`;
       else if (b.op === 'subtract') code += `hfss.modeler.subtract(blank_list=["${ascii(ids[0])}"], tool_list=[${ids.slice(1).map(id => `"${ascii(id)}"`).join(', ')}], keep_originals=False)\n`;
-      else if (b.op === 'punch') code += `hfss.modeler.subtract(blank_list=["${ascii(ids[0])}"], tool_list=[${ids.slice(1).map(id => `"${ascii(id)}"`).join(', ')}], keep_originals=True)\n`;
+      // Punch: the tool clones are themselves consumed by the subtract.
+      // The original tools live outside the boolean as fully independent
+      // primitives — they're emitted on their own. So in HFSS we want
+      // KeepOriginals=False here (the clones are gone after the op).
+      else if (b.op === 'punch') code += `hfss.modeler.subtract(blank_list=["${ascii(ids[0])}"], tool_list=[${ids.slice(1).map(id => `"${ascii(id)}"`).join(', ')}], keep_originals=False)\n`;
       // Rename the surviving part (the first operand) to the boolean's id
       // so subsequent transforms target the correct name.
       if (ids[0] !== b.id) {
