@@ -2475,6 +2475,82 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         </g>
       )}
 
+      {/* Alt-drag snap-target look-ahead. While the user is dragging
+          with Option/Alt held, surface every NEARBY shape's snap
+          candidates (top / bottom / mid-y / left / right / mid-x) as
+          faint dashed guidelines so you can see what you'd snap to
+          before committing to a position. Center lines use a finer dot
+          pattern to distinguish them from the edge lines. Suppressed
+          for shapes far from the dragged cluster (more than a handful
+          of snap thresholds away) so the canvas doesn't fill with
+          irrelevant ghost-lines on a busy scene. */}
+      {drag && drag.kind === 'move' && altKey && (() => {
+        const screenThresh = 30;
+        const worldThresh = screenThresh * (viewport.w / (svgRef.current?.clientWidth || 1));
+        const proximity = worldThresh * 6;
+        const dragId = drag.clickedId || drag.rootId;
+        const dragged = solved.find((c) => c.id === dragId);
+        if (!dragged) return null;
+        const dw = (drag.clusterBboxW && drag.clusterBboxW > 0) ? drag.clusterBboxW
+          : (typeof dragged.w === 'string' ? evalExpr(dragged.w, paramValues) : dragged.w);
+        const dh = (drag.clusterBboxH && drag.clusterBboxH > 0) ? drag.clusterBboxH
+          : (typeof dragged.h === 'string' ? evalExpr(dragged.h, paramValues) : dragged.h);
+        if (!Number.isFinite(dw) || !Number.isFinite(dh)) return null;
+        const dxMin = dragged.cx - dw / 2, dxMax = dragged.cx + dw / 2;
+        const dyMin = dragged.cy - dh / 2, dyMax = dragged.cy + dh / 2;
+        const guides = [];
+        for (const oc of solved) {
+          if (oc.id === dragId) continue;
+          if (drag.clusterSet && drag.clusterSet.has(oc.id)) continue;
+          if (oc.consumedBy) continue;
+          const ow = typeof oc.w === 'string' ? evalExpr(oc.w, paramValues) : oc.w;
+          const oh = typeof oc.h === 'string' ? evalExpr(oc.h, paramValues) : oc.h;
+          if (!Number.isFinite(ow) || !Number.isFinite(oh) || ow <= 0 || oh <= 0) continue;
+          const oxMin = oc.cx - ow / 2, oxMax = oc.cx + ow / 2;
+          const oyMin = oc.cy - oh / 2, oyMax = oc.cy + oh / 2;
+          // Min bbox-to-bbox distance.
+          const xGap = Math.max(0, Math.max(dxMin - oxMax, oxMin - dxMax));
+          const yGap = Math.max(0, Math.max(dyMin - oyMax, oyMin - dyMax));
+          if (Math.hypot(xGap, yGap) > proximity) continue;
+          // Extension so the lines visibly run past the shape's bbox.
+          const ext = Math.max(ow, oh) * 0.2;
+          const xL = oxMin - ext, xR = oxMax + ext;
+          const wYmin = oyMin - ext, wYmax = oyMax + ext;
+          // Edge lines: medium dashes. Center lines: fine dots so they
+          // read as a different kind of constraint at a glance.
+          const edgeDash  = `${sw * 1.4},${sw * 1.0}`;
+          const ctrDash   = `${sw * 0.35},${sw * 1.1}`;
+          const stroke    = '#67e8f9';
+          const strokeW   = sw * 0.4;
+          const baseOp    = 0.32;
+          // Horizontal candidates: top, bottom, center-y.
+          for (const [y, isCenter] of [[oyMax, false], [oyMin, false], [oc.cy, true]]) {
+            guides.push(
+              <line
+                key={`${oc.id}-h-${y}-${isCenter}`}
+                x1={xL} y1={-y} x2={xR} y2={-y}
+                stroke={stroke} strokeWidth={strokeW}
+                strokeDasharray={isCenter ? ctrDash : edgeDash}
+                opacity={baseOp}
+              />
+            );
+          }
+          // Vertical candidates: left, right, center-x.
+          for (const [x, isCenter] of [[oxMax, false], [oxMin, false], [oc.cx, true]]) {
+            guides.push(
+              <line
+                key={`${oc.id}-v-${x}-${isCenter}`}
+                x1={x} y1={-wYmax} x2={x} y2={-wYmin}
+                stroke={stroke} strokeWidth={strokeW}
+                strokeDasharray={isCenter ? ctrDash : edgeDash}
+                opacity={baseOp}
+              />
+            );
+          }
+        }
+        return <g pointerEvents="none">{guides}</g>;
+      })()}
+
       {/* Alt-drag snap-target indicator. While the user drags a component
           with Option/Alt held and the cursor is near a target anchor on a
           different component, surface that anchor so the user can see what
