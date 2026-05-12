@@ -58,13 +58,16 @@ import { generateTemplateModuleSource } from './templates/_codify.js';
 // =========================================================================
 export default function App() {
   const [scene, setScene] = useState(makeDefaultScene);
-  // On mount, ensure the active scene is normalized — older sessions may have a scene
-  // that predates the current normalizeScene rules (e.g., missing conductor layer).
+  // On mount, ensure the active scene is normalized — older sessions may
+  // have a scene that predates current normalizeScene rules. Use a
+  // hash-based diff so we catch component-level migrations (e.g. punch
+  // clones whose layer needs to be re-pointed at the base operand's
+  // layer), not just stack changes.
   useEffect(() => {
     setScene(prev => {
       const next = normalizeScene(prev);
-      // Cheap structural check: if normalize added/changed anything, return the new one.
-      if (next.stack.length !== prev.stack.length) return next;
+      // Deep-stringify is acceptable here — runs once on mount.
+      if (JSON.stringify(next) !== JSON.stringify(prev)) return next;
       return prev;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3332,7 +3335,13 @@ export default function App() {
   const handleExport = async (filename, generator) => {
     let content;
     try {
-      content = generator(scene, paramValues);
+      // Run the scene through normalizeScene first so any pending
+      // migrations (e.g. punch clones whose layer needs to be aligned
+      // with the base operand's layer for HFSS dimensionality) are
+      // applied to the export input even if they haven't been
+      // persisted back to the in-memory state yet.
+      const normalized = normalizeScene(scene);
+      content = generator(normalized, paramValues);
     } catch (e) {
       console.error('Generator error:', e);
       await alertDialog('Error generating script: ' + e.message, 'Export error');
@@ -3351,7 +3360,8 @@ export default function App() {
   const handleExportGDS = async () => {
     let bytes;
     try {
-      bytes = generateGDS(scene, paramValues);
+      const normalized = normalizeScene(scene);
+      bytes = generateGDS(normalized, paramValues);
     } catch (e) {
       console.error('GDS generator error:', e);
       await alertDialog('Error generating GDS: ' + e.message, 'Export error');
