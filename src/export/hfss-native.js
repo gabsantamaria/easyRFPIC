@@ -528,13 +528,58 @@ def define_material(name, eps_r, mu_r, sigma, loss_tangent):
 
   code += `
 # ===== Geometry helper =====
+APPEND_MODE = ${appendToActive ? 'True' : 'False'}
+
+def _delete_geom_if_exists(name):
+    # In append mode, the script may be re-run against a project that
+    # already contains objects with these names from a previous run.
+    # HFSS would otherwise auto-rename the new objects (e.g. port1
+    # becomes port1_1), leaving the old ones — with stale dimensions
+    # — in place, which breaks downstream boundary references.
+    if not APPEND_MODE:
+        return
+    try:
+        oEditor.Delete(["NAME:Selections", "Selections:=", name])
+    except:
+        pass
+
+def _delete_boundary_if_exists(name):
+    if not APPEND_MODE:
+        return
+    try:
+        oModule = oDesign.GetModule("BoundarySetup")
+        oModule.DeleteBoundaries(["NAME:Boundaries", name])
+    except:
+        pass
+
 # Wrap CreateBox so one bad call doesn't abort the whole script.
 def safe_create_box(box_params, attributes, name):
+    _delete_geom_if_exists(name)
     try:
         oEditor.CreateBox(box_params, attributes)
     except Exception as e:
         try:
             oDesktop.AddMessage("", "", 1, "CreateBox failed for '" + name + "': " + str(e))
+        except:
+            pass
+
+def safe_create_rectangle(rect_params, attributes, name):
+    _delete_geom_if_exists(name)
+    try:
+        oEditor.CreateRectangle(rect_params, attributes)
+    except Exception as e:
+        try:
+            oDesktop.AddMessage("", "", 1, "CreateRectangle failed for '" + name + "': " + str(e))
+        except:
+            pass
+
+def safe_create_polyline(poly_params, attributes, name):
+    _delete_geom_if_exists(name)
+    try:
+        oEditor.CreatePolyline(poly_params, attributes)
+    except Exception as e:
+        try:
+            oDesktop.AddMessage("", "", 1, "CreatePolyline failed for '" + name + "': " + str(e))
         except:
             pass
 
@@ -640,6 +685,7 @@ def safe_create_box(box_params, attributes, name):
       const isPortSheet = (c.layer === 'port');
       code += `# ${c.id}: ${shapeKind} as polygonal ${isPortSheet ? 'sheet (port)' : 'sheet'} (tessellation = ${ring.length} verts)\n`;
       code += `try:
+    _delete_geom_if_exists("${id}")
     oEditor.CreatePolyline(
         ["NAME:PolylineParameters",
          "IsPolylineCovered:=", True,
@@ -705,6 +751,7 @@ except Exception as e:
         ).join(', ');
         code += `# ${c.id}: subtract inner of racetrack to leave hollow band\n`;
         code += `try:
+    _delete_geom_if_exists("${innerId}")
     oEditor.CreatePolyline(
         ["NAME:PolylineParameters",
          "IsPolylineCovered:=", True,
@@ -913,6 +960,8 @@ except Exception as e:
       const closingPt = `["NAME:PLPoint", "X:=", "${ptExprs[0].x}", "Y:=", "${ptExprs[0].y}", "Z:=", "${ptExprs[0].z}"]`;
 
       code += `try:
+    _delete_geom_if_exists("${wgName}_rib_xsec")
+    _delete_geom_if_exists("${wgName}_rib")
     oEditor.CreatePolyline(
         ["NAME:PolylineParameters",
          "IsPolylineCovered:=", True,
@@ -993,7 +1042,7 @@ except Exception as e:
       const portWExpr = exprWithUm(c.w);  // e.g. "(port1_w)"
       const portHExpr = exprWithUm(c.h);
       code += `try:
-    oEditor.CreateRectangle(
+    safe_create_rectangle(
         ["NAME:RectangleParameters",
          "IsCovered:=", True,
          "XStart:=", "${portCxNum}um - ${portWExpr}/2", "YStart:=", "${portCyNum}um - ${portHExpr}/2", "ZStart:=", "(h_wg)um",
@@ -1002,7 +1051,8 @@ except Exception as e:
         ["NAME:Attributes",
          "Name:=", "${id}", "Flags:=", "", "Color:=", "(255 100 100)",
          "Transparency:=", 0.5, "PartCoordinateSystem:=", "Global",
-         "MaterialValue:=", "\\"vacuum\\"", "SolveInside:=", True])
+         "MaterialValue:=", "\\"vacuum\\"", "SolveInside:=", True],
+        "${id}")
 except Exception as e:
     try:
         oDesktop.AddMessage("", "", 1, "Failed to build port sheet ${id}: " + str(e))
@@ -1240,9 +1290,14 @@ except Exception as e:
 `;
       }
       // Rename the surviving part (first operand's name) to the boolean's id
-      // so post-boolean transforms target the right name.
+      // so post-boolean transforms target the right name. In append mode
+      // any leftover object with the target boolean's name from a previous
+      // run must be removed first — otherwise the rename fails because
+      // the name is taken (HFSS would auto-suffix to something like
+      // 'punch2_1' and break downstream references).
       if (safeIds[0] !== safeBoolId) {
-        code += `try:
+        code += `_delete_geom_if_exists("${safeBoolId}")
+try:
     oEditor.ChangeProperty(
         ["NAME:AllTabs",
          ["NAME:Geometry3DAttributeTab",
@@ -1382,6 +1437,7 @@ try:
          "MaterialValue:=", "\\"vacuum\\"", "SolveInside:=", True],
         "air_region")
     try:
+        _delete_boundary_if_exists("Rad_open_region")
         oBoundarySetup = oDesign.GetModule("BoundarySetup")
         # Assign the radiation boundary to the entire box object —
         # AssignRadiation supports "Objects:=" directly and HFSS picks
@@ -1462,6 +1518,7 @@ oBoundarySetup = oDesign.GetModule("BoundarySetup")
       // accepted by some releases and rejected by others).
       code += `# ${portName}: integration line ${det.direction} from ${det.from} to ${det.to}
 try:
+    _delete_boundary_if_exists("${portName}")
     oBoundarySetup.AssignLumpedPort(
         ["NAME:${portName}",
          "Objects:=", ["${portId}"],
