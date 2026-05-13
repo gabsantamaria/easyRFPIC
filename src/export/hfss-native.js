@@ -1537,20 +1537,19 @@ oBoundarySetup = oDesign.GetModule("BoundarySetup")
       const portId = comp.id.replace(/[^A-Za-z0-9_]/g, '_');
       const portName = `LumpedPort_${portId}`;
       const impedance = (comp.lumpedPort && comp.lumpedPort.impedance) || '50';
-      // IntLine endpoint emission:
-      //   - The "along-length" axis (X for EW, Y for NS) uses BARE
-      //     numeric literals with a 1 nm inward inset on each end.
-      //     This keeps length = end - start a plain numeric subtraction
-      //     (HFSS's IntLine parser rejects any arithmetic expression),
-      //     well above zero, and the inset absorbs any sub-µm drift
-      //     between HFSS's parametric port-edge eval and JS's solver.
-      //   - The "perpendicular" axis (Y for EW, X for NS) and Z
-      //     reference the port's PARAMETRIC helper variables
-      //     (port_cx / port_cy / h_wg). So when the user sweeps a
-      //     snap-chain variable in HFSS (feed_w, feed_L, cap_s, …),
-      //     the integration line tracks the port's new center on the
-      //     non-length axis and the port's z plane — no tilting,
-      //     no off-centering.
+      // IntLine endpoints: BARE numeric literals throughout. HFSS's
+      // IntLine parser doesn't reliably resolve variable references
+      // here, so even though the port body uses parametric helpers
+      // (port_cx, port_cy), the IntLine itself snapshots numeric
+      // values at export time. Each endpoint is pulled 1 nm inward
+      // from the port edge so the "endpoints on the port" check
+      // tolerates sub-µm drift between HFSS's parametric port-edge
+      // eval and JS's solver.
+      //
+      // Known limitation: when a snap-chain parameter (feed_w, etc.)
+      // shifts the port's perpendicular axis in HFSS, the IntLine
+      // doesn't follow — the line appears off-center on the port.
+      // Re-export to refresh.
       const INSET = 0.001;
       const pw = evalExpr(comp.w, paramValues);
       const ph = evalExpr(comp.h, paramValues);
@@ -1558,17 +1557,18 @@ oBoundarySetup = oDesign.GetModule("BoundarySetup")
       const xMax = String(comp.cx + pw / 2 - INSET);
       const yMin = String(comp.cy - ph / 2 + INSET);
       const yMax = String(comp.cy + ph / 2 - INSET);
-      const cxRef = `(${comp.id.replace(/[^A-Za-z0-9_]/g, '_')}_cx)`;
-      const cyRef = `(${comp.id.replace(/[^A-Za-z0-9_]/g, '_')}_cy)`;
-      const zRef = `(h_wg)`;
+      const xMid = String(comp.cx);
+      const yMid = String(comp.cy);
+      const zStr = String(portZ_um);
       let sX, sY, eX, eY;
       if (det.direction === 'EW') {
-        sX = `${xMin}um`; sY = cyRef;
-        eX = `${xMax}um`; eY = cyRef;
+        sX = `${xMin}um`; sY = `${yMid}um`;
+        eX = `${xMax}um`; eY = `${yMid}um`;
       } else {
-        sX = cxRef; sY = `${yMin}um`;
-        eX = cxRef; eY = `${yMax}um`;
+        sX = `${xMid}um`; sY = `${yMin}um`;
+        eX = `${xMid}um`; eY = `${yMax}um`;
       }
+      const zRef = `${zStr}um`;
       // AssignLumpedPort args follow the HFSS docs verbatim:
       // AlignmentGroup inside the Mode block; FullResistance /
       // FullReactance at top level (no "Impedance:=" key — that's
