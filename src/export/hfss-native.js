@@ -1387,51 +1387,46 @@ except Exception as e:
 # ===== Lumped ports =====
 oBoundarySetup = oDesign.GetModule("BoundarySetup")
 `;
+    const portZ_um = evalExpr('h_wg', paramValues) || 0.6;
     for (const { comp, det } of lumpedPortTargets) {
       const portId = comp.id.replace(/[^A-Za-z0-9_]/g, '_');
       const portName = `LumpedPort_${portId}`;
       const impedance = (comp.lumpedPort && comp.lumpedPort.impedance) || '50';
-      // Build the port's parametric edge expressions — same forms as
-      // the port sheet's XStart/YStart so HFSS evaluates IntLine
-      // endpoints and port edges to identical coordinates.
-      const isMirrorTgt = mirrorTargetIds.has(comp.id);
-      const pp = parametricPos[comp.id];
-      const wExprUm = exprWithUm(comp.w);
-      const hExprUm = exprWithUm(comp.h);
-      const cxExprUm = (!isMirrorTgt && pp)
-        ? exprWithUm(pp.cxExpr)
-        : `(${comp.cx.toFixed(4)})um`;
-      const cyExprUm = (!isMirrorTgt && pp)
-        ? exprWithUm(pp.cyExpr)
-        : `(${comp.cy.toFixed(4)})um`;
-      // Stash each side as its own HFSS variable. HFSS evaluates the
-      // RHS once and stores a known scalar; subsequent references
-      // become bog-standard variable lookups that the IntLine length
-      // computation can simplify trivially (xmax - xmin = port1_w → 20,
-      // not "long expression - long expression").
-      const v = {
-        xmin: `${portName}_xmin`,
-        xmax: `${portName}_xmax`,
-        ymin: `${portName}_ymin`,
-        ymax: `${portName}_ymax`,
-        xmid: `${portName}_xmid`,
-        ymid: `${portName}_ymid`,
-      };
+      // Stash the port's center as TWO simple variables (numeric, full
+      // double precision so they match the port-sheet's HFSS-evaluated
+      // edges bit-for-bit when arithmetic is the same). The IntLine
+      // endpoints reference these vars with explicit ± port_w/2 offsets:
+      //   start.x = cx_var − port1_w/2     (matches port.XStart)
+      //   end.x   = cx_var + port1_w/2     (matches port.XStart + width)
+      // Subtract:  end.x − start.x = port1_w  → length is trivially > 0.
+      // Equality: HFSS evaluates start.x with the same float arithmetic
+      // it uses for port.XStart, so they're identical and the "on the
+      // port" check passes.
+      const pw = evalExpr(comp.w, paramValues);
+      const ph = evalExpr(comp.h, paramValues);
+      // String() gives the shortest round-trip repr of the JS double
+      // (17 significant digits if needed), avoiding the toFixed(8)
+      // rounding that lost the last few sub-femtometer bits.
+      const cxStr = String(comp.cx);
+      const cyStr = String(comp.cy);
+      const zStr = String(portZ_um);
+      const vCx = `${portName}_cx`;
+      const vCy = `${portName}_cy`;
       code += `# ${portName}: integration line ${det.direction} from ${det.from} to ${det.to}
-set_var("${v.xmin}", "${cxExprUm} - ${wExprUm}/2")
-set_var("${v.xmax}", "${cxExprUm} + ${wExprUm}/2")
-set_var("${v.ymin}", "${cyExprUm} - ${hExprUm}/2")
-set_var("${v.ymax}", "${cyExprUm} + ${hExprUm}/2")
-set_var("${v.xmid}", "${cxExprUm}")
-set_var("${v.ymid}", "${cyExprUm}")
+set_var("${vCx}", "${cxStr}um")
+set_var("${vCy}", "${cyStr}um")
 `;
       let sX, sY, eX, eY;
       if (det.direction === 'EW') {
-        sX = v.xmin; sY = v.ymid;
-        eX = v.xmax; eY = v.ymid;
+        sX = `${vCx} - ${exprWithUm(comp.w)}/2`;
+        sY = vCy;
+        eX = `${vCx} + ${exprWithUm(comp.w)}/2`;
+        eY = vCy;
       } else {
-        sX = v.xmid; sY = v.ymin;
-        eX = v.xmid; eY = v.ymax;
+        sX = vCx;
+        sY = `${vCy} - ${exprWithUm(comp.h)}/2`;
+        eX = vCx;
+        eY = `${vCy} + ${exprWithUm(comp.h)}/2`;
       }
       code += `try:
     oBoundarySetup.AssignLumpedPort(
@@ -1444,8 +1439,8 @@ set_var("${v.ymid}", "${cyExprUm}")
            "ModeNum:=", 1,
            "UseIntLine:=", True,
            ["NAME:IntLine",
-            "Start:=", ["${sX}", "${sY}", "h_wg"],
-            "End:=", ["${eX}", "${eY}", "h_wg"]],
+            "Start:=", ["${sX}", "${sY}", "${zStr}um"],
+            "End:=", ["${eX}", "${eY}", "${zStr}um"]],
            "CharImp:=", "Zpi",
            "RenormImp:=", "${impedance}ohm"]],
          "ShowReporterFilter:=", False,
