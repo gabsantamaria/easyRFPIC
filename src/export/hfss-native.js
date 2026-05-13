@@ -958,14 +958,30 @@ except Exception as e:
       // excitation. The sheet sits at the top of the waveguide layer by
       // default; the user can move it in Z via a displace transform if
       // they want it on a different face.
+      //
+      // Port sheets are emitted with NUMERIC XStart / YStart / Width /
+      // Height (not parametric), so that a downstream lumped-port
+      // IntLine — which also uses bare numeric literals — has its
+      // endpoints land EXACTLY on the port edges (HFSS's "endpoints
+      // lie on the port" check is at sub-femtometer tolerance, and any
+      // float-eval discrepancy between the port's parametric XStart
+      // and the IntLine's numeric coord trips it). The port no longer
+      // tracks an HFSS variable sweep, but lumped-port assignment
+      // works reliably.
       emittedPortNames.push(id);
-      const portZ_um = `(h_wg)um`;
+      const pwNum = evalExpr(c.w, paramValues);
+      const phNum = evalExpr(c.h, paramValues);
+      const portXStartNum = String(c.cx - pwNum / 2);
+      const portYStartNum = String(c.cy - phNum / 2);
+      const portWidthNum = String(pwNum);
+      const portHeightNum = String(phNum);
+      const portZNum = String(evalExpr('h_wg', paramValues) || 0.6);
       code += `try:
     oEditor.CreateRectangle(
         ["NAME:RectangleParameters",
          "IsCovered:=", True,
-         "XStart:=", "${xLoExprUm}", "YStart:=", "${yLoExprUm}", "ZStart:=", "${portZ_um}",
-         "Width:=", "${wExprUm}", "Height:=", "${hExprUm}",
+         "XStart:=", "${portXStartNum}um", "YStart:=", "${portYStartNum}um", "ZStart:=", "${portZNum}um",
+         "Width:=", "${portWidthNum}um", "Height:=", "${portHeightNum}um",
          "WhichAxis:=", "Z"],
         ["NAME:Attributes",
          "Name:=", "${id}", "Flags:=", "", "Color:=", "(255 100 100)",
