@@ -1573,30 +1573,41 @@ oBoundarySetup = oDesign.GetModule("BoundarySetup")
         eX = `${xMid}um`; eY = `${yMax}um`;
       }
       const zRef = `${zStr}um`;
+      // AssignLumpedPort arg structure matches the macro recorded by
+      // HFSS itself when a user assigns a lumped port through the GUI
+      // on a Driven Modal design. Critical fields that distinguish it
+      // from what I had before:
+      //   - "LumpedPortType:=", "Modal"   ← explicit type, missing
+      //     before. Without this, the COM call ambiguously interprets
+      //     the assignment in some releases.
+      //   - "Coordinate System:=", "Global"  inside IntLine.
+      //   - "Impedance:=" at top level (NOT FullResistance/FullReactance
+      //     pair, NOT RenormImp inside the Mode block, NOT
+      //     ShowReporterFilter / ReporterFilter — those are extras the
+      //     GUI doesn't emit and that some HFSS releases reject).
       code += `# ${portName}: integration line ${det.direction} from ${det.from} to ${det.to}.
-# To make this line track parameter changes in HFSS, re-assign it once
-# manually through the GUI (Edit Integration Line, click port edges).
-# HFSS anchors it to the picked edges internally and it auto-follows.
+# Arg structure matches HFSS's own GUI-recorded macro for a Driven Modal
+# lumped port. If you want the integration line to track parameter
+# changes, re-assign it once through Edit > Integration Line — HFSS
+# remembers the picked edges and auto-follows.
 try:
     _delete_boundary_if_exists("${portName}")
     oBoundarySetup.AssignLumpedPort(
         ["NAME:${portName}",
          "Objects:=", ["${portId}"],
+         "LumpedPortType:=", "Modal",
          "DoDeembed:=", False,
          ["NAME:Modes",
           ["NAME:Mode1",
            "ModeNum:=", 1,
            "UseIntLine:=", True,
            ["NAME:IntLine",
+            "Coordinate System:=", "Global",
             "Start:=", ["${sX}", "${sY}", "${zRef}"],
             "End:=", ["${eX}", "${eY}", "${zRef}"]],
            "AlignmentGroup:=", 0,
-           "CharImp:=", "Zpi",
-           "RenormImp:=", "${impedance}ohm"]],
-         "ShowReporterFilter:=", False,
-         "ReporterFilter:=", [True],
-         "FullResistance:=", "${impedance}ohm",
-         "FullReactance:=", "0ohm"])
+           "CharImp:=", "Zpi"]],
+         "Impedance:=", "${impedance}ohm"])
 except Exception as e:
     try:
         oDesktop.AddMessage("", "", 1, "Lumped port ${portName} failed: " + str(e))
