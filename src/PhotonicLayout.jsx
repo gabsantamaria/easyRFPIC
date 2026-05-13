@@ -3333,7 +3333,7 @@ export default function App() {
   // Generic export: generate a script with the given function and present it.
   // Tries to trigger a download; always shows a preview modal so the user can copy
   // the script manually if the sandbox blocks downloads.
-  const handleExport = async (filename, generator) => {
+  const handleExport = async (filename, generator, options) => {
     let content;
     try {
       // Run the scene through normalizeScene first so any pending
@@ -3342,7 +3342,7 @@ export default function App() {
       // applied to the export input even if they haven't been
       // persisted back to the in-memory state yet.
       const normalized = normalizeScene(scene);
-      content = generator(normalized, paramValues);
+      content = generator(normalized, paramValues, options);
     } catch (e) {
       console.error('Generator error:', e);
       await alertDialog('Error generating script: ' + e.message, 'Export error');
@@ -3357,7 +3357,11 @@ export default function App() {
   };
 
   const handleExportPyAEDT = () => handleExport('layout.py', generatePyAEDT);
-  const handleExportHfssNative = () => handleExport('layout_hfss.py', generateHfssNative);
+  const handleExportHfssNative = () => {
+    const appendToActive = !!(scene.simSetup && scene.simSetup.appendToActive);
+    const filename = appendToActive ? 'layout_hfss_append.py' : 'layout_hfss.py';
+    return handleExport(filename, generateHfssNative, { appendToActive });
+  };
   const handleExportGDS = async () => {
     let bytes;
     try {
@@ -4557,6 +4561,12 @@ export default function App() {
               const padXPosStr = (scene.simSetup && scene.simSetup.padXPos) ?? '50';
               const padYNegStr = (scene.simSetup && scene.simSetup.padYNeg) ?? '50';
               const padYPosStr = (scene.simSetup && scene.simSetup.padYPos) ?? '50';
+              const airPadStr = (scene.simSetup && scene.simSetup.airPad) ?? '';
+              const airPadNum = parseFloat(airPadStr);
+              const airPadEffective = Number.isFinite(airPadNum) && airPadNum > 0
+                ? airPadNum : radPadUm;
+              const airPadIsOverride = Number.isFinite(airPadNum) && airPadNum > 0;
+              const appendActive = !!(scene.simSetup && scene.simSetup.appendToActive);
               const updateSim = (patch) => updateScene(prev => ({
                 ...prev,
                 simSetup: { fnominal: '4', padXNeg: '50', padXPos: '50', padYNeg: '50', padYPos: '50', ...(prev.simSetup || {}), ...patch },
@@ -4598,15 +4608,32 @@ export default function App() {
                     />
                   </div>
                   <div className="border-t border-slate-800 pt-2">
-                    <div className="text-[10px] uppercase tracking-wider text-slate-400 mb-1">Radiation-box padding (auto)</div>
+                    <div className="text-[10px] uppercase tracking-wider text-slate-400 mb-1">Radiation-box padding</div>
                     <div className="font-mono text-xs text-slate-300 leading-relaxed">
                       λ = {lambdaMm.toFixed(2)} mm<br />
-                      λ/4 = <span className="text-cyan-300 font-bold">{radPadMm.toFixed(2)} mm</span> ({radPadUm.toFixed(0)} µm)
+                      λ/4 = <span className={airPadIsOverride ? 'text-slate-400' : 'text-cyan-300 font-bold'}>{radPadMm.toFixed(2)} mm</span> ({radPadUm.toFixed(0)} µm) {airPadIsOverride ? '(suggested)' : ''}
+                    </div>
+                    <div className="mt-2 flex items-center gap-2">
+                      <label className="text-[10px] text-slate-400 w-28 text-right">Override (µm)</label>
+                      <input
+                        type="text"
+                        defaultValue={airPadStr}
+                        key={airPadStr}
+                        placeholder="auto = λ/4"
+                        onBlur={(e) => updateSim({ airPad: e.target.value.trim() })}
+                        onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); if (e.key === 'Escape') { e.target.value = airPadStr; e.target.blur(); } }}
+                        className="w-24 px-1.5 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 text-xs font-mono placeholder:text-slate-600"
+                      />
+                      <span className="text-[10px] text-slate-500">
+                        {airPadIsOverride
+                          ? <>using <span className="text-cyan-300 font-bold">{airPadEffective.toFixed(0)} µm</span></>
+                          : <>blank → λ/4</>}
+                      </span>
                     </div>
                     <p className="text-[10px] text-slate-500 mt-2 leading-snug">
                       HFSS adds this much clearance on each face for
-                      the radiation box. Adjust f<sub>nominal</sub>
-                      lower → more padding; higher → less.
+                      the radiation box. Default = λ/4; override to use
+                      a fixed pad regardless of f<sub>nominal</sub>.
                     </p>
                   </div>
                   <div className="border-t border-slate-800 pt-2">
@@ -4622,6 +4649,25 @@ export default function App() {
                       <PadField label="+y" value={padYPosStr} field="padYPos" />
                       <PadField label="−y" value={padYNegStr} field="padYNeg" />
                     </div>
+                  </div>
+                  <div className="border-t border-slate-800 pt-2">
+                    <div className="text-[10px] uppercase tracking-wider text-slate-400 mb-1">HFSS export mode</div>
+                    <label className="flex items-center gap-2 text-[11px] text-slate-200 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={appendActive}
+                        onChange={(e) => updateSim({ appendToActive: e.target.checked })}
+                      />
+                      Append to active HFSS design
+                    </label>
+                    <p className="text-[10px] text-slate-500 mt-2 leading-snug">
+                      When checked, "Export HFSS (native)" emits a
+                      script that attaches the geometry to whatever
+                      project/design is currently open in HFSS — your
+                      existing setups, sweeps, and excitations are kept
+                      untouched. Uncheck to create a fresh project with
+                      a default Setup1 (the original behavior).
+                    </p>
                   </div>
                 </div>
               );

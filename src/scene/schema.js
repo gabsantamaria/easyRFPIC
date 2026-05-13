@@ -229,6 +229,11 @@ export function normalizeScene(s) {
     padXPos: '50',
     padYNeg: '50',
     padYPos: '50',
+    // Air-box padding (µm) added on every face of the chip bbox to
+    // form the radiation region. Empty string → auto = λ/4 at
+    // fnominal; explicit number → that override in µm. Stored as a
+    // string so the user can paste expressions later if desired.
+    airPad: '',
     ...(s.simSetup || {}),
   };
 

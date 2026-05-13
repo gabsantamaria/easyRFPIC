@@ -126,7 +126,13 @@ function computeParametricPositions(components, snaps) {
 // Uses ScriptEnv.Initialize and oEditor.CreateBox with the two-array pattern.
 // Python 2.7 compatible (no f-strings, ASCII only).
 // =========================================================================
-export function generateHfssNative(scene, paramValues) {
+export function generateHfssNative(scene, paramValues, options = {}) {
+  // options.appendToActive — if true, generate a script that adds the
+  //   geometry to whatever HFSS project/design is currently active
+  //   instead of creating a fresh one. Used when the user already has
+  //   a design wired up with setups / sweeps / boundaries they don't
+  //   want to recreate every export.
+  const appendToActive = !!options.appendToActive;
   const { params, components, mirrors, snaps, stack } = scene;
   const solved = applyMirrors(solveLayout(components, snaps, paramValues), mirrors);
 
@@ -368,10 +374,19 @@ ScriptEnv.Initialize("Ansoft.ElectronicsDesktop")
 oDesktop.RestoreWindow()
 
 # --- Project / design setup ---
-oProject = oDesktop.NewProject()
+${appendToActive ? `# Append mode: attach to the currently active project/design instead of
+# making a new one. Useful when the design already has its own setups,
+# sweeps, and boundary assignments that we don't want to overwrite.
+oProject = oDesktop.GetActiveProject()
+if oProject is None:
+    raise Exception("No active HFSS project. Open a project before running this script.")
+oDesign = oProject.GetActiveDesign()
+if oDesign is None:
+    raise Exception("No active HFSS design. Open a design before running this script.")
+oEditor = oDesign.SetActiveEditor("3D Modeler")` : `oProject = oDesktop.NewProject()
 oProject.InsertDesign("HFSS", "Layout", "DrivenModal", "")
 oDesign = oProject.SetActiveDesign("Layout")
-oEditor = oDesign.SetActiveEditor("3D Modeler")
+oEditor = oDesign.SetActiveEditor("3D Modeler")`}
 
 # ===== Parameters =====
 # Robust variable create-or-update.
@@ -1326,7 +1341,13 @@ except Exception as e:
   // λ (µm) = c / f. With c in µm/s (2.998e14) and f in Hz (fnominalGHz*1e9):
   //   λ (µm) = 2.998e14 / (fnominalGHz * 1e9) = 2.998e5 / fnominalGHz.
   const lambdaUm = 2.998e5 / fnominalGHz;
-  const radPadUm = lambdaUm / 4;
+  // Honor the user-supplied override if present and parseable; else
+  // fall back to λ/4 at fnominal.
+  const airPadOverrideRaw = (scene.simSetup && scene.simSetup.airPad) || '';
+  const airPadOverride = parseFloat(String(airPadOverrideRaw).trim());
+  const radPadUm = Number.isFinite(airPadOverride) && airPadOverride > 0
+    ? airPadOverride
+    : lambdaUm / 4;
   // Z extent: from the bottom of the lowest substrate to the top of
   // the highest layer we tracked. Fall back to a generous range so the
   // box still wraps the geometry if layerZ is sparse.
@@ -1343,7 +1364,9 @@ except Exception as e:
   code += `
 # ===== Open-region radiation boundary =====
 # Air box padded by ~λ/4 at fnominal = ${fnominalGHz} GHz on every face
-# (λ/4 ≈ ${radPadUm.toFixed(1)} um). Created as an explicit CreateBox +
+# (${Number.isFinite(airPadOverride) && airPadOverride > 0
+  ? `override = ${radPadUm.toFixed(1)} um`
+  : `λ/4 ≈ ${radPadUm.toFixed(1)} um`}). Created as an explicit CreateBox +
 # AssignRadiation on the box's faces — more robust than calling
 # CreateOpenRegion (which isn't exposed on BoundarySetup in every
 # HFSS release).
@@ -1464,7 +1487,12 @@ except Exception as e:
 `;
     }
   }
-  code += `
+  if (!appendToActive) {
+    // Fresh-project mode: install a default DrivenModal setup so the
+    // generated project is immediately solvable. In append-to-active
+    // mode the existing design already carries its own setups and
+    // sweeps that the user wants preserved — we leave them alone.
+    code += `
 # ===== Setup =====
 oModule = oDesign.GetModule("AnalysisSetup")
 oModule.InsertSetup("HfssDriven",
@@ -1481,5 +1509,11 @@ oModule.InsertSetup("HfssDriven",
 oProject.Save()
 oDesktop.AddMessage("", "", 0, "Layout built.")
 `;
+  } else {
+    code += `
+oProject.Save()
+oDesktop.AddMessage("", "", 0, "Geometry appended to active design.")
+`;
+  }
   return code;
 }
