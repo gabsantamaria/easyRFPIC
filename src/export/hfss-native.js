@@ -1387,37 +1387,53 @@ except Exception as e:
 # ===== Lumped ports =====
 oBoundarySetup = oDesign.GetModule("BoundarySetup")
 `;
-    const portZ_um = evalExpr('h_wg', paramValues) || 0.6;
     for (const { comp, det } of lumpedPortTargets) {
       const portId = comp.id.replace(/[^A-Za-z0-9_]/g, '_');
       const portName = `LumpedPort_${portId}`;
       const impedance = (comp.lumpedPort && comp.lumpedPort.impedance) || '50';
-      // Use HIGH-PRECISION numeric coordinates. Parametric expressions
-      // sometimes confuse HFSS's IntLine length check (the expressions
-      // evaluate fine for the port-sheet creation but get rejected as
-      // length-zero by AssignLumpedPort in some releases). 8 decimals
-      // is well below HFSS's geometric tolerance and well above the
-      // 4-decimal port-sheet creation precision used elsewhere — so
-      // endpoints comfortably land "on the port".
-      const pw = evalExpr(comp.w, paramValues);
-      const ph = evalExpr(comp.h, paramValues);
-      const xMin = (comp.cx - pw / 2).toFixed(8);
-      const xMax = (comp.cx + pw / 2).toFixed(8);
-      const yMin = (comp.cy - ph / 2).toFixed(8);
-      const yMax = (comp.cy + ph / 2).toFixed(8);
-      const xMid = comp.cx.toFixed(8);
-      const yMid = comp.cy.toFixed(8);
-      const zStr = portZ_um.toFixed(8);
+      // Build the port's parametric edge expressions — same forms as
+      // the port sheet's XStart/YStart so HFSS evaluates IntLine
+      // endpoints and port edges to identical coordinates.
+      const isMirrorTgt = mirrorTargetIds.has(comp.id);
+      const pp = parametricPos[comp.id];
+      const wExprUm = exprWithUm(comp.w);
+      const hExprUm = exprWithUm(comp.h);
+      const cxExprUm = (!isMirrorTgt && pp)
+        ? exprWithUm(pp.cxExpr)
+        : `(${comp.cx.toFixed(4)})um`;
+      const cyExprUm = (!isMirrorTgt && pp)
+        ? exprWithUm(pp.cyExpr)
+        : `(${comp.cy.toFixed(4)})um`;
+      // Stash each side as its own HFSS variable. HFSS evaluates the
+      // RHS once and stores a known scalar; subsequent references
+      // become bog-standard variable lookups that the IntLine length
+      // computation can simplify trivially (xmax - xmin = port1_w → 20,
+      // not "long expression - long expression").
+      const v = {
+        xmin: `${portName}_xmin`,
+        xmax: `${portName}_xmax`,
+        ymin: `${portName}_ymin`,
+        ymax: `${portName}_ymax`,
+        xmid: `${portName}_xmid`,
+        ymid: `${portName}_ymid`,
+      };
+      code += `# ${portName}: integration line ${det.direction} from ${det.from} to ${det.to}
+set_var("${v.xmin}", "${cxExprUm} - ${wExprUm}/2")
+set_var("${v.xmax}", "${cxExprUm} + ${wExprUm}/2")
+set_var("${v.ymin}", "${cyExprUm} - ${hExprUm}/2")
+set_var("${v.ymax}", "${cyExprUm} + ${hExprUm}/2")
+set_var("${v.xmid}", "${cxExprUm}")
+set_var("${v.ymid}", "${cyExprUm}")
+`;
       let sX, sY, eX, eY;
       if (det.direction === 'EW') {
-        sX = xMin; sY = yMid;
-        eX = xMax; eY = yMid;
+        sX = v.xmin; sY = v.ymid;
+        eX = v.xmax; eY = v.ymid;
       } else {
-        sX = xMid; sY = yMin;
-        eX = xMid; eY = yMax;
+        sX = v.xmid; sY = v.ymin;
+        eX = v.xmid; eY = v.ymax;
       }
-      code += `# ${portName}: integration line ${det.direction} from ${det.from} to ${det.to}
-try:
+      code += `try:
     oBoundarySetup.AssignLumpedPort(
         ["NAME:${portName}",
          "Objects:=", ["${portId}"],
@@ -1428,8 +1444,8 @@ try:
            "ModeNum:=", 1,
            "UseIntLine:=", True,
            ["NAME:IntLine",
-            "Start:=", ["${sX}um", "${sY}um", "${zStr}um"],
-            "End:=", ["${eX}um", "${eY}um", "${zStr}um"]],
+            "Start:=", ["${sX}", "${sY}", "h_wg"],
+            "End:=", ["${eX}", "${eY}", "h_wg"]],
            "CharImp:=", "Zpi",
            "RenormImp:=", "${impedance}ohm"]],
          "ShowReporterFilter:=", False,
