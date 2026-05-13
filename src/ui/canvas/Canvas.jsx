@@ -15,6 +15,7 @@ import { ANCHORS, parseAnchor, anchorLocal, anchorWorld } from '../../scene/anch
 import { evalExpr } from '../../scene/params.js';
 import { solveLayout, applyMirrors, resolveBooleanBboxes } from '../../scene/solver.js';
 import { expandTransforms } from '../../scene/transforms.js';
+import { detectPortIntegrationLine } from '../../scene/lumpedPort.js';
 import { shapeInstanceToRing } from '../../geometry/rings.js';
 import { buildRacetrackCenterline } from '../../geometry/racetrack.js';
 import { ringToSvgPath } from '../../geometry/paths.js';
@@ -1586,6 +1587,16 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         <pattern id="gridMajor" width={gridSize * 5} height={gridSize * 5} patternUnits="userSpaceOnUse">
           <path d={`M ${gridSize * 5} 0 L 0 0 0 ${gridSize * 5}`} fill="none" stroke="#94a3b8" strokeWidth="0.4" />
         </pattern>
+        {/* Arrowhead for lumped-port integration line. markerUnits=
+            strokeWidth scales the arrowhead with the line's strokeWidth
+            so it stays proportional at any zoom. orient=auto-start-reverse
+            isn't widely supported in older browsers; the line itself is
+            drawn so the arrow always points from start to end of the
+            integration vector. */}
+        <marker id="lp-arrow" viewBox="0 0 10 10" refX="9" refY="5"
+          markerUnits="strokeWidth" markerWidth="5" markerHeight="5" orient="auto">
+          <path d="M0,0 L10,5 L0,10 z" fill="#ef4444" opacity="0.85" />
+        </marker>
       </defs>
       <rect data-bg="true" x={vbX} y={vbY} width={viewport.w} height={viewport.h} fill="url(#grid)" />
       <rect data-bg="true" x={vbX} y={vbY} width={viewport.w} height={viewport.h} fill="url(#gridMajor)" />
@@ -2625,6 +2636,56 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                 </g>
               );
             })}
+          </g>
+        );
+      })()}
+
+      {/* Lumped-port integration lines. Persistent (drawn regardless
+          of selection) — one red arrow per port-layer component that
+          has `lumpedPort.enabled` AND a valid auto-detected adjacency
+          (two-conductor flanking, either by direct edge contact or by
+          a punch hole that splits a single conductor in half). The
+          arrow runs across the port through its center, oriented along
+          the detected integration direction. Markers use red with
+          transparency so the user can still see the port underneath. */}
+      {(() => {
+        const arrows = [];
+        for (const c of solved) {
+          if (c.layer !== 'port' || c.kind !== 'rect') continue;
+          if (!c.lumpedPort || !c.lumpedPort.enabled) continue;
+          const det = detectPortIntegrationLine(c, solved, paramValues);
+          if (!det.direction) continue;
+          let x1, y1, x2, y2;
+          if (det.direction === 'EW') {
+            x1 = det.line.startX; y1 = det.line.midY;
+            x2 = det.line.endX;   y2 = det.line.midY;
+          } else {
+            x1 = det.line.midX;   y1 = det.line.startY;
+            x2 = det.line.midX;   y2 = det.line.endY;
+          }
+          // Pull the endpoints slightly inward so the arrowhead sits
+          // visibly inside the port edge rather than poking past it.
+          const inset = 0.1;
+          const dx = x2 - x1, dy = y2 - y1;
+          const len = Math.hypot(dx, dy) || 1;
+          const ix = (dx / len) * Math.min(inset * len, len * 0.05);
+          const iy = (dy / len) * Math.min(inset * len, len * 0.05);
+          arrows.push({
+            id: c.id,
+            x1: x1 + ix, y1: y1 + iy,
+            x2: x2 - ix, y2: y2 - iy,
+          });
+        }
+        if (arrows.length === 0) return null;
+        return (
+          <g pointerEvents="none">
+            {arrows.map(a => (
+              <line key={a.id}
+                x1={a.x1} y1={-a.y1} x2={a.x2} y2={-a.y2}
+                stroke="#ef4444" strokeWidth={sw * 1.2} opacity={0.85}
+                markerEnd="url(#lp-arrow)"
+              />
+            ))}
           </g>
         );
       })()}
