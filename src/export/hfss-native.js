@@ -1070,12 +1070,18 @@ except Exception as e:
       //     and JS (which precomputed the numeric).
       const isMirrorTgt = mirrorTargetIds.has(c.id);
       const pp = parametricPos[c.id];
-      const cxExprForVar = (!isMirrorTgt && pp)
+      // HFSS's expression parser can mis-parse identifiers separated
+      // by a bare hyphen — e.g. "cap_s-feed_w" gets read as a single
+      // (unknown) identifier rather than the subtraction "cap_s - feed_w".
+      // Insert spaces around hyphens that sit between identifier
+      // characters so the parser sees the binary operator.
+      const spaceHyphens = (s) => String(s).replace(/(\w)-(\w)/g, '$1 - $2');
+      const cxExprForVar = spaceHyphens((!isMirrorTgt && pp)
         ? exprWithUm(pp.cxExpr)
-        : `${String(c.cx)}um`;
-      const cyExprForVar = (!isMirrorTgt && pp)
+        : `${String(c.cx)}um`);
+      const cyExprForVar = spaceHyphens((!isMirrorTgt && pp)
         ? exprWithUm(pp.cyExpr)
-        : `${String(c.cy)}um`;
+        : `${String(c.cy)}um`);
       const portZNum = String(evalExpr('h_wg', paramValues) || 0.6);
       const portWExpr = exprWithUm(c.w);  // e.g. "(port1_w)"
       const portHExpr = exprWithUm(c.h);
