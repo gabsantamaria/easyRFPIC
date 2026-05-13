@@ -5,6 +5,7 @@ import { tokenizeIdents, tokenizeComponentExprs, resolveParams, evalExpr, RESERV
 import { ANCHORS, parseAnchor, anchorLocal, anchorWorld } from './scene/anchors.js';
 import { rectInstanceToRing, shapeInstanceToRing } from './geometry/rings.js';
 import { expandTransforms } from './scene/transforms.js';
+import { detectPortIntegrationLine } from './scene/lumpedPort.js';
 import { solveLayout, applyMirrors, resolveBooleanBboxes } from './scene/solver.js';
 import { generateGDS } from './export/gds.js';
 import { generatePyAEDT } from './export/pyaedt.js';
@@ -4874,6 +4875,74 @@ export default function App() {
                   paramValues={paramValues}
                   commitExpr={commitExpr}
                 />
+
+                {/* Lumped port: only shown for components on the port
+                    layer. Detects whether the port sits between two
+                    electrodes and offers to auto-generate an integration
+                    line + assign a lumped port on export. */}
+                {selected.layer === 'port' && selected.kind === 'rect' && (() => {
+                  // Solve the current scene for adjacency detection. Cheap
+                  // for the inspector path; not memoized because port-layer
+                  // selection is rare and the detection is run only when the
+                  // user has a port selected.
+                  const solvedForPort = applyMirrors(
+                    solveLayout(scene.components, scene.snaps, paramValues),
+                    scene.mirrors,
+                  );
+                  const selectedSolved = solvedForPort.find(c => c.id === selected.id) || selected;
+                  const det = detectPortIntegrationLine(selectedSolved, solvedForPort, paramValues);
+                  const cfg = selected.lumpedPort || { enabled: false, impedance: '50' };
+                  const setLumped = (patch) => updateComp(selected.id, {
+                    lumpedPort: { enabled: false, impedance: '50', ...cfg, ...patch },
+                  });
+                  const dirLabel = det.direction === 'EW'
+                    ? `West ↔ East  (${det.from} ↔ ${det.to})`
+                    : det.direction === 'NS'
+                    ? `South ↔ North  (${det.from} ↔ ${det.to})`
+                    : null;
+                  return (
+                    <div className="border-t border-slate-700 pt-3 space-y-2">
+                      <div className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-slate-400">
+                        <Radio size={11} /> Lumped port
+                      </div>
+                      {dirLabel ? (
+                        <div className="text-[10px] font-mono text-cyan-300">
+                          ✓ Adjacency detected: {dirLabel}
+                        </div>
+                      ) : (
+                        <p className="text-[10px] text-slate-500 italic leading-snug">
+                          Not adjacent to two conductors. To enable an
+                          auto integration line, two opposite sides of
+                          the port must touch electrode shapes.
+                        </p>
+                      )}
+                      <label className={`flex items-center gap-2 text-[11px] ${dirLabel ? 'text-slate-200 cursor-pointer' : 'text-slate-500 cursor-not-allowed'}`}>
+                        <input
+                          type="checkbox"
+                          checked={!!cfg.enabled}
+                          disabled={!dirLabel}
+                          onChange={(e) => setLumped({ enabled: e.target.checked })}
+                        />
+                        Define lumped port on export
+                      </label>
+                      {cfg.enabled && dirLabel && (
+                        <div>
+                          <label className="text-[10px] uppercase tracking-wider text-slate-500">Impedance (Ω)</label>
+                          <DeferredTextInput
+                            value={cfg.impedance ?? '50'}
+                            onCommit={(v) => setLumped({ impedance: (v || '').trim() || '50' })}
+                            className="w-24 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-white outline-none focus:border-cyan-400"
+                          />
+                          <p className="text-[9px] text-slate-500 mt-1 font-mono leading-snug">
+                            HFSS will assign a lumped port with an
+                            integration line from {det.from} to {det.to}
+                            through the port center.
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {/* Connections — show all snaps and mirrors involving this component */}
                 {(() => {

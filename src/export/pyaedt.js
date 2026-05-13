@@ -13,6 +13,7 @@ import { anchorLocal } from '../scene/anchors.js';
 import { solveLayout, applyMirrors } from '../scene/solver.js';
 import { shapeInstanceToRing } from '../geometry/rings.js';
 import { buildRacetrackCenterline } from '../geometry/racetrack.js';
+import { detectPortIntegrationLine } from '../scene/lumpedPort.js';
 
 // ----------------------------------------------------------------------
 // PYAEDT EXPORT
@@ -385,7 +386,36 @@ try:
     hfss.create_open_region(frequency=\"f_open_region\", boundary=\"Radiation\")
 except Exception as e:
     print(\"Open region failed:\", e)
+`;
 
+  // ===== Lumped ports =====
+  const portZ_um = evalExpr('h_wg', paramValues) || 0.6;
+  for (const c of solved) {
+    if (c.layer !== 'port' || c.kind !== 'rect') continue;
+    if (!c.lumpedPort || !c.lumpedPort.enabled) continue;
+    const det = detectPortIntegrationLine(c, solved, paramValues);
+    if (!det.direction) continue;
+    const portId = c.id;
+    const impedance = (c.lumpedPort && c.lumpedPort.impedance) || '50';
+    let s, e;
+    if (det.direction === 'EW') {
+      s = [det.line.startX, det.line.midY, portZ_um];
+      e = [det.line.endX, det.line.midY, portZ_um];
+    } else {
+      s = [det.line.midX, det.line.startY, portZ_um];
+      e = [det.line.midX, det.line.endY, portZ_um];
+    }
+    code += `try:
+    hfss.lumped_port(assignment=\"${portId}\", reference=None, name=\"LumpedPort_${portId}\",
+                     integration_line=[[${s[0].toFixed(4)}, ${s[1].toFixed(4)}, ${s[2].toFixed(4)}],
+                                        [${e[0].toFixed(4)}, ${e[1].toFixed(4)}, ${e[2].toFixed(4)}]],
+                     impedance=${impedance})
+except Exception as e:
+    print(\"Lumped port ${portId} failed:\", e)
+`;
+  }
+
+  code += `
 setup = hfss.create_setup(name="Setup1")
 setup.props["Frequency"] = "20GHz"
 setup.props["MaximumPasses"] = 12

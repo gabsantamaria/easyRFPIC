@@ -16,6 +16,7 @@ import { evalExpr } from '../scene/params.js';
 import { parseAnchor, anchorLocal } from '../scene/anchors.js';
 import { solveLayout, applyMirrors } from '../scene/solver.js';
 import { expandTransforms } from '../scene/transforms.js';
+import { detectPortIntegrationLine } from '../scene/lumpedPort.js';
 import { shapeInstanceToRing } from '../geometry/rings.js';
 import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/racetrack.js';
 
@@ -1358,7 +1359,74 @@ except Exception as e:
         oDesktop.AddMessage("", "", 1, "Open region failed: " + str(e))
     except:
         pass
+`;
 
+  // ===== Lumped ports =====
+  // For every port-layer component that the user marked as a lumped
+  // port AND that the adjacency detector finds flanked by electrodes,
+  // emit a BoundarySetup.AssignLumpedPort call with an integration
+  // line from one flanker to the other through the port's center.
+  const portZ_um = evalExpr('h_wg', paramValues) || 0.6;
+  const lumpedPortTargets = [];
+  for (const c of solved) {
+    if (c.layer !== 'port' || c.kind !== 'rect') continue;
+    if (!c.lumpedPort || !c.lumpedPort.enabled) continue;
+    const det = detectPortIntegrationLine(c, solved, paramValues);
+    if (!det.direction) continue;
+    lumpedPortTargets.push({ comp: c, det });
+  }
+  if (lumpedPortTargets.length > 0) {
+    code += `
+# ===== Lumped ports =====
+oBoundarySetup = oDesign.GetModule("BoundarySetup")
+`;
+    for (const { comp, det } of lumpedPortTargets) {
+      const portId = comp.id.replace(/[^A-Za-z0-9_]/g, '_');
+      const portName = `LumpedPort_${portId}`;
+      const impedance = (comp.lumpedPort && comp.lumpedPort.impedance) || '50';
+      let startX, startY, endX, endY;
+      if (det.direction === 'EW') {
+        startX = det.line.startX.toFixed(4);
+        endX = det.line.endX.toFixed(4);
+        startY = det.line.midY.toFixed(4);
+        endY = det.line.midY.toFixed(4);
+      } else {
+        startX = det.line.midX.toFixed(4);
+        endX = det.line.midX.toFixed(4);
+        startY = det.line.startY.toFixed(4);
+        endY = det.line.endY.toFixed(4);
+      }
+      const zStr = portZ_um.toFixed(4);
+      code += `# ${portName}: integration line ${det.direction} from ${det.from} to ${det.to}
+try:
+    oBoundarySetup.AssignLumpedPort(
+        ["NAME:${portName}",
+         "Objects:=", ["${portId}"],
+         "DoDeembed:=", False,
+         ["NAME:Modes",
+          ["NAME:Mode1",
+           "ModeNum:=", 1,
+           "UseIntLine:=", True,
+           ["NAME:IntLine",
+            "Start:=", ["${startX}um", "${startY}um", "${zStr}um"],
+            "End:=", ["${endX}um", "${endY}um", "${zStr}um"]],
+           "CharImp:=", "Zpi",
+           "AlignmentGroup:=", 0,
+           "RenormImp:=", "${impedance}ohm"]],
+         "ShowReporterFilter:=", False,
+         "ReporterFilter:=", [True],
+         "FullResistance:=", "${impedance}ohm",
+         "FullReactance:=", "0ohm",
+         "Impedance:=", "${impedance}ohm"])
+except Exception as e:
+    try:
+        oDesktop.AddMessage("", "", 1, "Lumped port ${portName} failed: " + str(e))
+    except:
+        pass
+`;
+    }
+  }
+  code += `
 # ===== Setup =====
 oModule = oDesign.GetModule("AnalysisSetup")
 oModule.InsertSetup("HfssDriven",
