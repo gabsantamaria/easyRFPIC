@@ -974,29 +974,30 @@ except Exception as e:
       // default; the user can move it in Z via a displace transform if
       // they want it on a different face.
       //
-      // Port sheets are emitted with NUMERIC XStart / YStart / Width /
-      // Height (not parametric), so that a downstream lumped-port
-      // IntLine — which also uses bare numeric literals — has its
-      // endpoints land EXACTLY on the port edges (HFSS's "endpoints
-      // lie on the port" check is at sub-femtometer tolerance, and any
-      // float-eval discrepancy between the port's parametric XStart
-      // and the IntLine's numeric coord trips it). The port no longer
-      // tracks an HFSS variable sweep, but lumped-port assignment
-      // works reliably.
+      // Width and Height are emitted parametrically (e.g. "(port1_w)")
+      // so that a parameter sweep in HFSS resizes the port. XStart /
+      // YStart use a NUMERIC center plus the same parametric half-
+      // width, so the port stays centered on the original anchor when
+      // the user sweeps port1_w / feed_w. ZStart is parametric in h_wg.
+      //
+      // Critical: the downstream lumped-port IntLine still uses pure
+      // numeric coordinates (HFSS's IntLine parser silently zeroes
+      // any expression with arithmetic, producing a "length zero"
+      // error). Because BOTH the port's XStart "cx − port1_w/2" and
+      // the IntLine's "cx_num − pw_num/2" evaluate from the same JS
+      // float computation, HFSS's evaluator gives bit-identical
+      // results — so "endpoints lie on the port" still passes.
       emittedPortNames.push(id);
-      const pwNum = evalExpr(c.w, paramValues);
-      const phNum = evalExpr(c.h, paramValues);
-      const portXStartNum = String(c.cx - pwNum / 2);
-      const portYStartNum = String(c.cy - phNum / 2);
-      const portWidthNum = String(pwNum);
-      const portHeightNum = String(phNum);
-      const portZNum = String(evalExpr('h_wg', paramValues) || 0.6);
+      const portCxNum = String(c.cx);
+      const portCyNum = String(c.cy);
+      const portWExpr = exprWithUm(c.w);  // e.g. "(port1_w)"
+      const portHExpr = exprWithUm(c.h);
       code += `try:
     oEditor.CreateRectangle(
         ["NAME:RectangleParameters",
          "IsCovered:=", True,
-         "XStart:=", "${portXStartNum}um", "YStart:=", "${portYStartNum}um", "ZStart:=", "${portZNum}um",
-         "Width:=", "${portWidthNum}um", "Height:=", "${portHeightNum}um",
+         "XStart:=", "${portCxNum}um - ${portWExpr}/2", "YStart:=", "${portCyNum}um - ${portHExpr}/2", "ZStart:=", "(h_wg)um",
+         "Width:=", "${portWExpr}", "Height:=", "${portHExpr}",
          "WhichAxis:=", "Z"],
         ["NAME:Attributes",
          "Name:=", "${id}", "Flags:=", "", "Color:=", "(255 100 100)",
