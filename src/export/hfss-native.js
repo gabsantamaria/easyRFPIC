@@ -1342,13 +1342,15 @@ try:
          "MaterialValue:=", "\\"vacuum\\"", "SolveInside:=", True],
         "air_region")
     try:
-        face_ids = list(oEditor.GetFaceIDs("air_region"))
         oBoundarySetup = oDesign.GetModule("BoundarySetup")
+        # Assign the radiation boundary to the entire box object —
+        # AssignRadiation supports "Objects:=" directly and HFSS picks
+        # the outer faces automatically. GetFaceIDs sometimes returns
+        # an unmarshallable wrapper in IronPython that breaks the
+        # "Faces:=" form, so this is more portable.
         oBoundarySetup.AssignRadiation(
             ["NAME:Rad_open_region",
-             "Faces:=", face_ids,
-             "IsFssReference:=", False,
-             "IsForPML:=", False])
+             "Objects:=", ["air_region"]])
     except Exception as e:
         try:
             oDesktop.AddMessage("", "", 1, "AssignRadiation failed: " + str(e))
@@ -1362,11 +1364,16 @@ except Exception as e:
 `;
 
   // ===== Lumped ports =====
-  // For every port-layer component that the user marked as a lumped
-  // port AND that the adjacency detector finds flanked by electrodes,
-  // emit a BoundarySetup.AssignLumpedPort call with an integration
-  // line from one flanker to the other through the port's center.
-  const portZ_um = evalExpr('h_wg', paramValues) || 0.6;
+  // For every port-layer component marked as a lumped port AND that
+  // the adjacency detector finds flanked by electrodes, emit a
+  // BoundarySetup.AssignLumpedPort call. The integration line uses the
+  // port's PARAMETRIC position expressions (not numeric coords) so that
+  //   (a) the endpoints land EXACTLY on the port's edges — HFSS checks
+  //       "endpoints lie on the port" by direct coordinate equality
+  //       and rejects the assignment if even a sub-µm numeric mismatch
+  //       creeps in from rounding;
+  //   (b) if the user later sweeps the port's size / position
+  //       parameters in HFSS, the integration line follows.
   const lumpedPortTargets = [];
   for (const c of solved) {
     if (c.layer !== 'port' || c.kind !== 'rect') continue;
@@ -1384,19 +1391,34 @@ oBoundarySetup = oDesign.GetModule("BoundarySetup")
       const portId = comp.id.replace(/[^A-Za-z0-9_]/g, '_');
       const portName = `LumpedPort_${portId}`;
       const impedance = (comp.lumpedPort && comp.lumpedPort.impedance) || '50';
-      let startX, startY, endX, endY;
+      // Port's parametric expressions (same forms used when the port
+      // sheet was created earlier in the script, so HFSS will resolve
+      // them to identical coordinates).
+      const isMirrorTgt = mirrorTargetIds.has(comp.id);
+      const pp = parametricPos[comp.id];
+      const wExprUm = exprWithUm(comp.w);
+      const hExprUm = exprWithUm(comp.h);
+      const cxExprUm = (!isMirrorTgt && pp)
+        ? exprWithUm(pp.cxExpr)
+        : `(${comp.cx.toFixed(4)})um`;
+      const cyExprUm = (!isMirrorTgt && pp)
+        ? exprWithUm(pp.cyExpr)
+        : `(${comp.cy.toFixed(4)})um`;
+      const xLoExpr = `${cxExprUm} - ${wExprUm}/2`;
+      const xHiExpr = `${cxExprUm} + ${wExprUm}/2`;
+      const yLoExpr = `${cyExprUm} - ${hExprUm}/2`;
+      const yHiExpr = `${cyExprUm} + ${hExprUm}/2`;
+      const zExpr = `(h_wg)um`;
+      let sX, sY, eX, eY;
       if (det.direction === 'EW') {
-        startX = det.line.startX.toFixed(4);
-        endX = det.line.endX.toFixed(4);
-        startY = det.line.midY.toFixed(4);
-        endY = det.line.midY.toFixed(4);
+        // West edge midpoint → East edge midpoint.
+        sX = xLoExpr; sY = cyExprUm;
+        eX = xHiExpr; eY = cyExprUm;
       } else {
-        startX = det.line.midX.toFixed(4);
-        endX = det.line.midX.toFixed(4);
-        startY = det.line.startY.toFixed(4);
-        endY = det.line.endY.toFixed(4);
+        // South edge midpoint → North edge midpoint.
+        sX = cxExprUm; sY = yLoExpr;
+        eX = cxExprUm; eY = yHiExpr;
       }
-      const zStr = portZ_um.toFixed(4);
       code += `# ${portName}: integration line ${det.direction} from ${det.from} to ${det.to}
 try:
     oBoundarySetup.AssignLumpedPort(
@@ -1408,11 +1430,9 @@ try:
            "ModeNum:=", 1,
            "UseIntLine:=", True,
            ["NAME:IntLine",
-            "Start:=", ["${startX}um", "${startY}um", "${zStr}um"],
-            "End:=", ["${endX}um", "${endY}um", "${zStr}um"]],
-           "CharImp:=", "Zpi",
-           "AlignmentGroup:=", 0,
-           "RenormImp:=", "${impedance}ohm"]],
+            "Start:=", ["${sX}", "${sY}", "${zExpr}"],
+            "End:=", ["${eX}", "${eY}", "${zExpr}"]],
+           "CharImp:=", "Zpi"]],
          "ShowReporterFilter:=", False,
          "ReporterFilter:=", [True],
          "FullResistance:=", "${impedance}ohm",
