@@ -1392,60 +1392,54 @@ oBoundarySetup = oDesign.GetModule("BoundarySetup")
       const portId = comp.id.replace(/[^A-Za-z0-9_]/g, '_');
       const portName = `LumpedPort_${portId}`;
       const impedance = (comp.lumpedPort && comp.lumpedPort.impedance) || '50';
-      // Stash the port's center as TWO simple variables (numeric, full
-      // double precision so they match the port-sheet's HFSS-evaluated
-      // edges bit-for-bit when arithmetic is the same). The IntLine
-      // endpoints reference these vars with explicit ± port_w/2 offsets:
-      //   start.x = cx_var − port1_w/2     (matches port.XStart)
-      //   end.x   = cx_var + port1_w/2     (matches port.XStart + width)
-      // Subtract:  end.x − start.x = port1_w  → length is trivially > 0.
-      // Equality: HFSS evaluates start.x with the same float arithmetic
-      // it uses for port.XStart, so they're identical and the "on the
-      // port" check passes.
+      // Emit IntLine endpoints as BARE numeric literals at full JS
+      // double-precision (String(num) gives the shortest round-trip
+      // repr, 15-17 digits). HFSS's IntLine parser appears to reject
+      // arithmetic expressions like 'var - x/2' (treats them as 0,
+      // giving length=0 errors), so we don't use any. The port-sheet
+      // creator also evaluates to these same floats, so the
+      // 'endpoints on the port' check passes bit-for-bit.
       const pw = evalExpr(comp.w, paramValues);
       const ph = evalExpr(comp.h, paramValues);
-      // String() gives the shortest round-trip repr of the JS double
-      // (17 significant digits if needed), avoiding the toFixed(8)
-      // rounding that lost the last few sub-femtometer bits.
-      const cxStr = String(comp.cx);
-      const cyStr = String(comp.cy);
+      const xMin = String(comp.cx - pw / 2);
+      const xMax = String(comp.cx + pw / 2);
+      const yMin = String(comp.cy - ph / 2);
+      const yMax = String(comp.cy + ph / 2);
+      const xMid = String(comp.cx);
+      const yMid = String(comp.cy);
       const zStr = String(portZ_um);
-      const vCx = `${portName}_cx`;
-      const vCy = `${portName}_cy`;
-      code += `# ${portName}: integration line ${det.direction} from ${det.from} to ${det.to}
-set_var("${vCx}", "${cxStr}um")
-set_var("${vCy}", "${cyStr}um")
-`;
       let sX, sY, eX, eY;
       if (det.direction === 'EW') {
-        sX = `${vCx} - ${exprWithUm(comp.w)}/2`;
-        sY = vCy;
-        eX = `${vCx} + ${exprWithUm(comp.w)}/2`;
-        eY = vCy;
+        sX = xMin; sY = yMid;
+        eX = xMax; eY = yMid;
       } else {
-        sX = vCx;
-        sY = `${vCy} - ${exprWithUm(comp.h)}/2`;
-        eX = vCx;
-        eY = `${vCy} + ${exprWithUm(comp.h)}/2`;
+        sX = xMid; sY = yMin;
+        eX = xMid; eY = yMax;
       }
-      code += `try:
+      // AssignLumpedPort args follow the HFSS docs verbatim:
+      // AlignmentGroup inside the Mode block; FullResistance /
+      // FullReactance at top level (no "Impedance:=" key — that's
+      // accepted by some releases and rejected by others).
+      code += `# ${portName}: integration line ${det.direction} from ${det.from} to ${det.to}
+try:
     oBoundarySetup.AssignLumpedPort(
         ["NAME:${portName}",
          "Objects:=", ["${portId}"],
          "DoDeembed:=", False,
-         "RenormalizeAllTerminals:=", True,
          ["NAME:Modes",
           ["NAME:Mode1",
            "ModeNum:=", 1,
            "UseIntLine:=", True,
            ["NAME:IntLine",
-            "Start:=", ["${sX}", "${sY}", "${zStr}um"],
-            "End:=", ["${eX}", "${eY}", "${zStr}um"]],
+            "Start:=", ["${sX}um", "${sY}um", "${zStr}um"],
+            "End:=", ["${eX}um", "${eY}um", "${zStr}um"]],
+           "AlignmentGroup:=", 0,
            "CharImp:=", "Zpi",
            "RenormImp:=", "${impedance}ohm"]],
          "ShowReporterFilter:=", False,
          "ReporterFilter:=", [True],
-         "Impedance:=", "${impedance}ohm"])
+         "FullResistance:=", "${impedance}ohm",
+         "FullReactance:=", "0ohm"])
 except Exception as e:
     try:
         oDesktop.AddMessage("", "", 1, "Lumped port ${portName} failed: " + str(e))
