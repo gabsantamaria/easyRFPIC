@@ -1068,21 +1068,20 @@ except Exception as e:
       //     inset on each endpoint absorbs any sub-µm evaluation
       //     drift between HFSS (evaluating the parametric expression)
       //     and JS (which precomputed the numeric).
-      // Helper variables for the port's anchor coordinate. Stored as
-      // NUMERIC export-time values so the variable creation is
-      // guaranteed to succeed in every HFSS release. The port body's
-      // XStart / YStart reference these vars parametrically combined
-      // with port1_w / feed_w (e.g. "(port1_cx) - (port1_w)/2"), so a
-      // sweep of port1_w / feed_w in HFSS grows the port symmetrically
-      // around port1_cx, port1_cy.
-      //
-      // For snap-chain-driven parameter changes (feed_L, cap_s, …)
-      // that would move the port's anchor on the canvas, the user
-      // needs to re-export — those expressions are too long for
-      // HFSS's variable evaluator to reliably parse, so we don't
-      // burden the helper vars with them.
-      const cxExprForVar = `${String(c.cx)}um`;
-      const cyExprForVar = `${String(c.cy)}um`;
+      const isMirrorTgt = mirrorTargetIds.has(c.id);
+      const pp = parametricPos[c.id];
+      // HFSS's expression parser can mis-parse identifiers separated
+      // by a bare hyphen — e.g. "cap_s-feed_w" gets read as a single
+      // (unknown) identifier rather than the subtraction "cap_s - feed_w".
+      // Insert spaces around hyphens that sit between identifier
+      // characters so the parser sees the binary operator.
+      const spaceHyphens = (s) => String(s).replace(/(\w)-(\w)/g, '$1 - $2');
+      const cxExprForVar = spaceHyphens((!isMirrorTgt && pp)
+        ? exprWithUm(pp.cxExpr)
+        : `${String(c.cx)}um`);
+      const cyExprForVar = spaceHyphens((!isMirrorTgt && pp)
+        ? exprWithUm(pp.cyExpr)
+        : `${String(c.cy)}um`);
       const portZNum = String(evalExpr('h_wg', paramValues) || 0.6);
       const portWExpr = exprWithUm(c.w);  // e.g. "(port1_w)"
       const portHExpr = exprWithUm(c.h);
@@ -1552,16 +1551,6 @@ oBoundarySetup = oDesign.GetModule("BoundarySetup")
       //     the integration line tracks the port's new center on the
       //     non-length axis and the port's z plane — no tilting,
       //     no off-centering.
-      // IntLine endpoints: BARE NUMERIC LITERALS only. HFSS's IntLine
-      // parser doesn't reliably resolve variables or expressions in
-      // this field (we've tested "(port_cy)", bare "port_cy", and
-      // arithmetic forms — all evaluate to 0 in some releases, failing
-      // the "endpoints lie on the port" check). Each endpoint is pulled
-      // 1 nm inward from the port edge so HFSS's check tolerates any
-      // sub-µm drift between its parametric port-edge eval and JS's
-      // solver. Trade-off: the line stays at the export-time position
-      // when snap-chain parameters move the port in HFSS — re-export
-      // to refresh.
       const INSET = 0.001;
       const pw = evalExpr(comp.w, paramValues);
       const ph = evalExpr(comp.h, paramValues);
@@ -1569,18 +1558,17 @@ oBoundarySetup = oDesign.GetModule("BoundarySetup")
       const xMax = String(comp.cx + pw / 2 - INSET);
       const yMin = String(comp.cy - ph / 2 + INSET);
       const yMax = String(comp.cy + ph / 2 - INSET);
-      const xMid = String(comp.cx);
-      const yMid = String(comp.cy);
-      const zStr = String(portZ_um);
+      const cxRef = `(${comp.id.replace(/[^A-Za-z0-9_]/g, '_')}_cx)`;
+      const cyRef = `(${comp.id.replace(/[^A-Za-z0-9_]/g, '_')}_cy)`;
+      const zRef = `(h_wg)`;
       let sX, sY, eX, eY;
       if (det.direction === 'EW') {
-        sX = `${xMin}um`; sY = `${yMid}um`;
-        eX = `${xMax}um`; eY = `${yMid}um`;
+        sX = `${xMin}um`; sY = cyRef;
+        eX = `${xMax}um`; eY = cyRef;
       } else {
-        sX = `${xMid}um`; sY = `${yMin}um`;
-        eX = `${xMid}um`; eY = `${yMax}um`;
+        sX = cxRef; sY = `${yMin}um`;
+        eX = cxRef; eY = `${yMax}um`;
       }
-      const zRef = `${zStr}um`;
       // AssignLumpedPort args follow the HFSS docs verbatim:
       // AlignmentGroup inside the Mode block; FullResistance /
       // FullReactance at top level (no "Impedance:=" key — that's
