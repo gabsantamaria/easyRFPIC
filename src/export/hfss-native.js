@@ -202,8 +202,16 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   // correctly. For a literal-only expression (e.g. "0"), append "um" so HFSS
   // doesn't treat it as unitless. For mixed expressions, wrap parens and
   // append unit only if the expression has no identifiers.
+  //
+  // CRITICAL: HFSS's expression parser treats "foo-bar" (no spaces) as a
+  // single (typically unknown) identifier rather than the binary
+  // subtraction "foo - bar". A param expression like "cap_s-feed_w"
+  // therefore evaluates to 0 and shifts geometry by tens of µm without
+  // any error message. Insert spaces around any '-' that sits between
+  // two identifier characters before handing the string to HFSS.
+  const spaceHyphens = (s) => String(s).replace(/(\w)-(\w)/g, '$1 - $2');
   const exprWithUm = (expr) => {
-    const s = ascii(resolveSynthetics(String(expr ?? '0')));
+    const s = spaceHyphens(ascii(resolveSynthetics(String(expr ?? '0'))));
     if (/^[\d\s+\-*/.()]+$/.test(s)) {
       // Pure numeric: parenthesize the whole and append um. HFSS will treat the
       // result as unit-bearing.
