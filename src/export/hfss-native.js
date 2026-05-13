@@ -1532,59 +1532,52 @@ except Exception as e:
 # ===== Lumped ports =====
 oBoundarySetup = oDesign.GetModule("BoundarySetup")
 `;
+    const portZ_um = evalExpr('h_wg', paramValues) || 0.6;
     for (const { comp, det } of lumpedPortTargets) {
       const portId = comp.id.replace(/[^A-Za-z0-9_]/g, '_');
       const portName = `LumpedPort_${portId}`;
       const impedance = (comp.lumpedPort && comp.lumpedPort.impedance) || '50';
-      // To make the integration line track parameter changes on a
-      // Driven-Modal solution (where AutoIdentifyPorts isn't available
-      // and AssignLumpedPort needs explicit Start/End coords), define
-      // a chain of HFSS variables for the IntLine endpoints. Each
-      // variable's VALUE is a short parametric expression that resolves
-      // to the right port-edge coordinate. The IntLine then references
-      // these variables by bare name — when port1_w / feed_w / h_wg /
-      // any snap-chain variable changes in HFSS, HFSS re-evaluates the
-      // chain and the integration line moves with the port.
+      // IntLine endpoints are emitted as BARE numeric literals at the
+      // export-time port edges (with a 1 nm inward inset to absorb
+      // any sub-µm HFSS↔JS evaluation drift).
       //
-      // Variables emitted per port:
-      //   <port>_int_west  = (<port>_cx) - (<port>_w_var)/2
-      //   <port>_int_east  = (<port>_cx) + (<port>_w_var)/2
-      //   <port>_int_south = (<port>_cy) - (<port>_h_var)/2
-      //   <port>_int_north = (<port>_cy) + (<port>_h_var)/2
-      //   <port>_int_z     = (h_wg)
-      // where <port>_cx / <port>_cy are the parametric snap-chain
-      // anchors we already emit, and <port>_w_var / <port>_h_var are
-      // the width / height expression identifiers (just "port1_w" /
-      // "feed_w" in most cases). All hyphens between identifiers get
-      // a space inserted for HFSS's expression parser.
-      const spaceHyphens = (s) => String(s).replace(/(\w)-(\w)/g, '$1 - $2');
-      const wExprCanonical = spaceHyphens(String(comp.w ?? '0'));
-      const hExprCanonical = spaceHyphens(String(comp.h ?? '0'));
-      const cxVarName = `${portId}_cx`;
-      const cyVarName = `${portId}_cy`;
-      const vWest = `${portId}_int_west`;
-      const vEast = `${portId}_int_east`;
-      const vSouth = `${portId}_int_south`;
-      const vNorth = `${portId}_int_north`;
-      const vZ = `${portId}_int_z`;
-      code += `# ${portName}: chained-variable IntLine so the integration line tracks
-# the port through parameter changes.
-# Detected direction at export: ${det.direction} from ${det.from} to ${det.to}.
-set_var("${vWest}", "(${cxVarName}) - (${wExprCanonical})/2")
-set_var("${vEast}", "(${cxVarName}) + (${wExprCanonical})/2")
-set_var("${vSouth}", "(${cyVarName}) - (${hExprCanonical})/2")
-set_var("${vNorth}", "(${cyVarName}) + (${hExprCanonical})/2")
-set_var("${vZ}", "(h_wg)")
-`;
+      // The IntLine COM field rejects any non-literal here: variable
+      // refs evaluate to 0 ("length zero"), arithmetic expressions
+      // are silently treated as identifiers, and AutoIdentifyPorts
+      // only works on Terminal-network designs.
+      //
+      // If you want the integration line to track parameter changes
+      // in HFSS automatically, re-assign it once through the GUI:
+      //   1. Right-click "${portName}" → Edit → Define Integration Line.
+      //   2. Click the W (or N) port edge, then the opposite edge.
+      // HFSS then anchors the line to those edges internally and it
+      // follows the port through any subsequent parameter sweep.
+      // Until you do that, re-export to refresh the IntLine after
+      // changing snap-chain parameters.
+      const INSET = 0.001;
+      const pw = evalExpr(comp.w, paramValues);
+      const ph = evalExpr(comp.h, paramValues);
+      const xMin = String(comp.cx - pw / 2 + INSET);
+      const xMax = String(comp.cx + pw / 2 - INSET);
+      const yMin = String(comp.cy - ph / 2 + INSET);
+      const yMax = String(comp.cy + ph / 2 - INSET);
+      const xMid = String(comp.cx);
+      const yMid = String(comp.cy);
+      const zStr = String(portZ_um);
       let sX, sY, eX, eY;
       if (det.direction === 'EW') {
-        sX = vWest;  sY = cyVarName;
-        eX = vEast;  eY = cyVarName;
+        sX = `${xMin}um`; sY = `${yMid}um`;
+        eX = `${xMax}um`; eY = `${yMid}um`;
       } else {
-        sX = cxVarName; sY = vSouth;
-        eX = cxVarName; eY = vNorth;
+        sX = `${xMid}um`; sY = `${yMin}um`;
+        eX = `${xMid}um`; eY = `${yMax}um`;
       }
-      code += `try:
+      const zRef = `${zStr}um`;
+      code += `# ${portName}: integration line ${det.direction} from ${det.from} to ${det.to}.
+# To make this line track parameter changes in HFSS, re-assign it once
+# manually through the GUI (Edit Integration Line, click port edges).
+# HFSS anchors it to the picked edges internally and it auto-follows.
+try:
     _delete_boundary_if_exists("${portName}")
     oBoundarySetup.AssignLumpedPort(
         ["NAME:${portName}",
@@ -1595,8 +1588,8 @@ set_var("${vZ}", "(h_wg)")
            "ModeNum:=", 1,
            "UseIntLine:=", True,
            ["NAME:IntLine",
-            "Start:=", ["${sX}", "${sY}", "${vZ}"],
-            "End:=", ["${eX}", "${eY}", "${vZ}"]],
+            "Start:=", ["${sX}", "${sY}", "${zRef}"],
+            "End:=", ["${eX}", "${eY}", "${zRef}"]],
            "AlignmentGroup:=", 0,
            "CharImp:=", "Zpi",
            "RenormImp:=", "${impedance}ohm"]],
