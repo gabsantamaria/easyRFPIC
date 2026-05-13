@@ -94,40 +94,37 @@ export function ParamRow({ name, p, onRename, onUpdateExpr, onCommitExpr, onUpda
             spellCheck={false}
           />
         </HoverTooltip>
-        {/* Expression field: collapsed = single-line input; focused = grown
-            textarea spanning the full width on a row beneath the name/value,
-            so long expressions are fully visible and editable. */}
-        {exprFocused ? (
-          <div className="flex-1 min-w-0 relative">
-            <textarea
-              ref={exprTextareaRef}
-              value={exprDraft}
-              autoFocus
-              onChange={(e) => setExprDraft(e.target.value)}
-              onBlur={commitExprDraft}
-              onKeyDown={(e) => {
-                // Enter commits and exits (unless Shift held — newline).
-                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.target.blur(); }
-                // Escape reverts the draft and exits without committing.
-                if (e.key === 'Escape') { setExprDraft(p.expr ?? ''); e.target.blur(); }
-              }}
-              className={`w-full bg-slate-900 border rounded px-1.5 py-1 text-[11px] font-mono outline-none resize-none whitespace-pre-wrap break-words ${error ? 'border-red-500 text-red-300' : 'border-cyan-400 text-white'}`}
-              spellCheck={false}
-              rows={1}
-              title={exprTooltip}
-            />
-          </div>
-        ) : (
-          <input
-            value={p.expr}
-            readOnly
-            onFocus={() => setExprFocused(true)}
-            onMouseDown={(e) => { e.preventDefault(); setExprFocused(true); }}
-            className={`flex-1 min-w-0 bg-slate-900 border rounded px-1.5 py-0.5 text-[11px] font-mono outline-none cursor-text ${error ? 'border-red-500 text-red-300' : 'border-slate-700 text-white hover:border-slate-500'}`}
-            spellCheck={false}
-            title={exprTooltip}
-          />
-        )}
+        {/* Expression field: SAME <textarea> across collapsed and focused
+            states so the cursor isn't lost when the user clicks (React
+            would remount if the element type swapped between input and
+            textarea, with the new one taking cursor position 0). The
+            textarea's row count and styling shift on focus to give the
+            same visual feel as before: single-line, narrow border when
+            collapsed; full-width, cyan border, auto-grown when active. */}
+        <textarea
+          ref={exprTextareaRef}
+          value={exprFocused ? exprDraft : (p.expr ?? '')}
+          onChange={(e) => setExprDraft(e.target.value)}
+          onFocus={() => {
+            setExprDraft(p.expr ?? '');
+            setExprFocused(true);
+          }}
+          onBlur={commitExprDraft}
+          onKeyDown={(e) => {
+            // Enter commits and exits (unless Shift held — newline).
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.target.blur(); }
+            // Escape reverts the draft and exits without committing.
+            if (e.key === 'Escape') { setExprDraft(p.expr ?? ''); e.target.blur(); }
+          }}
+          className={`flex-1 min-w-0 bg-slate-900 border rounded text-[11px] font-mono outline-none resize-none whitespace-pre-wrap break-words leading-tight ${
+            exprFocused
+              ? `px-1.5 py-1 ${error ? 'border-red-500 text-red-300' : 'border-cyan-400 text-white'}`
+              : `px-1.5 py-0.5 ${error ? 'border-red-500 text-red-300' : 'border-slate-700 text-white hover:border-slate-500'}`
+          }`}
+          spellCheck={false}
+          rows={1}
+          title={exprTooltip}
+        />
         <span className="text-[9px] text-slate-500 font-mono w-14 text-right truncate" title={error || ''}>
           {error ? <AlertTriangle size={10} className="text-red-400 inline" /> : `${value?.toFixed?.(2) ?? value}${p.unit ? p.unit : ''}`}
         </span>
