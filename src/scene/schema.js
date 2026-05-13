@@ -216,8 +216,19 @@ export function normalizeScene(s) {
   //     automatic open-region radiation box. HFSS pads each face by
   //     ~λ/4 at this frequency. Stored as a string so it can be a
   //     parametric expression in the future.
+  //   - padXNeg / padXPos / padYNeg / padYPos: per-face padding (µm)
+  //     between the device-area bounding box and the chip-substrate
+  //     edges. The substrate (and any cladding sized to it) extends
+  //     from (deviceMinX − padXNeg, deviceMinY − padYNeg) to
+  //     (deviceMaxX + padXPos, deviceMaxY + padYPos). Symmetric pads
+  //     keep the design centered on the chip; asymmetric pads shift
+  //     it. Strings so they can be parametric later. Default 50 µm.
   const simSetup = {
     fnominal: '4',
+    padXNeg: '50',
+    padXPos: '50',
+    padYNeg: '50',
+    padYPos: '50',
     ...(s.simSetup || {}),
   };
 

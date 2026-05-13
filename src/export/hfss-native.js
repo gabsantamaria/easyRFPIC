@@ -301,11 +301,14 @@ export function generateHfssNative(scene, paramValues) {
   // Cladding layers: each fills the WG region (Z = its zBottom to zTop), with WGs and electrodes subtracted.
   const claddingLayers = (stack || []).filter(l => l.role === 'cladding');
 
-  // Substrate / cladding bounding extent: default 100x100 um centered on origin,
-  // expanding (with a small margin) only if the layout is bigger.
-  const MIN_HALF = 50; // 100x100 um substrate
-  const MARGIN = 20;   // pad if layout goes near edge
-  let minX = -MIN_HALF, minY = -MIN_HALF, maxX = MIN_HALF, maxY = MIN_HALF;
+  // Substrate / cladding bounding extent: device-area bbox expanded by
+  // per-face padding from scene.simSetup. Pads default to 50 µm each;
+  // a fallback 100×100 µm minimum protects empty scenes.
+  const padXNeg = Math.max(0, parseFloat((scene.simSetup && scene.simSetup.padXNeg) ?? '50') || 0);
+  const padXPos = Math.max(0, parseFloat((scene.simSetup && scene.simSetup.padXPos) ?? '50') || 0);
+  const padYNeg = Math.max(0, parseFloat((scene.simSetup && scene.simSetup.padYNeg) ?? '50') || 0);
+  const padYPos = Math.max(0, parseFloat((scene.simSetup && scene.simSetup.padYPos) ?? '50') || 0);
+  let minX = -50, minY = -50, maxX = 50, maxY = 50;
   if (solved.length > 0) {
     let lx = Infinity, ly = Infinity, hx = -Infinity, hy = -Infinity;
     for (const c of solved) {
@@ -316,10 +319,10 @@ export function generateHfssNative(scene, paramValues) {
       ly = Math.min(ly, c.cy - h / 2);
       hy = Math.max(hy, c.cy + h / 2);
     }
-    minX = Math.min(minX, lx - MARGIN);
-    maxX = Math.max(maxX, hx + MARGIN);
-    minY = Math.min(minY, ly - MARGIN);
-    maxY = Math.max(maxY, hy + MARGIN);
+    minX = lx - padXNeg;
+    maxX = hx + padXPos;
+    minY = ly - padYNeg;
+    maxY = hy + padYPos;
   }
   const bbXPos = `${minX.toFixed(2)}um`;
   const bbYPos = `${minY.toFixed(2)}um`;

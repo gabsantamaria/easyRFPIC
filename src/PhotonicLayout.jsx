@@ -4539,23 +4539,41 @@ export default function App() {
             )}
 
             {activePanel === 'setup' && (() => {
-              // HFSS / pyAEDT simulation-setup knobs. Currently the only
-              // knob is `fnominal` (GHz) used by the auto-sized open
-              // region. Compute the resulting lateral padding in real
-              // units so the user knows how much room they need to
-              // leave around the chip.
+              // HFSS / pyAEDT simulation-setup knobs.
+              //   - fnominal (GHz): used by the auto-sized open-region
+              //     radiation box. We display λ/4 in real units so the
+              //     user knows how much radiation clearance is needed.
+              //   - padXNeg / padXPos / padYNeg / padYPos (µm): per-
+              //     face padding from the device-area bbox to the chip
+              //     substrate edge. Symmetric pads → centered design.
               const fStr = (scene.simSetup && scene.simSetup.fnominal) || '4';
               const fNum = parseFloat(String(fStr).replace(/\s*ghz\s*$/i, '')) || 0;
-              // λ = c / f. c in mm/ns = 299.792458. f in GHz.
-              // → λ (mm) = 299.792458 / f(GHz). λ/4 = 74.948 / f(GHz).
               const c_mm_per_ns = 299.792458;
               const lambdaMm = fNum > 0 ? c_mm_per_ns / fNum : 0;
-              const padMm = lambdaMm / 4;
-              const padUm = padMm * 1000;
-              const setFnominal = (v) => updateScene(prev => ({
+              const radPadMm = lambdaMm / 4;
+              const radPadUm = radPadMm * 1000;
+              const padXNegStr = (scene.simSetup && scene.simSetup.padXNeg) ?? '50';
+              const padXPosStr = (scene.simSetup && scene.simSetup.padXPos) ?? '50';
+              const padYNegStr = (scene.simSetup && scene.simSetup.padYNeg) ?? '50';
+              const padYPosStr = (scene.simSetup && scene.simSetup.padYPos) ?? '50';
+              const updateSim = (patch) => updateScene(prev => ({
                 ...prev,
-                simSetup: { ...(prev.simSetup || { fnominal: '4' }), fnominal: v },
+                simSetup: { fnominal: '4', padXNeg: '50', padXPos: '50', padYNeg: '50', padYPos: '50', ...(prev.simSetup || {}), ...patch },
               }));
+              const PadField = ({ label, value, field }) => (
+                <div className="flex items-center gap-2">
+                  <label className="text-[10px] text-slate-400 w-12 text-right">{label}</label>
+                  <input
+                    type="text"
+                    defaultValue={value}
+                    key={value}
+                    onBlur={(e) => updateSim({ [field]: e.target.value.trim() || '50' })}
+                    onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); if (e.key === 'Escape') { e.target.value = value; e.target.blur(); } }}
+                    className="w-20 px-1.5 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 text-xs font-mono"
+                  />
+                  <span className="text-[10px] text-slate-500">µm</span>
+                </div>
+              );
               return (
                 <div className="space-y-3">
                   <div>
@@ -4573,23 +4591,36 @@ export default function App() {
                       type="text"
                       defaultValue={fStr}
                       key={fStr}
-                      onBlur={(e) => setFnominal(e.target.value.trim() || '4')}
+                      onBlur={(e) => updateSim({ fnominal: e.target.value.trim() || '4' })}
                       onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); if (e.key === 'Escape') { e.target.value = fStr; e.target.blur(); } }}
                       className="w-28 px-1.5 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 text-xs font-mono"
                     />
                   </div>
                   <div className="border-t border-slate-800 pt-2">
-                    <div className="text-[10px] uppercase tracking-wider text-slate-400 mb-1">Computed padding (per face)</div>
+                    <div className="text-[10px] uppercase tracking-wider text-slate-400 mb-1">Radiation-box padding (auto)</div>
                     <div className="font-mono text-xs text-slate-300 leading-relaxed">
                       λ = {lambdaMm.toFixed(2)} mm<br />
-                      λ/4 = <span className="text-cyan-300 font-bold">{padMm.toFixed(2)} mm</span> ({padUm.toFixed(0)} µm)
+                      λ/4 = <span className="text-cyan-300 font-bold">{radPadMm.toFixed(2)} mm</span> ({radPadUm.toFixed(0)} µm)
                     </div>
                     <p className="text-[10px] text-slate-500 mt-2 leading-snug">
-                      Each lateral face of the geometry needs at least
-                      this much clearance to the chip edge so the
-                      radiation box can fit. Adjust f<sub>nominal</sub>
+                      HFSS adds this much clearance on each face for
+                      the radiation box. Adjust f<sub>nominal</sub>
                       lower → more padding; higher → less.
                     </p>
+                  </div>
+                  <div className="border-t border-slate-800 pt-2">
+                    <div className="text-[10px] uppercase tracking-wider text-slate-400 mb-1">Substrate / chip padding</div>
+                    <p className="text-[10px] text-slate-500 leading-snug mb-2">
+                      Distance from the device-area bounding box to the
+                      chip-substrate edge on each face. Equal values on
+                      both axes keep the design centered on the chip.
+                    </p>
+                    <div className="space-y-1.5">
+                      <PadField label="+x" value={padXPosStr} field="padXPos" />
+                      <PadField label="−x" value={padXNegStr} field="padXNeg" />
+                      <PadField label="+y" value={padYPosStr} field="padYPos" />
+                      <PadField label="−y" value={padYNegStr} field="padYNeg" />
+                    </div>
                   </div>
                 </div>
               );
