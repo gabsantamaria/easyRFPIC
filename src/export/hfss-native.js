@@ -1387,37 +1387,34 @@ except Exception as e:
 # ===== Lumped ports =====
 oBoundarySetup = oDesign.GetModule("BoundarySetup")
 `;
+    const portZ_um = evalExpr('h_wg', paramValues) || 0.6;
     for (const { comp, det } of lumpedPortTargets) {
       const portId = comp.id.replace(/[^A-Za-z0-9_]/g, '_');
       const portName = `LumpedPort_${portId}`;
       const impedance = (comp.lumpedPort && comp.lumpedPort.impedance) || '50';
-      // Port's parametric expressions (same forms used when the port
-      // sheet was created earlier in the script, so HFSS will resolve
-      // them to identical coordinates).
-      const isMirrorTgt = mirrorTargetIds.has(comp.id);
-      const pp = parametricPos[comp.id];
-      const wExprUm = exprWithUm(comp.w);
-      const hExprUm = exprWithUm(comp.h);
-      const cxExprUm = (!isMirrorTgt && pp)
-        ? exprWithUm(pp.cxExpr)
-        : `(${comp.cx.toFixed(4)})um`;
-      const cyExprUm = (!isMirrorTgt && pp)
-        ? exprWithUm(pp.cyExpr)
-        : `(${comp.cy.toFixed(4)})um`;
-      const xLoExpr = `${cxExprUm} - ${wExprUm}/2`;
-      const xHiExpr = `${cxExprUm} + ${wExprUm}/2`;
-      const yLoExpr = `${cyExprUm} - ${hExprUm}/2`;
-      const yHiExpr = `${cyExprUm} + ${hExprUm}/2`;
-      const zExpr = `(h_wg)um`;
+      // Use HIGH-PRECISION numeric coordinates. Parametric expressions
+      // sometimes confuse HFSS's IntLine length check (the expressions
+      // evaluate fine for the port-sheet creation but get rejected as
+      // length-zero by AssignLumpedPort in some releases). 8 decimals
+      // is well below HFSS's geometric tolerance and well above the
+      // 4-decimal port-sheet creation precision used elsewhere — so
+      // endpoints comfortably land "on the port".
+      const pw = evalExpr(comp.w, paramValues);
+      const ph = evalExpr(comp.h, paramValues);
+      const xMin = (comp.cx - pw / 2).toFixed(8);
+      const xMax = (comp.cx + pw / 2).toFixed(8);
+      const yMin = (comp.cy - ph / 2).toFixed(8);
+      const yMax = (comp.cy + ph / 2).toFixed(8);
+      const xMid = comp.cx.toFixed(8);
+      const yMid = comp.cy.toFixed(8);
+      const zStr = portZ_um.toFixed(8);
       let sX, sY, eX, eY;
       if (det.direction === 'EW') {
-        // West edge midpoint → East edge midpoint.
-        sX = xLoExpr; sY = cyExprUm;
-        eX = xHiExpr; eY = cyExprUm;
+        sX = xMin; sY = yMid;
+        eX = xMax; eY = yMid;
       } else {
-        // South edge midpoint → North edge midpoint.
-        sX = cxExprUm; sY = yLoExpr;
-        eX = cxExprUm; eY = yHiExpr;
+        sX = xMid; sY = yMin;
+        eX = xMid; eY = yMax;
       }
       code += `# ${portName}: integration line ${det.direction} from ${det.from} to ${det.to}
 try:
@@ -1425,18 +1422,18 @@ try:
         ["NAME:${portName}",
          "Objects:=", ["${portId}"],
          "DoDeembed:=", False,
+         "RenormalizeAllTerminals:=", True,
          ["NAME:Modes",
           ["NAME:Mode1",
            "ModeNum:=", 1,
            "UseIntLine:=", True,
            ["NAME:IntLine",
-            "Start:=", ["${sX}", "${sY}", "${zExpr}"],
-            "End:=", ["${eX}", "${eY}", "${zExpr}"]],
-           "CharImp:=", "Zpi"]],
+            "Start:=", ["${sX}um", "${sY}um", "${zStr}um"],
+            "End:=", ["${eX}um", "${eY}um", "${zStr}um"]],
+           "CharImp:=", "Zpi",
+           "RenormImp:=", "${impedance}ohm"]],
          "ShowReporterFilter:=", False,
          "ReporterFilter:=", [True],
-         "FullResistance:=", "${impedance}ohm",
-         "FullReactance:=", "0ohm",
          "Impedance:=", "${impedance}ohm"])
 except Exception as e:
     try:
