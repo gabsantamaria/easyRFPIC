@@ -310,14 +310,19 @@ export function generateHfssNative(scene, paramValues) {
   const padYPos = Math.max(0, parseFloat((scene.simSetup && scene.simSetup.padYPos) ?? '50') || 0);
   let minX = -50, minY = -50, maxX = 50, maxY = 50;
   if (solved.length > 0) {
+    // Expand transforms so repeats/displace/rotate are reflected in the
+    // device bbox — otherwise a 'repeat n=1 dx=cap_s' on a conductor
+    // doubles the device width but the substrate only sizes to the
+    // base instance, putting the chip off-center.
+    const instances = expandTransforms(solved, paramValues);
     let lx = Infinity, ly = Infinity, hx = -Infinity, hy = -Infinity;
-    for (const c of solved) {
-      const w = evalExpr(c.w, paramValues) || 10;
-      const h = evalExpr(c.h, paramValues) || 10;
-      lx = Math.min(lx, c.cx - w / 2);
-      hx = Math.max(hx, c.cx + w / 2);
-      ly = Math.min(ly, c.cy - h / 2);
-      hy = Math.max(hy, c.cy + h / 2);
+    for (const inst of instances) {
+      const w = Number.isFinite(inst.w) ? inst.w : (evalExpr(inst.w, paramValues) || 10);
+      const h = Number.isFinite(inst.h) ? inst.h : (evalExpr(inst.h, paramValues) || 10);
+      lx = Math.min(lx, inst.cx - w / 2);
+      hx = Math.max(hx, inst.cx + w / 2);
+      ly = Math.min(ly, inst.cy - h / 2);
+      hy = Math.max(hy, inst.cy + h / 2);
     }
     minX = lx - padXNeg;
     maxX = hx + padXPos;
@@ -1290,43 +1295,64 @@ except Exception as e:
   }
 
   // ===== Open-region radiation boundary =====
-  // The simulation setup carries an `fnominal` (GHz) used to size the
-  // open region. HFSS's CreateOpenRegion automatically creates an air
-  // box around the geometry padded by ~λ/4 at this frequency and
-  // assigns the Radiation boundary to its outer faces. Wave-ports and
-  // lumped-ports on port-layer sheets remain assignable underneath.
+  // Compute the airbox dimensions explicitly and emit a CreateBox +
+  // AssignRadiation pair. HFSS's CreateOpenRegion isn't exposed on
+  // BoundarySetup in every release, so doing it by hand keeps the
+  // script portable. Padding = λ/4 at fnominal, applied to all 6
+  // faces. The box wraps the chip-substrate bbox in XY (so the bbox
+  // already includes the user's chip-padding) and extends from the
+  // bottom of the substrate stack to the top of the highest
+  // conductor/cladding layer plus the same λ/4 pad.
   const fnominalRaw = (scene.simSetup && scene.simSetup.fnominal) || '4';
-  // Trim whitespace; accept "4", "4.0", "4 GHz" etc. We always
-  // re-stamp the unit suffix when handing to HFSS so the user can
-  // type either form.
   const fnominalStripped = String(fnominalRaw).trim().replace(/\s*ghz\s*$/i, '');
-  const fnominalExpr = `${fnominalStripped}GHz`;
+  const fnominalGHz = parseFloat(fnominalStripped) || 4;
+  // λ (µm) = c / f. With c in µm/s (2.998e14) and f in Hz (fnominalGHz*1e9):
+  //   λ (µm) = 2.998e14 / (fnominalGHz * 1e9) = 2.998e5 / fnominalGHz.
+  const lambdaUm = 2.998e5 / fnominalGHz;
+  const radPadUm = lambdaUm / 4;
+  // Z extent: from the bottom of the lowest substrate to the top of
+  // the highest layer we tracked. Fall back to a generous range so the
+  // box still wraps the geometry if layerZ is sparse.
+  const allZBottoms = Object.values(layerZ).map(z => z.zBottom);
+  const allZTops = Object.values(layerZ).map(z => z.zBottom + z.thickness);
+  const sceneZMin = allZBottoms.length ? Math.min(...allZBottoms) : -260;
+  const sceneZMax = allZTops.length ? Math.max(...allZTops) : 5;
+  const airMinX = (minX - radPadUm).toFixed(2);
+  const airMinY = (minY - radPadUm).toFixed(2);
+  const airMinZ = (sceneZMin - radPadUm).toFixed(2);
+  const airSizeX = ((maxX - minX) + 2 * radPadUm).toFixed(2);
+  const airSizeY = ((maxY - minY) + 2 * radPadUm).toFixed(2);
+  const airSizeZ = ((sceneZMax - sceneZMin) + 2 * radPadUm).toFixed(2);
   code += `
 # ===== Open-region radiation boundary =====
-# Wraps the geometry with an air box that has Radiation boundaries on
-# its outer faces. Box size is auto-computed by HFSS as ~λ/4 at the
-# nominal frequency in each direction. Edit f_open_region below (or in
-# the project's variables list) to retune.
+# Air box padded by ~λ/4 at fnominal = ${fnominalGHz} GHz on every face
+# (λ/4 ≈ ${radPadUm.toFixed(1)} um). Created as an explicit CreateBox +
+# AssignRadiation on the box's faces — more robust than calling
+# CreateOpenRegion (which isn't exposed on BoundarySetup in every
+# HFSS release).
 try:
-    oDesign.ChangeProperty(
-        ["NAME:AllTabs",
-         ["NAME:LocalVariableTab",
-          ["NAME:PropServers", "LocalVariables"],
-          ["NAME:NewProps",
-           ["NAME:f_open_region", "PropType:=", "VariableProp",
-            "UserDef:=", True, "Value:=", "${fnominalExpr}"]]]])
-except Exception as e:
+    safe_create_box(
+        ["NAME:BoxParameters",
+         "XPosition:=", "${airMinX}um", "YPosition:=", "${airMinY}um", "ZPosition:=", "${airMinZ}um",
+         "XSize:=", "${airSizeX}um", "YSize:=", "${airSizeY}um", "ZSize:=", "${airSizeZ}um"],
+        ["NAME:Attributes",
+         "Name:=", "air_region", "Flags:=", "", "Color:=", "(180 220 240)",
+         "Transparency:=", 0.85, "PartCoordinateSystem:=", "Global",
+         "MaterialValue:=", "\\"vacuum\\"", "SolveInside:=", True],
+        "air_region")
     try:
-        oDesktop.AddMessage("", "", 1, "f_open_region var setup: " + str(e))
-    except:
-        pass
-try:
-    oBoundarySetup = oDesign.GetModule("BoundarySetup")
-    oBoundarySetup.CreateOpenRegion(
-        ["NAME:CreateOpenRegionData",
-         "Frequency:=", "f_open_region",
-         "Boundary:=", "Radiation",
-         "ApplyInfiniteGP:=", False])
+        face_ids = list(oEditor.GetFaceIDs("air_region"))
+        oBoundarySetup = oDesign.GetModule("BoundarySetup")
+        oBoundarySetup.AssignRadiation(
+            ["NAME:Rad_open_region",
+             "Faces:=", face_ids,
+             "IsFssReference:=", False,
+             "IsForPML:=", False])
+    except Exception as e:
+        try:
+            oDesktop.AddMessage("", "", 1, "AssignRadiation failed: " + str(e))
+        except:
+            pass
 except Exception as e:
     try:
         oDesktop.AddMessage("", "", 1, "Open region failed: " + str(e))
