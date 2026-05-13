@@ -1053,30 +1053,40 @@ except Exception as e:
       // float computation, HFSS's evaluator gives bit-identical
       // results — so "endpoints lie on the port" still passes.
       emittedPortNames.push(id);
-      // Port sheet emission strategy:
-      //   - XStart, YStart, ZStart: NUMERIC (full double precision via
-      //     String(num)). These define the lower-left corner exactly.
-      //     The lumped-port IntLine uses the SAME numeric coords for
-      //     its endpoints — both parse to the same float64 → HFSS's
-      //     "endpoints lie on the port" check passes by construction.
-      //   - Width, Height: PARAMETRIC (e.g. "(port1_w)", "(feed_w)").
-      //     A sweep of port1_w / feed_w in HFSS resizes the port,
-      //     growing it from the lower-left corner. (Not center-
-      //     anchored — HFSS's IntLine parser doesn't tolerate
-      //     arithmetic expressions in its endpoints, so we can't
-      //     center-anchor without breaking the lumped-port assignment.)
+      // Port sheet emission strategy (center-anchored parametric):
+      //   - Pre-emit two simple HFSS variables for the port's center
+      //     coordinate, each holding a NUMERIC full-precision µm value
+      //     (e.g. "20.547649999999997um"). These are easy to update by
+      //     hand in HFSS later if the user wants to retune position.
+      //   - XStart / YStart reference those variables minus the
+      //     parametric half-width: "<port_cx_var> - (port1_w)/2".
+      //     Combined with parametric Width / Height, the port grows
+      //     symmetrically around its center when port1_w / feed_w are
+      //     swept in HFSS.
+      //   - The lumped-port IntLine is still emitted as bare numeric
+      //     literals. The port's XStart evaluates to
+      //         <cx_var as numeric> - port1_w/2
+      //     and HFSS uses the same IEEE 754 doubles as JS, so the
+      //     evaluated edge equals the IntLine's parsed literal
+      //     bit-for-bit at nominal port_w. The "endpoints lie on the
+      //     port" check therefore passes.
       const pwNum = evalExpr(c.w, paramValues);
       const phNum = evalExpr(c.h, paramValues);
-      const portXStartNum = String(c.cx - pwNum / 2);
-      const portYStartNum = String(c.cy - phNum / 2);
+      const portCxStr = String(c.cx);
+      const portCyStr = String(c.cy);
       const portZNum = String(evalExpr('h_wg', paramValues) || 0.6);
       const portWExpr = exprWithUm(c.w);  // e.g. "(port1_w)"
       const portHExpr = exprWithUm(c.h);
-      code += `try:
+      const cxVar = `${id}_cx`;
+      const cyVar = `${id}_cy`;
+      code += `# Port anchor: edit ${cxVar} / ${cyVar} in HFSS to retune position.
+set_var("${cxVar}", "${portCxStr}um")
+set_var("${cyVar}", "${portCyStr}um")
+try:
     safe_create_rectangle(
         ["NAME:RectangleParameters",
          "IsCovered:=", True,
-         "XStart:=", "${portXStartNum}um", "YStart:=", "${portYStartNum}um", "ZStart:=", "${portZNum}um",
+         "XStart:=", "(${cxVar}) - ${portWExpr}/2", "YStart:=", "(${cyVar}) - ${portHExpr}/2", "ZStart:=", "${portZNum}um",
          "Width:=", "${portWExpr}", "Height:=", "${portHExpr}",
          "WhichAxis:=", "Z"],
         ["NAME:Attributes",
