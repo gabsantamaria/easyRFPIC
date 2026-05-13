@@ -1053,35 +1053,37 @@ except Exception as e:
       // float computation, HFSS's evaluator gives bit-identical
       // results — so "endpoints lie on the port" still passes.
       emittedPortNames.push(id);
-      // Port sheet emission strategy (center-anchored parametric):
-      //   - Pre-emit two simple HFSS variables for the port's center
-      //     coordinate, each holding a NUMERIC full-precision µm value
-      //     (e.g. "20.547649999999997um"). These are easy to update by
-      //     hand in HFSS later if the user wants to retune position.
+      // Port sheet emission strategy (fully parametric):
+      //   - Pre-emit two HFSS variables for the port's center. Their
+      //     VALUES are the FULL parametric snap-chain expressions for
+      //     the port's cx / cy, so any HFSS-side change to a snap-
+      //     chain variable (e.g. feed_L, cap_s) moves the port the
+      //     same way it moves on the canvas.
       //   - XStart / YStart reference those variables minus the
       //     parametric half-width: "<port_cx_var> - (port1_w)/2".
-      //     Combined with parametric Width / Height, the port grows
-      //     symmetrically around its center when port1_w / feed_w are
-      //     swept in HFSS.
-      //   - The lumped-port IntLine is still emitted as bare numeric
-      //     literals. The port's XStart evaluates to
-      //         <cx_var as numeric> - port1_w/2
-      //     and HFSS uses the same IEEE 754 doubles as JS, so the
-      //     evaluated edge equals the IntLine's parsed literal
-      //     bit-for-bit at nominal port_w. The "endpoints lie on the
-      //     port" check therefore passes.
-      const pwNum = evalExpr(c.w, paramValues);
-      const phNum = evalExpr(c.h, paramValues);
-      const portCxStr = String(c.cx);
-      const portCyStr = String(c.cy);
+      //   - Width / Height are parametric so port1_w / feed_w sweeps
+      //     resize the port symmetrically around the center.
+      //   - The lumped-port IntLine is still bare numeric — HFSS's
+      //     IntLine parser rejects any arithmetic. A 1-nm inward
+      //     inset on each endpoint absorbs any sub-µm evaluation
+      //     drift between HFSS (evaluating the parametric expression)
+      //     and JS (which precomputed the numeric).
+      const isMirrorTgt = mirrorTargetIds.has(c.id);
+      const pp = parametricPos[c.id];
+      const cxExprForVar = (!isMirrorTgt && pp)
+        ? exprWithUm(pp.cxExpr)
+        : `${String(c.cx)}um`;
+      const cyExprForVar = (!isMirrorTgt && pp)
+        ? exprWithUm(pp.cyExpr)
+        : `${String(c.cy)}um`;
       const portZNum = String(evalExpr('h_wg', paramValues) || 0.6);
       const portWExpr = exprWithUm(c.w);  // e.g. "(port1_w)"
       const portHExpr = exprWithUm(c.h);
       const cxVar = `${id}_cx`;
       const cyVar = `${id}_cy`;
-      code += `# Port anchor: edit ${cxVar} / ${cyVar} in HFSS to retune position.
-set_var("${cxVar}", "${portCxStr}um")
-set_var("${cyVar}", "${portCyStr}um")
+      code += `# Port anchor (parametric in the snap chain — follows feed_w / feed_L / etc.).
+set_var("${cxVar}", "${cxExprForVar}")
+set_var("${cyVar}", "${cyExprForVar}")
 try:
     safe_create_rectangle(
         ["NAME:RectangleParameters",
@@ -1531,17 +1533,22 @@ oBoundarySetup = oDesign.GetModule("BoundarySetup")
       const impedance = (comp.lumpedPort && comp.lumpedPort.impedance) || '50';
       // Emit IntLine endpoints as BARE numeric literals at full JS
       // double-precision (String(num) gives the shortest round-trip
-      // repr, 15-17 digits). HFSS's IntLine parser appears to reject
-      // arithmetic expressions like 'var - x/2' (treats them as 0,
-      // giving length=0 errors), so we don't use any. The port-sheet
-      // creator also evaluates to these same floats, so the
-      // 'endpoints on the port' check passes bit-for-bit.
+      // repr, 15-17 digits). HFSS's IntLine parser rejects arithmetic
+      // expressions like 'var - x/2' (treats them as 0, giving
+      // length=0 errors), so we can't reference the port's parametric
+      // helpers here. Instead we use the export-time numeric and pull
+      // each endpoint INWARD by `INSET` so HFSS's "endpoint lies on
+      // the port" check tolerates any sub-µm evaluation drift between
+      // HFSS's parametric port-edge eval and JS's solver. With a 1 nm
+      // inset the integration line is virtually full-width but never
+      // hangs off the port due to a ULP mismatch.
+      const INSET = 0.001;
       const pw = evalExpr(comp.w, paramValues);
       const ph = evalExpr(comp.h, paramValues);
-      const xMin = String(comp.cx - pw / 2);
-      const xMax = String(comp.cx + pw / 2);
-      const yMin = String(comp.cy - ph / 2);
-      const yMax = String(comp.cy + ph / 2);
+      const xMin = String(comp.cx - pw / 2 + INSET);
+      const xMax = String(comp.cx + pw / 2 - INSET);
+      const yMin = String(comp.cy - ph / 2 + INSET);
+      const yMax = String(comp.cy + ph / 2 - INSET);
       const xMid = String(comp.cx);
       const yMid = String(comp.cy);
       const zStr = String(portZ_um);
