@@ -882,7 +882,10 @@ except Exception as e:
       const slabHExpr = wgLayer && wgLayer.slab_height ? wgLayer.slab_height : 'h_slab';
       const slabHExprUm = exprWithUm(slabHExpr);
       // ribH * (cot(angle)) = ribH / tan(angle) — keep all in µm.
-      const inwardShiftExprUm = `((${exprWithUm(layerThExpr)} - ${slabHExprUm}) / tan((${etchExpr}) * pi/180))`;
+      // etch_angle is stored as an HFSS variable with "deg" units, so
+      // HFSS's tan() resolves it directly (no explicit pi/180 — adding
+      // that would double-convert and give a nonsense rib width).
+      const inwardShiftExprUm = `((${exprWithUm(layerThExpr)} - ${slabHExprUm}) / tan(${etchExpr}))`;
       const coreWExprUm = exprWithUm(coreWExpr);
       const ribTopWExprUm = (widthRef === 'top')
         ? coreWExprUm
