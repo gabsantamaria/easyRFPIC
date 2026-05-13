@@ -1531,100 +1531,79 @@ except Exception as e:
     code += `
 # ===== Lumped ports =====
 oBoundarySetup = oDesign.GetModule("BoundarySetup")
-
-def _resolve_int_id(value):
-    # GetFaceIDs / GetEdgeIDs return wrappers in IronPython that don't
-    # always marshal cleanly. Coax them into Python ints.
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        try:
-            return int(str(value).strip())
-        except (TypeError, ValueError):
-            return None
 `;
-    // Resolve a reference-conductor name: detectPortIntegrationLine
-    // returns flanker labels like "cond5_copy (W half)". Strip the
-    // suffix to get the original electrode id, then if that electrode
-    // was the BASE operand of a boolean (e.g. consumed by a punch),
-    // the conductor was renamed to the boolean's id in HFSS.
-    const resolveRefConductor = (label) => {
-      const base = String(label || '').replace(/\s+\([WESN] half\)$/, '').trim();
-      if (!base) return null;
-      const boolean = scene.components.find(c =>
-        c.kind === 'boolean' && (c.operandIds || [])[0] === base,
-      );
-      return (boolean ? boolean.id : base).replace(/[^A-Za-z0-9_]/g, '_');
-    };
     for (const { comp, det } of lumpedPortTargets) {
       const portId = comp.id.replace(/[^A-Za-z0-9_]/g, '_');
       const portName = `LumpedPort_${portId}`;
       const impedance = (comp.lumpedPort && comp.lumpedPort.impedance) || '50';
-      // Build the reference-conductor list from the flankers the
-      // adjacency detector found. Dedup so a single punched conductor
-      // (W half ≡ E half of the same base) becomes one entry.
-      const refs = [resolveRefConductor(det.from), resolveRefConductor(det.to)]
-        .filter(Boolean);
-      const refConductors = Array.from(new Set(refs));
-      const refList = refConductors.map(r => `"${r}"`).join(', ');
-      // Use AutoIdentifyPorts (the COM call HFSS makes when the user
-      // assigns a lumped port through the GUI for a Terminal-network
-      // design). It takes the port sheet's face, the list of reference
-      // conductors, and HFSS handles terminal creation + integration-line
-      // placement automatically — including following the port through
-      // parameter changes. This is the behavior the user observed when
-      // assigning the port by hand.
+      // To make the integration line track parameter changes on a
+      // Driven-Modal solution (where AutoIdentifyPorts isn't available
+      // and AssignLumpedPort needs explicit Start/End coords), define
+      // a chain of HFSS variables for the IntLine endpoints. Each
+      // variable's VALUE is a short parametric expression that resolves
+      // to the right port-edge coordinate. The IntLine then references
+      // these variables by bare name — when port1_w / feed_w / h_wg /
+      // any snap-chain variable changes in HFSS, HFSS re-evaluates the
+      // chain and the integration line moves with the port.
       //
-      // The call works on Driven-Terminal / Hybrid Modal Network /
-      // Terminal-style solution types. For pure Driven-Modal designs
-      // (the default we create for new projects) this same call still
-      // produces a working lumped port with an auto-tracking IntLine.
-      code += `# ${portName}: AutoIdentifyPorts — HFSS picks the integration line and
-# tracks it as parameters change. Reference conductor(s): ${refConductors.join(', ')}
-# (direction observed at export: ${det.direction} from ${det.from} to ${det.to})
-try:
+      // Variables emitted per port:
+      //   <port>_int_west  = (<port>_cx) - (<port>_w_var)/2
+      //   <port>_int_east  = (<port>_cx) + (<port>_w_var)/2
+      //   <port>_int_south = (<port>_cy) - (<port>_h_var)/2
+      //   <port>_int_north = (<port>_cy) + (<port>_h_var)/2
+      //   <port>_int_z     = (h_wg)
+      // where <port>_cx / <port>_cy are the parametric snap-chain
+      // anchors we already emit, and <port>_w_var / <port>_h_var are
+      // the width / height expression identifiers (just "port1_w" /
+      // "feed_w" in most cases). All hyphens between identifiers get
+      // a space inserted for HFSS's expression parser.
+      const spaceHyphens = (s) => String(s).replace(/(\w)-(\w)/g, '$1 - $2');
+      const wExprCanonical = spaceHyphens(String(comp.w ?? '0'));
+      const hExprCanonical = spaceHyphens(String(comp.h ?? '0'));
+      const cxVarName = `${portId}_cx`;
+      const cyVarName = `${portId}_cy`;
+      const vWest = `${portId}_int_west`;
+      const vEast = `${portId}_int_east`;
+      const vSouth = `${portId}_int_south`;
+      const vNorth = `${portId}_int_north`;
+      const vZ = `${portId}_int_z`;
+      code += `# ${portName}: chained-variable IntLine so the integration line tracks
+# the port through parameter changes.
+# Detected direction at export: ${det.direction} from ${det.from} to ${det.to}.
+set_var("${vWest}", "(${cxVarName}) - (${wExprCanonical})/2")
+set_var("${vEast}", "(${cxVarName}) + (${wExprCanonical})/2")
+set_var("${vSouth}", "(${cyVarName}) - (${hExprCanonical})/2")
+set_var("${vNorth}", "(${cyVarName}) + (${hExprCanonical})/2")
+set_var("${vZ}", "(h_wg)")
+`;
+      let sX, sY, eX, eY;
+      if (det.direction === 'EW') {
+        sX = vWest;  sY = cyVarName;
+        eX = vEast;  eY = cyVarName;
+      } else {
+        sX = cxVarName; sY = vSouth;
+        eX = cxVarName; eY = vNorth;
+      }
+      code += `try:
     _delete_boundary_if_exists("${portName}")
-    raw_face_ids = oEditor.GetFaceIDs("${portId}")
-    face_id = None
-    try:
-        for f in raw_face_ids:
-            face_id = _resolve_int_id(f)
-            if face_id is not None:
-                break
-    except:
-        face_id = _resolve_int_id(raw_face_ids)
-    if face_id is None:
-        raise Exception("No face found on port sheet '${portId}'")
-    oBoundarySetup.AutoIdentifyPorts(
-        ["NAME:Faces", face_id],
-        False,
-        ["NAME:ReferenceConductors", ${refList}],
-        "${portName}",
-        True)
-    # Set the terminal-renormalization impedance for any terminals HFSS
-    # created under this port. The terminal names are auto-generated by
-    # HFSS (typically "<portName>_T1", "<portName>_T2", …), so we sweep
-    # the boundaries list and update any that look like terminals of
-    # this port.
-    try:
-        all_bnd = list(oBoundarySetup.GetBoundaries())
-    except:
-        all_bnd = []
-    for bnd_name in all_bnd:
-        if not bnd_name.startswith("${portName}"):
-            continue
-        try:
-            oDesign.ChangeProperty(
-                ["NAME:AllTabs",
-                 ["NAME:HfssTab",
-                  ["NAME:PropServers", "BoundarySetup:" + bnd_name],
-                  ["NAME:ChangedProps",
-                   ["NAME:Terminal Renormalizing Impedance",
-                    "Value:=", "${impedance}ohm"]]]])
-        except:
-            pass
+    oBoundarySetup.AssignLumpedPort(
+        ["NAME:${portName}",
+         "Objects:=", ["${portId}"],
+         "DoDeembed:=", False,
+         ["NAME:Modes",
+          ["NAME:Mode1",
+           "ModeNum:=", 1,
+           "UseIntLine:=", True,
+           ["NAME:IntLine",
+            "Start:=", ["${sX}", "${sY}", "${vZ}"],
+            "End:=", ["${eX}", "${eY}", "${vZ}"]],
+           "AlignmentGroup:=", 0,
+           "CharImp:=", "Zpi",
+           "RenormImp:=", "${impedance}ohm"]],
+         "ShowReporterFilter:=", False,
+         "ReporterFilter:=", [True],
+         "FullResistance:=", "${impedance}ohm",
+         "FullReactance:=", "0ohm"])
 except Exception as e:
     try:
         oDesktop.AddMessage("", "", 1, "Lumped port ${portName} failed: " + str(e))
