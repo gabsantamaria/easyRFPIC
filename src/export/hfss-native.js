@@ -538,6 +538,16 @@ def _delete_geom_if_exists(name):
     # — in place, which breaks downstream boundary references.
     if not APPEND_MODE:
         return
+    # Check existence first so we don't log spurious "Abnormal script
+    # termination" errors on every Delete attempt against a missing
+    # object (HFSS prints to the message log even when the COM call's
+    # exception is caught in Python).
+    try:
+        existing = list(oEditor.GetMatchedObjectName(name))
+    except:
+        existing = []
+    if name not in existing:
+        return
     try:
         oEditor.Delete(["NAME:Selections", "Selections:=", name])
     except:
@@ -548,6 +558,12 @@ def _delete_boundary_if_exists(name):
         return
     try:
         oModule = oDesign.GetModule("BoundarySetup")
+        existing = list(oModule.GetBoundaries())
+    except:
+        existing = []
+    if name not in existing:
+        return
+    try:
         oModule.DeleteBoundaries(["NAME:Boundaries", name])
     except:
         pass
@@ -1037,15 +1053,30 @@ except Exception as e:
       // float computation, HFSS's evaluator gives bit-identical
       // results — so "endpoints lie on the port" still passes.
       emittedPortNames.push(id);
-      const portCxNum = String(c.cx);
-      const portCyNum = String(c.cy);
+      // Port sheet emission strategy:
+      //   - XStart, YStart, ZStart: NUMERIC (full double precision via
+      //     String(num)). These define the lower-left corner exactly.
+      //     The lumped-port IntLine uses the SAME numeric coords for
+      //     its endpoints — both parse to the same float64 → HFSS's
+      //     "endpoints lie on the port" check passes by construction.
+      //   - Width, Height: PARAMETRIC (e.g. "(port1_w)", "(feed_w)").
+      //     A sweep of port1_w / feed_w in HFSS resizes the port,
+      //     growing it from the lower-left corner. (Not center-
+      //     anchored — HFSS's IntLine parser doesn't tolerate
+      //     arithmetic expressions in its endpoints, so we can't
+      //     center-anchor without breaking the lumped-port assignment.)
+      const pwNum = evalExpr(c.w, paramValues);
+      const phNum = evalExpr(c.h, paramValues);
+      const portXStartNum = String(c.cx - pwNum / 2);
+      const portYStartNum = String(c.cy - phNum / 2);
+      const portZNum = String(evalExpr('h_wg', paramValues) || 0.6);
       const portWExpr = exprWithUm(c.w);  // e.g. "(port1_w)"
       const portHExpr = exprWithUm(c.h);
       code += `try:
     safe_create_rectangle(
         ["NAME:RectangleParameters",
          "IsCovered:=", True,
-         "XStart:=", "${portCxNum}um - ${portWExpr}/2", "YStart:=", "${portCyNum}um - ${portHExpr}/2", "ZStart:=", "(h_wg)um",
+         "XStart:=", "${portXStartNum}um", "YStart:=", "${portYStartNum}um", "ZStart:=", "${portZNum}um",
          "Width:=", "${portWExpr}", "Height:=", "${portHExpr}",
          "WhichAxis:=", "Z"],
         ["NAME:Attributes",
