@@ -3182,6 +3182,14 @@ export default function App() {
     };
     let derivedOperandIds = ids;
     const clonesToAdd = [];
+    // New snaps to install alongside the punch: one per clone, locking
+    // the clone's center to its source tool's center. Without this the
+    // clone's cx/cy is frozen to the tool's snapshot at punch-creation
+    // time, so any later parameter change that moves the tool (e.g.
+    // tuning feed_w / feed_L through the snap chain) shifts the tool
+    // but leaves the hole stranded at its old position. With the snap
+    // in place, the solver re-aligns clone.C with tool.C every frame.
+    const cloneSnapsToAdd = [];
     if (isPunch) {
       // First operand is the base (consumed). Each subsequent operand
       // gets cloned; the clone takes the operand slot, the original
@@ -3200,6 +3208,12 @@ export default function App() {
         const cloneId = freshCloneId(tool);
         const cloneCx = solvedNow.find(cc => cc.id === toolId)?.cx ?? tool.cx;
         const cloneCy = solvedNow.find(cc => cc.id === toolId)?.cy ?? tool.cy;
+        cloneSnapsToAdd.push({
+          id: `snap_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          from: { compId: toolId, anchor: 'C' },
+          to: { compId: cloneId, anchor: 'C' },
+          dx: '0', dy: '0',
+        });
         // Strip snap-chain participation: a clone is a standalone copy.
         // Keep shape-specific fields (r, rx, ry, n, R, L_straight, p,
         // wgWidth) so non-rect tools clone correctly.
@@ -3266,6 +3280,7 @@ export default function App() {
         ...clonesToAdd,
         derived,
       ],
+      snaps: [...prev.snaps, ...cloneSnapsToAdd],
     }));
     setSelection({ ids: new Set([newId]), primary: newId });
   };

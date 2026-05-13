@@ -209,6 +209,55 @@ export function normalizeScene(s) {
     });
   }
 
+  // Migrate punch-clone position tracking. Pre-fix punches gave each
+  // clone a NUMERIC cx/cy snapshot of the tool's position at creation
+  // time, so any later parameter change that moved the tool stranded
+  // the hole at the old coordinates. Add a tool.C → clone.C snap
+  // wherever it's missing so the solver keeps the clone glued to its
+  // tool from then on. We also rewrite the clone's stored cx/cy to
+  // the tool's current values so the first solve round trivially
+  // converges; subsequent solves derive clone.cx/cy from the tool via
+  // the snap.
+  let migratedSnaps = s.snaps || [];
+  {
+    const existingClonePins = new Set(
+      migratedSnaps
+        .filter(sp => sp && sp.from && sp.to && sp.from.anchor === 'C' && sp.to.anchor === 'C')
+        .map(sp => sp.to.compId),
+    );
+    const compById2 = Object.fromEntries(migratedComponents.map(c => [c.id, c]));
+    const addedPinSnaps = [];
+    const pinnedCloneIds = new Set();
+    for (const c of migratedComponents) {
+      if (!c.cloneOf) continue;
+      if (existingClonePins.has(c.id)) continue;
+      if (!compById2[c.cloneOf]) continue;
+      addedPinSnaps.push({
+        id: `snap_${Date.now()}_clonepin_${c.id}`,
+        from: { compId: c.cloneOf, anchor: 'C' },
+        to: { compId: c.id, anchor: 'C' },
+        dx: '0', dy: '0',
+      });
+      pinnedCloneIds.add(c.id);
+    }
+    if (addedPinSnaps.length > 0) {
+      migratedSnaps = [...migratedSnaps, ...addedPinSnaps];
+      // Reset the stored cx/cy of newly-pinned clones to their tool's
+      // current cx/cy. The solver overrides them anyway, but starting
+      // closer to truth avoids one wasted iteration and a visible jump.
+      migratedComponents = migratedComponents.map(c => {
+        if (!pinnedCloneIds.has(c.id)) return c;
+        const tool = compById2[c.cloneOf];
+        if (!tool) return c;
+        return {
+          ...c,
+          cx: Number.isFinite(tool.cx) ? tool.cx : c.cx,
+          cy: Number.isFinite(tool.cy) ? tool.cy : c.cy,
+        };
+      });
+    }
+  }
+
   // Simulation setup: HFSS-side knobs that aren't part of the layout
   // geometry but need to ride along with the design (so an export from
   // any machine produces a consistent script). Currently:
@@ -240,7 +289,7 @@ export function normalizeScene(s) {
   return {
     params,
     components: migratedComponents,
-    snaps: s.snaps || [],
+    snaps: migratedSnaps,
     mirrors: s.mirrors || [],
     groups: s.groups || [],
     // booleans field kept empty for legacy compatibility — the source of
