@@ -2663,18 +2663,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             x1 = det.line.midX;   y1 = det.line.startY;
             x2 = det.line.midX;   y2 = det.line.endY;
           }
-          // Pull the endpoints slightly inward so the arrowhead sits
-          // visibly inside the port edge rather than poking past it.
-          const inset = 0.1;
-          const dx = x2 - x1, dy = y2 - y1;
-          const len = Math.hypot(dx, dy) || 1;
-          const ix = (dx / len) * Math.min(inset * len, len * 0.05);
-          const iy = (dy / len) * Math.min(inset * len, len * 0.05);
-          arrows.push({
-            id: c.id,
-            x1: x1 + ix, y1: y1 + iy,
-            x2: x2 - ix, y2: y2 - iy,
-          });
+          // No inset — endpoints sit exactly on the adjacent port edges
+          // (the midpoints of the two sides facing the flanker
+          // conductors), matching the HFSS IntLine that the export
+          // will install on this port.
+          arrows.push({ id: c.id, x1, y1, x2, y2 });
         }
         if (arrows.length === 0) return null;
         return (
@@ -2682,7 +2675,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             {arrows.map(a => (
               <line key={a.id}
                 x1={a.x1} y1={-a.y1} x2={a.x2} y2={-a.y2}
-                stroke="#ef4444" strokeWidth={sw * 1.2} opacity={0.85}
+                stroke="#ef4444" strokeWidth={sw * 3} opacity={0.85}
                 markerEnd="url(#lp-arrow)"
               />
             ))}
