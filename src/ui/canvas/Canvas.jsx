@@ -1943,9 +1943,26 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           return insts.map((inst, i) => {
             const dx = inst.cx - baseCx;
             const dy = inst.cy - baseCy;
-            // SVG y-axis is flipped relative to world (-cy mapping); for the
-            // translate wrapper we mirror the world dy to screen.
-            const txAttr = (dx || dy) ? `translate(${dx} ${-dy})` : undefined;
+            const rot = inst.rotation || 0;
+            // SVG y-axis is flipped relative to world (-cy mapping). The
+            // combined transform first translates the cluster from its
+            // base centroid to the instance centroid, then rotates about
+            // the instance centroid by `rot` degrees (with sign flipped to
+            // account for the y-flip). SVG applies transforms right-to-left
+            // so the string is "rotate ... translate ..." to translate
+            // first and rotate second. For a rotate-before-repeat chain
+            // every instance carries the same `rot` and renders together as
+            // a coherent rotated cluster; for rotate-after-repeat each
+            // instance rotates about its own center (which is the existing
+            // semantics of expandTransforms).
+            let txAttr;
+            if (rot && (dx || dy)) {
+              txAttr = `rotate(${-rot} ${inst.cx} ${-inst.cy}) translate(${dx} ${-dy})`;
+            } else if (rot) {
+              txAttr = `rotate(${-rot} ${inst.cx} ${-inst.cy})`;
+            } else if (dx || dy) {
+              txAttr = `translate(${dx} ${-dy})`;
+            }
             const isBase = i === 0;
             return (
               <g

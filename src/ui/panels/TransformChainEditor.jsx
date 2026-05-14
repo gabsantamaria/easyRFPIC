@@ -45,7 +45,7 @@ function ExprField({ label, value, onChange, fieldKey, paramValues, commitExpr }
 function TransformRow({
   transform, idx, total,
   onUpdate, onToggle, onMoveUp, onMoveDown, onDelete,
-  paramValues, commitExpr,
+  paramValues, commitExpr, isGrouped,
 }) {
   const t = transform;
   const enabled = t.enabled !== false;
@@ -107,8 +107,11 @@ function TransformRow({
               <option value="SE">SE</option>
               <option value="SW">SW</option>
               <option value="origin">world origin</option>
+              {isGrouped && <option value="group">group centroid</option>}
             </select>
-            <p className="text-[9px] text-slate-500 mt-0.5">about this point</p>
+            <p className="text-[9px] text-slate-500 mt-0.5">
+              {t.pivot === 'group' ? 'about the group\'s shared centroid' : 'about this point'}
+            </p>
           </div>
         </div>
       )}
@@ -131,12 +134,16 @@ function TransformRow({
 
 export function TransformChainEditor({ component, onUpdateComp, paramValues, commitExpr }) {
   const transforms = component.transforms || [];
+  const isGrouped = !!component.group;
   const setTransforms = (next) => onUpdateComp({ transforms: next });
   const addTransform = (kind) => {
     const id = `t_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
     let t;
     if (kind === 'displace') t = { id, kind, enabled: true, dx: '0', dy: '0' };
-    else if (kind === 'rotate') t = { id, kind, enabled: true, angle: '0', pivot: 'C' };
+    // For grouped components, rotate defaults to pivoting about the
+    // GROUP centroid so the whole group rotates as one rigid body. For
+    // an ungrouped component this falls back to pivot='C' (own center).
+    else if (kind === 'rotate') t = { id, kind, enabled: true, angle: '0', pivot: isGrouped ? 'group' : 'C' };
     else if (kind === 'repeat') t = { id, kind, enabled: true, n: '1', dx: '0', dy: '0', includeOriginal: true };
     setTransforms([...transforms, t]);
   };
@@ -198,6 +205,7 @@ export function TransformChainEditor({ component, onUpdateComp, paramValues, com
               onDelete={() => deleteTransform(i)}
               paramValues={paramValues}
               commitExpr={commitExpr}
+              isGrouped={isGrouped}
             />
           ))}
         </div>

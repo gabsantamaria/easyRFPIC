@@ -1184,10 +1184,30 @@ except Exception as e:
   // has no API to query a part's current center parametrically.
   //
   // Helper: emit the chain for one component's transform list.
-  const emitTransformChainHfss = (transforms, partIds, startCx, startCy, baseW, baseH) => {
+  // Helper: bbox-centroid (in solved-world coords) of the group named
+  // `groupName`. Excludes operands consumed by booleans so a punch's tool
+  // clones don't drag the centroid sideways. Returns null if the group has
+  // no usable members.
+  const groupCentroid = (groupName) => {
+    if (!groupName) return null;
+    const members = solved.filter(cc => cc.group === groupName && !cc.consumedBy);
+    if (members.length === 0) return null;
+    let gx = 0, gy = 0;
+    for (const m of members) { gx += m.cx; gy += m.cy; }
+    return { x: gx / members.length, y: gy / members.length };
+  };
+  const emitTransformChainHfss = (transforms, partIds, startCx, startCy, baseW, baseH, componentGroup) => {
     if (!transforms || transforms.length === 0) return;
     let curCx = startCx, curCy = startCy, curRotation = 0;
-    const selStr = partIds.join(',');
+    // Active selection list. Starts as the caller's partIds, but grows
+    // every time a `repeat` transform fires so that any subsequent
+    // displace / rotate operates on the full cluster (original + clones)
+    // rather than on just the original. Without this, e.g. a chain of
+    // [repeat, rotate] would rotate only the base object and leave the
+    // duplicates un-rotated, which is the opposite of what the canvas
+    // shows.
+    let activePartIds = [...partIds];
+    let selStr = activePartIds.join(',');
     for (const t of transforms) {
       if (!t || t.enabled === false) continue;
       if (t.kind === 'displace') {
@@ -1229,9 +1249,14 @@ except Exception as e:
           curCx = nx; curCy = ny;
           curRotation += angleNum;
         } else {
-          // Pivot = 'C' (current center) or named anchor on part outline.
+          // Pivot = 'C' (current center), 'group' (shared centroid of the
+          // component's group), or a named anchor on the part's outline.
           let pivotX = curCx, pivotY = curCy;
-          if (pivot !== 'C') {
+          if (pivot === 'group') {
+            const gc = groupCentroid(componentGroup);
+            if (gc) { pivotX = gc.x; pivotY = gc.y; }
+            // No group ⇒ fall back to part center (already initialized).
+          } else if (pivot !== 'C') {
             // Resolve local anchor offset on the part's BASE w/h, then
             // rotate by curRotation (the part's accumulated rotation so far).
             const localOff = anchorLocal(pivot, baseW, baseH);
@@ -1294,6 +1319,26 @@ except Exception as e:
         if (t.includeOriginal === false) {
           code += `# NOTE: 'includeOriginal=false' on canvas; HFSS keeps the original. Delete ${partIds[0]} manually if needed.\n`;
         }
+        // Expand the active selection to include the clones HFSS just
+        // created. DuplicateAlongLine names them `{base}_1`, `{base}_2`,
+        // …, `{base}_n` for each base name in the prior selection.
+        const newNames = [];
+        for (const baseName of activePartIds) {
+          for (let k = 1; k <= nNum; k++) {
+            newNames.push(`${baseName}_${k}`);
+          }
+        }
+        activePartIds = [...activePartIds, ...newNames];
+        selStr = activePartIds.join(',');
+        // Advance the tracked centroid to the centroid of the whole
+        // cluster (original + clones). For a uniform line of n+1 evenly-
+        // spaced copies starting at (curCx, curCy) stepping by
+        // (dxNum, dyNum), the cluster centroid is offset from the original
+        // by (n*dxNum/2, n*dyNum/2). A subsequent rotate-with-pivot='C'
+        // therefore rotates about the cluster's centroid rather than the
+        // original part's location, matching the canvas semantics.
+        curCx += nNum * dxNum / 2;
+        curCy += nNum * dyNum / 2;
       }
     }
   };
@@ -1315,7 +1360,7 @@ except Exception as e:
     const baseW = typeof c.w === 'number' ? c.w : evalExpr(c.w, paramValues);
     const baseH = typeof c.h === 'number' ? c.h : evalExpr(c.h, paramValues);
     code += `\n# ===== Transforms for ${c.id} =====\n`;
-    emitTransformChainHfss(c.transforms, partIds, c.cx, c.cy, baseW || 0, baseH || 0);
+    emitTransformChainHfss(c.transforms, partIds, c.cx, c.cy, baseW || 0, baseH || 0, c.group);
   }
 
   // ===== Boolean operations =====
@@ -1396,7 +1441,7 @@ except Exception as e:
       const solvedB = solved.find(sc => sc.id === b.id) || b;
       const bW = typeof solvedB.w === 'number' ? solvedB.w : evalExpr(solvedB.w, paramValues);
       const bH = typeof solvedB.h === 'number' ? solvedB.h : evalExpr(solvedB.h, paramValues);
-      emitTransformChainHfss(b.transforms || [], [safeBoolId], solvedB.cx, solvedB.cy, bW || 0, bH || 0);
+      emitTransformChainHfss(b.transforms || [], [safeBoolId], solvedB.cx, solvedB.cy, bW || 0, bH || 0, b.group);
       // ----------------------------------------------------------------
       // After the boolean: operand 0 has been renamed to the boolean's
       // id, and (for everything except 'punch' with KeepOriginals) the

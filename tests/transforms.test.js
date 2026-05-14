@@ -99,4 +99,79 @@ describe('expandTransforms', () => {
     expect(insts).toHaveLength(1);
     expect(insts[0].w).toBe(0); // tagged as degenerate
   });
+
+  it('rotate-C after a repeat rotates the WHOLE cluster about its centroid', () => {
+    // Two-cell line along +y: cells at (0,0) and (0,20). Centroid = (0,10).
+    // A pivot='C' rotation of 90° should swap each cell's offset from
+    // (0,10) — so cell0 ends at (10,10) and cell1 ends at (-10,10).
+    const insts = expandTransforms([
+      baseRect({
+        cx: 0, cy: 0,
+        transforms: [
+          { kind: 'repeat', enabled: true, n: '1', dx: '0', dy: '20', includeOriginal: true },
+          { kind: 'rotate', enabled: true, angle: '90', pivot: 'C' },
+        ],
+      }),
+    ], {});
+    expect(insts).toHaveLength(2);
+    expect(insts[0].cx).toBeCloseTo(10, 6);
+    expect(insts[0].cy).toBeCloseTo(10, 6);
+    expect(insts[1].cx).toBeCloseTo(-10, 6);
+    expect(insts[1].cy).toBeCloseTo(10, 6);
+    for (const i of insts) expect(i.rotation).toBe(90);
+  });
+
+  it('rotate-C with a single-instance stream is unchanged (no cluster math)', () => {
+    // Sanity check: the new "cluster" branch must not affect the
+    // single-shape case where pivot='C' is just "rotate in place".
+    const insts = expandTransforms([
+      baseRect({
+        cx: 5, cy: 7,
+        transforms: [{ kind: 'rotate', enabled: true, angle: '30', pivot: 'C' }],
+      }),
+    ], {});
+    expect(insts).toHaveLength(1);
+    expect(insts[0].cx).toBe(5);
+    expect(insts[0].cy).toBe(7);
+    expect(insts[0].rotation).toBe(30);
+  });
+
+  it('rotate with pivot=group rotates each member about the shared group centroid', () => {
+    // Three rects in a group at (0,0), (10,0), (20,0). Centroid = (10,0).
+    // Each has the SAME rotate transform with pivot='group'. Expected:
+    // all three rotate 90° about (10,0): (0,0)→(10,-10), (10,0)→(10,0),
+    // (20,0)→(10,10).
+    const mk = (id, cx) => ({
+      id, kind: 'rect', layer: 'electrode',
+      cx, cy: 0, w: '4', h: '4',
+      cutouts: [], group: 'gA',
+      transforms: [{ kind: 'rotate', enabled: true, angle: '90', pivot: 'group' }],
+    });
+    const components = [mk('a', 0), mk('b', 10), mk('c', 20)];
+    const insts = expandTransforms(components, {});
+    expect(insts).toHaveLength(3);
+    const byCompId = Object.fromEntries(insts.map(i => [i.compId, i]));
+    expect(byCompId.a.cx).toBeCloseTo(10, 6);
+    expect(byCompId.a.cy).toBeCloseTo(-10, 6);
+    expect(byCompId.b.cx).toBeCloseTo(10, 6);
+    expect(byCompId.b.cy).toBeCloseTo(0, 6);
+    expect(byCompId.c.cx).toBeCloseTo(10, 6);
+    expect(byCompId.c.cy).toBeCloseTo(10, 6);
+    for (const i of insts) expect(i.rotation).toBe(90);
+  });
+
+  it('rotate with pivot=group on an ungrouped component falls back to pivot=C', () => {
+    // No `group` field set ⇒ the 'group' pivot can't find members and
+    // degrades to plain rotate-in-place semantics.
+    const insts = expandTransforms([
+      baseRect({
+        cx: 5, cy: 7,
+        transforms: [{ kind: 'rotate', enabled: true, angle: '45', pivot: 'group' }],
+      }),
+    ], {});
+    expect(insts).toHaveLength(1);
+    expect(insts[0].cx).toBe(5);
+    expect(insts[0].cy).toBe(7);
+    expect(insts[0].rotation).toBe(45);
+  });
 });

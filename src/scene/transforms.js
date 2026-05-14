@@ -73,10 +73,41 @@ export function expandTransforms(components, paramValues) {
       } else if (t.kind === 'rotate') {
         const angle = evalExpr(t.angle ?? '0', paramValues);
         if (!Number.isFinite(angle)) continue;
-        // Pivot: fixed-anchor name ('C', 'NW', ...) or 'origin'. When 'origin',
-        // we rotate about world (0, 0) which moves cx/cy too. Otherwise we
-        // rotate the rect about its own anchor — cx/cy stays put for 'C'.
+        // Pivot: fixed-anchor name ('C', 'NW', ...), 'origin' (world 0,0),
+        // or 'group' (centroid of this component's group members, useful
+        // for rotating a group as a rigid body). 'group' is resolved by
+        // looking up sibling components with the same `group` field.
         const pivot = t.pivot || 'C';
+        if (pivot === 'group' && c.group) {
+          // Compute the group centroid in world coordinates, then rotate
+          // every stream instance about that shared pivot. All members of
+          // the group see the same gx/gy, so when their transform chains
+          // are propagated the cluster moves as one rigid body. We skip
+          // consumed operands (they live inside booleans and shouldn't
+          // pull the centroid sideways).
+          const members = components.filter(cc => cc.group === c.group && !cc.consumedBy);
+          if (members.length >= 1) {
+            let gx = 0, gy = 0;
+            for (const m of members) { gx += m.cx; gy += m.cy; }
+            gx /= members.length;
+            gy /= members.length;
+            const rad = angle * Math.PI / 180;
+            const ca = Math.cos(rad), sa = Math.sin(rad);
+            stream = stream.map(inst => {
+              const dxp = inst.cx - gx;
+              const dyp = inst.cy - gy;
+              return {
+                ...inst,
+                cx: gx + dxp * ca - dyp * sa,
+                cy: gy + dxp * sa + dyp * ca,
+                rotation: inst.rotation + angle,
+              };
+            });
+            continue;
+          }
+          // Fall through to plain pivot='C' behavior if the group lookup
+          // failed (e.g., component lost its group field).
+        }
         if (pivot === 'origin') {
           const rad = angle * Math.PI / 180;
           const ca = Math.cos(rad), sa = Math.sin(rad);
@@ -90,26 +121,60 @@ export function expandTransforms(components, paramValues) {
           // Local-anchor pivot: just adds to rotation about the rect's own
           // anchor point. For non-center pivots we also need to shift cx/cy
           // so that the chosen anchor stays fixed.
-          stream = stream.map(inst => {
-            if (pivot === 'C') {
-              return { ...inst, rotation: inst.rotation + angle };
+          if (pivot === 'C') {
+            // pivot='C' semantics:
+            //   - Single-instance stream: rotate about the shape's own
+            //     center. cx/cy is unchanged (rotating about your own
+            //     center is a no-op for position), so we just bump the
+            //     rotation field.
+            //   - Multi-instance stream (after a `repeat`): rotate the
+            //     whole CLUSTER about its shared centroid. Each instance's
+            //     cx/cy moves to its rotated position about the centroid,
+            //     and the rotation field is bumped. This is what "rotate
+            //     the meander as one piece" means — without this, each
+            //     repeated cell spins in place and the cluster doesn't
+            //     visibly rotate at all.
+            if (stream.length <= 1) {
+              stream = stream.map(inst => ({ ...inst, rotation: inst.rotation + angle }));
+            } else {
+              let cx0 = 0, cy0 = 0;
+              for (const inst of stream) { cx0 += inst.cx; cy0 += inst.cy; }
+              cx0 /= stream.length;
+              cy0 /= stream.length;
+              const rad = angle * Math.PI / 180;
+              const ca = Math.cos(rad), sa = Math.sin(rad);
+              stream = stream.map(inst => {
+                const dxp = inst.cx - cx0;
+                const dyp = inst.cy - cy0;
+                return {
+                  ...inst,
+                  cx: cx0 + dxp * ca - dyp * sa,
+                  cy: cy0 + dxp * sa + dyp * ca,
+                  rotation: inst.rotation + angle,
+                };
+              });
             }
-            // Compute the world position of the pivot anchor on this instance,
-            // then rotate the rect's center about that pivot.
-            const lp = anchorLocal(pivot, inst.w, inst.h);
-            const px = inst.cx + lp.x;
-            const py = inst.cy + lp.y;
-            const rad = angle * Math.PI / 180;
-            const ca = Math.cos(rad), sa = Math.sin(rad);
-            const dxp = inst.cx - px;
-            const dyp = inst.cy - py;
-            return {
-              ...inst,
-              cx: px + dxp * ca - dyp * sa,
-              cy: py + dxp * sa + dyp * ca,
-              rotation: inst.rotation + angle,
-            };
-          });
+          } else {
+            // Named-anchor pivot. Compute world position of the pivot
+            // anchor on each instance and rotate that instance's center
+            // about it. This stays per-instance (no cluster semantics)
+            // because anchor pivots are inherently shape-local.
+            stream = stream.map(inst => {
+              const lp = anchorLocal(pivot, inst.w, inst.h);
+              const px = inst.cx + lp.x;
+              const py = inst.cy + lp.y;
+              const rad = angle * Math.PI / 180;
+              const ca = Math.cos(rad), sa = Math.sin(rad);
+              const dxp = inst.cx - px;
+              const dyp = inst.cy - py;
+              return {
+                ...inst,
+                cx: px + dxp * ca - dyp * sa,
+                cy: py + dxp * sa + dyp * ca,
+                rotation: inst.rotation + angle,
+              };
+            });
+          }
         }
       } else if (t.kind === 'repeat') {
         const n = Math.max(0, Math.floor(evalExpr(t.n ?? '0', paramValues)));

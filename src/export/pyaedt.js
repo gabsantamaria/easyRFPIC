@@ -22,6 +22,20 @@ export function generatePyAEDT(scene, paramValues) {
   const { params, components, snaps, mirrors } = scene;
   const solved = applyMirrors(solveLayout(components, snaps, paramValues), mirrors);
 
+  // Bbox-centroid (in solved-world coords) of the group named `groupName`.
+  // Used for pivot='group' rotates so every grouped member rotates about
+  // the same shared centroid (matching the canvas semantics). Excludes
+  // boolean-consumed operands so a punch's tool clones don't drag the
+  // centroid sideways.
+  const groupCentroid = (groupName) => {
+    if (!groupName) return null;
+    const members = solved.filter(cc => cc.group === groupName && !cc.consumedBy);
+    if (members.length === 0) return null;
+    let gx = 0, gy = 0;
+    for (const m of members) { gx += m.cx; gy += m.cy; }
+    return { x: gx / members.length, y: gy / members.length };
+  };
+
   // Sanitize a string to ASCII for safe Python source: replace common Unicode chars,
   // then drop anything still non-ASCII.
   const ascii = (s) => {
@@ -169,7 +183,11 @@ def build_wg(name, cx, cy, w, h):
     // For waveguides (which are built as `<id>_rib` by build_wg), we
     // also need to transform the rib part. Other layers create a single
     // named part matching the id.
-    const partTargets = c.layer === 'waveguide' && shapeKind === 'rect'
+    // Active selection list. Grows every time a `repeat` transform fires
+    // so subsequent displace / rotate operations affect the whole cluster,
+    // not just the original. `duplicate_along_line` creates clones named
+    // `{base}_1`, `{base}_2`, … one per base name per clone index.
+    let partTargets = c.layer === 'waveguide' && shapeKind === 'rect'
       ? [`${id}_rib`]
       : [id];
     // Track the part's CURRENT cx, cy in numeric form so rotation pivots
@@ -208,15 +226,17 @@ def build_wg(name, cx, cy, w, h):
           curCx = nx; curCy = ny;
           curRotation += angleNum;
         } else {
-          // Pivot is a named anchor on the part. Compute the pivot's
-          // world position using the part's CURRENT center + the local
-          // anchor offset (rotated by curRotation). Then emit
-          // translate-rotate-translate so HFSS rotates about that pivot.
-          // The intermediate numeric values bake the pivot location into
-          // the export; full parametric rotation about own center isn't
-          // expressible in HFSS without per-pivot bookkeeping.
+          // Pivot = 'C' (current center), 'group' (group bbox centroid),
+          // or a named anchor on the part. Compute the pivot's world
+          // position using the part's CURRENT center + the local anchor
+          // offset (rotated by curRotation). Then emit translate-rotate-
+          // translate so HFSS rotates about that pivot. Intermediate
+          // numeric values bake the pivot location into the export.
           let pivotX = curCx, pivotY = curCy;
-          if (pivot !== 'C') {
+          if (pivot === 'group') {
+            const gc = groupCentroid(c.group);
+            if (gc) { pivotX = gc.x; pivotY = gc.y; }
+          } else if (pivot !== 'C') {
             // Resolve local anchor offset on the part's BASE w/h. Then
             // rotate by curRotation since the part has been rotated.
             const localOff = anchorLocal(pivot, baseW, baseH);
@@ -255,6 +275,20 @@ def build_wg(name, cx, cy, w, h):
         if (!includeOriginal) {
           code += `# NOTE: 'includeOriginal=false' on canvas duplicates the original; HFSS keeps it. Delete '${partTargets[0]}' manually if needed.\n`;
         }
+        // Expand the active selection to include the clones.
+        const newNames = [];
+        for (const baseName of partTargets) {
+          for (let k = 1; k <= nNum; k++) {
+            newNames.push(`${baseName}_${k}`);
+          }
+        }
+        partTargets = [...partTargets, ...newNames];
+        // Advance the tracked centroid to the cluster centroid so a
+        // subsequent rotate-pivot='C' rotates about the full cluster's
+        // center rather than the original part. See the matching note in
+        // the HFSS-native exporter.
+        curCx += nNum * dxNum / 2;
+        curCy += nNum * dyNum / 2;
       }
       // Unknown kinds silently ignored.
     }
@@ -266,10 +300,14 @@ def build_wg(name, cx, cy, w, h):
   // `startCx`, `startCy` describe where the part is currently sitting in
   // world coords (numeric); these are mutated as transforms accumulate so
   // rotation-about-current-center math stays correct.
-  const emitTransformChainPyAEDT = (transforms, partIds, startCx, startCy, baseW, baseH) => {
+  const emitTransformChainPyAEDT = (transforms, partIds, startCx, startCy, baseW, baseH, componentGroup) => {
     if (!transforms || transforms.length === 0) return;
     let curCx = startCx, curCy = startCy, curRotation = 0;
-    const partsStr = partIds.map(p => `"${p}"`).join(', ');
+    // Active selection list. Grows after each `repeat` so any subsequent
+    // displace / rotate operates on the whole cluster (see the per-
+    // primitive transform loop above for the same pattern).
+    let activePartIds = [...partIds];
+    let partsStr = activePartIds.map(p => `"${p}"`).join(', ');
     for (const t of transforms) {
       if (!t || t.enabled === false) continue;
       if (t.kind === 'displace') {
@@ -295,7 +333,10 @@ def build_wg(name, cx, cy, w, h):
           curRotation += angleNum;
         } else {
           let pivotX = curCx, pivotY = curCy;
-          if (pivot !== 'C') {
+          if (pivot === 'group') {
+            const gc = groupCentroid(componentGroup);
+            if (gc) { pivotX = gc.x; pivotY = gc.y; }
+          } else if (pivot !== 'C') {
             const localOff = anchorLocal(pivot, baseW, baseH);
             const rad = curRotation * Math.PI / 180;
             const ca = Math.cos(rad), sa = Math.sin(rad);
@@ -324,6 +365,21 @@ def build_wg(name, cx, cy, w, h):
         if (t.includeOriginal === false) {
           code += `# NOTE: 'includeOriginal=false' on canvas; HFSS keeps the original. Delete ${partIds[0]} manually if needed.\n`;
         }
+        // Extend the active selection to include the clones the call just
+        // created. pyAEDT's duplicate_along_line names them `{base}_1`,
+        // `{base}_2`, …, one per base name per clone index.
+        const newNames = [];
+        for (const baseName of activePartIds) {
+          for (let k = 1; k <= nNum; k++) {
+            newNames.push(`${baseName}_${k}`);
+          }
+        }
+        activePartIds = [...activePartIds, ...newNames];
+        partsStr = activePartIds.map(p => `"${p}"`).join(', ');
+        // Advance the tracked centroid so a subsequent rotate-pivot='C'
+        // pivots about the cluster centroid, matching canvas semantics.
+        curCx += nNum * dxNum / 2;
+        curCy += nNum * dyNum / 2;
       }
     }
   };
@@ -366,7 +422,7 @@ def build_wg(name, cx, cy, w, h):
       const solvedB = solved.find(c => c.id === b.id) || b;
       const bW = typeof solvedB.w === 'number' ? solvedB.w : evalExpr(solvedB.w, paramValues);
       const bH = typeof solvedB.h === 'number' ? solvedB.h : evalExpr(solvedB.h, paramValues);
-      emitTransformChainPyAEDT(b.transforms || [], [ascii(b.id)], solvedB.cx, solvedB.cy, bW || 0, bH || 0);
+      emitTransformChainPyAEDT(b.transforms || [], [ascii(b.id)], solvedB.cx, solvedB.cy, bW || 0, bH || 0, b.group);
     }
   }
 
