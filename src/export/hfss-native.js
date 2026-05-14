@@ -687,6 +687,14 @@ def safe_create_polyline(poly_params, attributes, name):
   // entries the same way (Unite collapses operands → result name; punch
   // / subtract removes the tool entries).
   const zeroThicknessSheets = [];
+  // Relative coordinate system definitions, one per rib waveguide.
+  // Collected during the per-waveguide emit and emitted as a SINGLE
+  // block at the very end of the script — AFTER all geometry, all
+  // booleans, all transforms, all impedance boundaries, all lumped
+  // ports. Doing it last avoids the active-CS subtleties of HFSS
+  // (CreateRelativeCS sets the new CS as active in some versions, which
+  // would shift the interpretation of any later geometry's coordinates).
+  const relativeCsDefs = [];
   for (const c of solved) {
     // Boolean components are emitted separately AFTER all primitives are
     // built (see the Boolean operations section below). Their operands are
@@ -1096,50 +1104,26 @@ except Exception as e:
         pass
 `;
 
-      // ── Relative coordinate system at one end of the waveguide ────────
-      // For each rib waveguide, emit an HFSS Relative CS whose origin
-      // sits centered on the ridge cross-section at the START end of the
-      // WG, just above the slab (z = wgZ + slab_height). The local X-axis
-      // runs along the waveguide direction; local Y is the in-plane
-      // perpendicular (the rib's width direction); local Z is the chip
-      // out-of-plane direction (= global Z). Useful as a base for ports,
-      // mode integration lines, field probes, anchor points for spline
-      // bends, etc. Created in a try/except so it doesn't fail the script
-      // if a CS with the same name already exists (re-run protection).
+      // Defer relative-CS creation until AFTER all geometry is done.
+      // CreateRelativeCS sets the new CS as active in some HFSS
+      // versions, which can subtly affect downstream geometry placement
+      // (ports, electrodes, booleans). We collect the per-waveguide CS
+      // definitions here and emit them as a single block at the end of
+      // the script — see "Relative coordinate systems" block below.
       const csName = `${id}_cs`;
       const csOriginXExpr = (axis === 'x') ? `(${cxExprUm}) - (${wExprUm})/2` : cxExprUm;
       const csOriginYExpr = (axis === 'y') ? `(${cyExprUm}) - (${hExprUm})/2` : cyExprUm;
       const csOriginZExpr = `${(wgZ + safeSlabH).toFixed(4)}um`;
-      // X-axis unit vector along the WG axis; Y-axis perpendicular in-plane
-      // (right-handed so Z stays out of plane).
       const csXAxis = axis === 'x' ? [1, 0, 0] : [0, 1, 0];
       const csYAxis = axis === 'x' ? [0, 1, 0] : [-1, 0, 0];
-      // Re-runs in APPEND mode skip CS creation if a CS with the same
-      // name already exists. We do NOT delete-and-recreate — that would
-      // risk cascade-deleting parts whose PartCoordinateSystem resolves
-      // through this CS (a real-world HFSS gotcha that wiped wg_slab /
-      // wg_rib geometry in earlier iterations of this exporter).
-      code += `try:
-    if not _relative_cs_exists("${csName}"):
-        oEditor.CreateRelativeCS(
-            ["NAME:RelativeCSParameters",
-             "Mode:=", "Axis/Position",
-             "OriginX:=", "${csOriginXExpr}",
-             "OriginY:=", "${csOriginYExpr}",
-             "OriginZ:=", "${csOriginZExpr}",
-             "XAxisXvec:=", "${csXAxis[0]}",
-             "XAxisYvec:=", "${csXAxis[1]}",
-             "XAxisZvec:=", "${csXAxis[2]}",
-             "YAxisXvec:=", "${csYAxis[0]}",
-             "YAxisYvec:=", "${csYAxis[1]}",
-             "YAxisZvec:=", "${csYAxis[2]}"],
-            ["NAME:Attributes", "Name:=", "${csName}"])
-except Exception as e:
-    try:
-        oDesktop.AddMessage("", "", 1, "Failed to create relative CS ${csName}: " + str(e))
-    except:
-        pass
-`;
+      relativeCsDefs.push({
+        name: csName,
+        originX: csOriginXExpr,
+        originY: csOriginYExpr,
+        originZ: csOriginZExpr,
+        xAxis: csXAxis,
+        yAxis: csYAxis,
+      });
     } else if (c.layer === 'port') {
       // Port-layer rects are emitted as 2-D sheet rectangles (axis-aligned
       // to the Z plane). HFSS uses 2-D sheets as the geometry for lumped
@@ -2053,5 +2037,49 @@ oProject.Save()
 oDesktop.AddMessage("", "", 0, "Geometry appended to active design.")
 `;
   }
+
+  // ===== Relative coordinate systems (per waveguide) =====
+  // Emitted DEAD LAST — after every geometry op, every boundary
+  // assignment, and the project save. CreateRelativeCS in some HFSS
+  // versions sets the new CS as the WCS, which would change the
+  // interpretation of coordinates in any later geometry call. Doing it
+  // after everything else means the active-CS change is harmless: no
+  // more geometry follows. Each CS sits centered on the ridge cross-
+  // section at the START end of its waveguide, just above the slab
+  // (z = wgZ + slab_height). Useful as a base for ports, mode
+  // integration lines, field probes, anchor points for spline bends.
+  if (relativeCsDefs.length > 0) {
+    code += `
+# ===== Per-waveguide relative coordinate systems =====
+# Each CS sits at one end of the rib, centered on the ridge cross-
+# section just above the slab. X local = along WG axis, Y local =
+# in-plane perpendicular, Z local = chip out-of-plane. Skipped if a CS
+# with the same name already exists (re-run protection).
+`;
+    for (const cs of relativeCsDefs) {
+      code += `try:
+    if not _relative_cs_exists("${cs.name}"):
+        oEditor.CreateRelativeCS(
+            ["NAME:RelativeCSParameters",
+             "Mode:=", "Axis/Position",
+             "OriginX:=", "${cs.originX}",
+             "OriginY:=", "${cs.originY}",
+             "OriginZ:=", "${cs.originZ}",
+             "XAxisXvec:=", "${cs.xAxis[0]}",
+             "XAxisYvec:=", "${cs.xAxis[1]}",
+             "XAxisZvec:=", "${cs.xAxis[2]}",
+             "YAxisXvec:=", "${cs.yAxis[0]}",
+             "YAxisYvec:=", "${cs.yAxis[1]}",
+             "YAxisZvec:=", "${cs.yAxis[2]}"],
+            ["NAME:Attributes", "Name:=", "${cs.name}"])
+except Exception as e:
+    try:
+        oDesktop.AddMessage("", "", 1, "Failed to create relative CS ${cs.name}: " + str(e))
+    except:
+        pass
+`;
+    }
+  }
+
   return code;
 }
