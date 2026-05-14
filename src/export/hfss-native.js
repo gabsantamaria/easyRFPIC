@@ -1175,7 +1175,18 @@ except Exception as e:
       const cyExprForVar = spaceHyphens((!isMirrorTgt && pp)
         ? exprWithUm(pp.cyExpr)
         : `${String(c.cy)}um`);
-      const portZNum = String(evalExpr('h_wg', paramValues) || 0.6);
+      // Port sheet Z: half-way up the conductor layer, so the sheet
+      // sits inside the metal trace at its mid-height. For a zero-
+      // thickness conductor (h_cond=0) this collapses to the conductor
+      // layer's zBottom — the sheet and the port coincide on the same
+      // plane. Falls back to the legacy h_wg position if no conductor
+      // layer is defined.
+      const portCondLayer = c.conductorLayerId
+        ? (stack || []).find(l => l.id === c.conductorLayerId && l.role === 'conductor')
+        : condLayer;
+      const portCondZBot = portCondLayer && layerZ[portCondLayer.id] ? layerZ[portCondLayer.id].zBottom : evalExpr('h_wg', paramValues) || 0.6;
+      const portCondThk = portCondLayer && layerZ[portCondLayer.id] ? layerZ[portCondLayer.id].thickness : 0;
+      const portZNum = String(portCondZBot + portCondThk / 2);
       const portWExpr = exprWithUm(c.w);  // e.g. "(port1_w)"
       const portHExpr = exprWithUm(c.h);
       const cxVar = `${id}_cx`;
@@ -1928,8 +1939,16 @@ except Exception as e:
 # ===== Lumped ports =====
 oBoundarySetup = oDesign.GetModule("BoundarySetup")
 `;
-    const portZ_um = evalExpr('h_wg', paramValues) || 0.6;
     for (const { comp, det } of lumpedPortTargets) {
+      // Per-port Z: half-way up the conductor layer that hosts this
+      // port (so the IntLine endpoint Z matches the port sheet's Z
+      // EXACTLY). Falls back to h_wg if no conductor layer is bound.
+      const portCondLayerLP = comp.conductorLayerId
+        ? (stack || []).find(l => l.id === comp.conductorLayerId && l.role === 'conductor')
+        : condLayer;
+      const portZ_zBot = portCondLayerLP && layerZ[portCondLayerLP.id] ? layerZ[portCondLayerLP.id].zBottom : evalExpr('h_wg', paramValues) || 0.6;
+      const portZ_thk  = portCondLayerLP && layerZ[portCondLayerLP.id] ? layerZ[portCondLayerLP.id].thickness : 0;
+      const portZ_um = portZ_zBot + portZ_thk / 2;
       const portId = comp.id.replace(/[^A-Za-z0-9_]/g, '_');
       const portName = `LumpedPort_${portId}`;
       const impedance = (comp.lumpedPort && comp.lumpedPort.impedance) || '50';
