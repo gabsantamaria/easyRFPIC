@@ -344,10 +344,16 @@ export function generateHfssNative(scene, paramValues, options = {}) {
     minY = ly - padYNeg;
     maxY = hy + padYPos;
   }
-  const bbXPos = `${minX.toFixed(2)}um`;
-  const bbYPos = `${minY.toFixed(2)}um`;
-  const bbXSize = `${(maxX - minX).toFixed(2)}um`;
-  const bbYSize = `${(maxY - minY).toFixed(2)}um`;
+  // The bb* strings are used as HFSS expressions for the substrate /
+  // cladding / radiation-box footprint. Reference the chip-dimension
+  // variables defined below so the user can sweep chip_x_size /
+  // chip_y_size / chip_x_min / chip_y_min in HFSS to resize the chip
+  // without re-exporting. The numeric defaults are baked into the
+  // variable values, not these references.
+  const bbXPos = `(chip_x_min)`;
+  const bbYPos = `(chip_y_min)`;
+  const bbXSize = `(chip_x_size)`;
+  const bbYSize = `(chip_y_size)`;
 
   // Convert hex color string "#rrggbb" to HFSS "(r g b)" format
   const hexToHfssColor = (hex) => {
@@ -470,6 +476,16 @@ def set_var(name, value):
   for (const [name, p] of Object.entries(params)) {
     code += `set_var("${ascii(name)}", "${formatVarValue(p)}")\n`;
   }
+
+  // Substrate / chip dimension variables, so the user can retune the
+  // chip footprint in HFSS without re-exporting. Substrate and cladding
+  // boxes (plus the air-region radiation box) reference these by name.
+  // Values are the export-time numeric extents computed from the
+  // device bbox + simSetup pads.
+  code += `set_var("chip_x_min", "${minX.toFixed(4)}um")\n`;
+  code += `set_var("chip_y_min", "${minY.toFixed(4)}um")\n`;
+  code += `set_var("chip_x_size", "${(maxX - minX).toFixed(4)}um")\n`;
+  code += `set_var("chip_y_size", "${(maxY - minY).toFixed(4)}um")\n`;
 
   // ===== Materials =====
   // HFSS doesn't ship lithium_tantalate (or any non-standard material) by default.
@@ -1471,12 +1487,18 @@ except Exception as e:
   const allZTops = Object.values(layerZ).map(z => z.zBottom + z.thickness);
   const sceneZMin = allZBottoms.length ? Math.min(...allZBottoms) : -260;
   const sceneZMax = allZTops.length ? Math.max(...allZTops) : 5;
-  const airMinX = (minX - radPadUm).toFixed(2);
-  const airMinY = (minY - radPadUm).toFixed(2);
+  // Air-region pad as an HFSS variable too, so sweeping it adjusts
+  // the radiation box without re-export. The XY footprint is anchored
+  // to the chip-dimension variables (so chip_x_size sweeps grow the
+  // air region symmetrically). Z stays numeric — the substrate Z is
+  // fixed by the layer stack, not user-tunable on the fly.
   const airMinZ = (sceneZMin - radPadUm).toFixed(2);
-  const airSizeX = ((maxX - minX) + 2 * radPadUm).toFixed(2);
-  const airSizeY = ((maxY - minY) + 2 * radPadUm).toFixed(2);
   const airSizeZ = ((sceneZMax - sceneZMin) + 2 * radPadUm).toFixed(2);
+  code += `set_var("air_pad", "${radPadUm.toFixed(4)}um")\n`;
+  const airMinX = `(chip_x_min) - (air_pad)`;
+  const airMinY = `(chip_y_min) - (air_pad)`;
+  const airSizeX = `(chip_x_size) + 2 * (air_pad)`;
+  const airSizeY = `(chip_y_size) + 2 * (air_pad)`;
   code += `
 # ===== Open-region radiation boundary =====
 # Air box padded by ~λ/4 at fnominal = ${fnominalGHz} GHz on every face
@@ -1489,8 +1511,8 @@ except Exception as e:
 try:
     safe_create_box(
         ["NAME:BoxParameters",
-         "XPosition:=", "${airMinX}um", "YPosition:=", "${airMinY}um", "ZPosition:=", "${airMinZ}um",
-         "XSize:=", "${airSizeX}um", "YSize:=", "${airSizeY}um", "ZSize:=", "${airSizeZ}um"],
+         "XPosition:=", "${airMinX}", "YPosition:=", "${airMinY}", "ZPosition:=", "${airMinZ}um",
+         "XSize:=", "${airSizeX}", "YSize:=", "${airSizeY}", "ZSize:=", "${airSizeZ}um"],
         ["NAME:Attributes",
          "Name:=", "air_region", "Flags:=", "", "Color:=", "(180 220 240)",
          "Transparency:=", 0.85, "PartCoordinateSystem:=", "Global",
