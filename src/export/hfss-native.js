@@ -1200,14 +1200,29 @@ except Exception as e:
     if (!transforms || transforms.length === 0) return;
     let curCx = startCx, curCy = startCy, curRotation = 0;
     // Active selection list. Starts as the caller's partIds, but grows
-    // every time a `repeat` transform fires so that any subsequent
-    // displace / rotate operates on the full cluster (original + clones)
-    // rather than on just the original. Without this, e.g. a chain of
-    // [repeat, rotate] would rotate only the base object and leave the
-    // duplicates un-rotated, which is the opposite of what the canvas
-    // shows.
+    // every time a `repeat` or `duplicate_mirror` transform fires so that
+    // any subsequent displace / rotate / etc. operates on the full
+    // cluster (original + clones) rather than on just the original.
     let activePartIds = [...partIds];
     let selStr = activePartIds.join(',');
+    // Existing names known to HFSS at this point in the transform chain.
+    // HFSS picks new clone names by collision-resolution: for a source
+    // object S, the first new clone is named `S_k` where k is the
+    // smallest positive integer such that `S_k` is not already in use.
+    // We mirror that rule so our predicted clone names match HFSS's
+    // actual naming, which is critical when later transforms reference
+    // those clones through the selection list. Without this, a chain of
+    // [repeat-N, duplicate_mirror] would generate the WRONG name for the
+    // mirror clone of the original (it would naively be `S_1`, but `S_1`
+    // already exists from the repeat — HFSS uses `S_<N+1>` instead).
+    const knownNames = new Set(activePartIds);
+    const nextCloneName = (base) => {
+      let k = 1;
+      while (knownNames.has(`${base}_${k}`)) k++;
+      const name = `${base}_${k}`;
+      knownNames.add(name);
+      return name;
+    };
     for (const t of transforms) {
       if (!t || t.enabled === false) continue;
       if (t.kind === 'displace') {
@@ -1320,12 +1335,16 @@ except Exception as e:
           code += `# NOTE: 'includeOriginal=false' on canvas; HFSS keeps the original. Delete ${partIds[0]} manually if needed.\n`;
         }
         // Expand the active selection to include the clones HFSS just
-        // created. DuplicateAlongLine names them `{base}_1`, `{base}_2`,
-        // …, `{base}_n` for each base name in the prior selection.
+        // created. For each source base, HFSS allocates `nNum` new clones
+        // with sequentially-next-available numeric suffixes. In a fresh
+        // namespace those are `_1, _2, …, _n`, but when earlier ops have
+        // already used some of those suffixes, HFSS skips ahead — and we
+        // mirror that exact rule via `nextCloneName` so the predicted
+        // names match HFSS reality.
         const newNames = [];
         for (const baseName of activePartIds) {
           for (let k = 1; k <= nNum; k++) {
-            newNames.push(`${baseName}_${k}`);
+            newNames.push(nextCloneName(baseName));
           }
         }
         activePartIds = [...activePartIds, ...newNames];
@@ -1408,9 +1427,11 @@ except Exception as e:
           code += `# NOTE: 'includeOriginal=false' on canvas; HFSS keeps the original. Delete ${partIds[0]} manually if needed.\n`;
         }
         // Extend the active selection with the mirrored copies. HFSS's
-        // DuplicateMirror names them `{base}_1` per base, same convention
-        // as DuplicateAlongLine.
-        const newNames = activePartIds.map(b => `${b}_1`);
+        // DuplicateMirror uses the same next-available-suffix collision
+        // rule as DuplicateAlongLine, so a mirror following a 10-clone
+        // repeat names the first new object `S_10` (not `S_1`, which is
+        // already taken). `nextCloneName` mirrors that rule.
+        const newNames = activePartIds.map(b => nextCloneName(b));
         activePartIds = [...activePartIds, ...newNames];
         selStr = activePartIds.join(',');
         // Advance tracked centroid to the cluster centroid (midpoint of

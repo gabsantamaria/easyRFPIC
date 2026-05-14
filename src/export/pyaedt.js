@@ -183,13 +183,26 @@ def build_wg(name, cx, cy, w, h):
     // For waveguides (which are built as `<id>_rib` by build_wg), we
     // also need to transform the rib part. Other layers create a single
     // named part matching the id.
-    // Active selection list. Grows every time a `repeat` transform fires
-    // so subsequent displace / rotate operations affect the whole cluster,
-    // not just the original. `duplicate_along_line` creates clones named
-    // `{base}_1`, `{base}_2`, … one per base name per clone index.
+    // Active selection list. Grows every time a `repeat` or
+    // `duplicate_mirror` fires so subsequent displace / rotate operations
+    // affect the whole cluster. We track the set of EXISTING names so
+    // clone-name prediction matches HFSS's collision-resolution rule:
+    // for source S, the new clone is `S_k` where k is the smallest
+    // positive integer such that `S_k` doesn't yet exist. Critical when
+    // a `duplicate_mirror` follows a `repeat` — without it the mirror
+    // clone of the original gets the same name as a repeat clone,
+    // corrupting the subsequent selection list.
     let partTargets = c.layer === 'waveguide' && shapeKind === 'rect'
       ? [`${id}_rib`]
       : [id];
+    const knownNamesPrim = new Set(partTargets);
+    const nextCloneNamePrim = (base) => {
+      let k = 1;
+      while (knownNamesPrim.has(`${base}_${k}`)) k++;
+      const name = `${base}_${k}`;
+      knownNamesPrim.add(name);
+      return name;
+    };
     // Track the part's CURRENT cx, cy in numeric form so rotation pivots
     // about its current center can be computed. We start at the solved
     // (c.cx, c.cy) and update with each displace.
@@ -275,11 +288,12 @@ def build_wg(name, cx, cy, w, h):
         if (!includeOriginal) {
           code += `# NOTE: 'includeOriginal=false' on canvas duplicates the original; HFSS keeps it. Delete '${partTargets[0]}' manually if needed.\n`;
         }
-        // Expand the active selection to include the clones.
+        // Expand the active selection to include the clones, using
+        // HFSS's next-available-suffix naming rule (see nextCloneNamePrim).
         const newNames = [];
         for (const baseName of partTargets) {
           for (let k = 1; k <= nNum; k++) {
-            newNames.push(`${baseName}_${k}`);
+            newNames.push(nextCloneNamePrim(baseName));
           }
         }
         partTargets = [...partTargets, ...newNames];
@@ -323,8 +337,9 @@ def build_wg(name, cx, cy, w, h):
         const nx = axis === 'x' ? 1 : 0;
         const ny = axis === 'y' ? 1 : 0;
         code += `hfss.modeler.duplicate_and_mirror([${partsStr}], [${baseXExpr}, ${baseYExpr}, "0um"], [${nx}, ${ny}, 0])\n`;
-        // Extend selection with the mirrored copies (named base_1).
-        const newNames = partTargets.map(b => `${b}_1`);
+        // Extend selection with the mirrored copies, using HFSS's
+        // collision-resolved naming (see nextCloneNamePrim).
+        const newNames = partTargets.map(b => nextCloneNamePrim(b));
         partTargets = [...partTargets, ...newNames];
         if (axis === 'x') curCx += offsetNum;
         else curCy += offsetNum;
@@ -342,11 +357,21 @@ def build_wg(name, cx, cy, w, h):
   const emitTransformChainPyAEDT = (transforms, partIds, startCx, startCy, baseW, baseH, componentGroup) => {
     if (!transforms || transforms.length === 0) return;
     let curCx = startCx, curCy = startCy, curRotation = 0;
-    // Active selection list. Grows after each `repeat` so any subsequent
-    // displace / rotate operates on the whole cluster (see the per-
-    // primitive transform loop above for the same pattern).
+    // Active selection list. Grows after each `repeat` or
+    // `duplicate_mirror` so any subsequent op affects the whole cluster.
+    // Clone naming follows HFSS's collision rule (next-available suffix
+    // per base) so predictions match HFSS reality — critical when a
+    // mirror follows a repeat, since the naive `_1` would collide.
     let activePartIds = [...partIds];
     let partsStr = activePartIds.map(p => `"${p}"`).join(', ');
+    const knownNamesBool = new Set(activePartIds);
+    const nextCloneNameBool = (base) => {
+      let k = 1;
+      while (knownNamesBool.has(`${base}_${k}`)) k++;
+      const name = `${base}_${k}`;
+      knownNamesBool.add(name);
+      return name;
+    };
     for (const t of transforms) {
       if (!t || t.enabled === false) continue;
       if (t.kind === 'displace') {
@@ -405,12 +430,11 @@ def build_wg(name, cx, cy, w, h):
           code += `# NOTE: 'includeOriginal=false' on canvas; HFSS keeps the original. Delete ${partIds[0]} manually if needed.\n`;
         }
         // Extend the active selection to include the clones the call just
-        // created. pyAEDT's duplicate_along_line names them `{base}_1`,
-        // `{base}_2`, …, one per base name per clone index.
+        // created, using HFSS's collision-resolved naming.
         const newNames = [];
         for (const baseName of activePartIds) {
           for (let k = 1; k <= nNum; k++) {
-            newNames.push(`${baseName}_${k}`);
+            newNames.push(nextCloneNameBool(baseName));
           }
         }
         activePartIds = [...activePartIds, ...newNames];
@@ -448,7 +472,7 @@ def build_wg(name, cx, cy, w, h):
         const nx = axis === 'x' ? 1 : 0;
         const ny = axis === 'y' ? 1 : 0;
         code += `hfss.modeler.duplicate_and_mirror([${partsStr}], [${baseXExpr}, ${baseYExpr}, "0um"], [${nx}, ${ny}, 0])\n`;
-        const newNames = activePartIds.map(b => `${b}_1`);
+        const newNames = activePartIds.map(b => nextCloneNameBool(b));
         activePartIds = [...activePartIds, ...newNames];
         partsStr = activePartIds.map(p => `"${p}"`).join(', ');
         if (axis === 'x') curCx += offsetNum;

@@ -56,4 +56,46 @@ describe('generateHfssNative', () => {
       { stdio: 'pipe' }
     )).not.toThrow();
   });
+
+  it('predicts HFSS collision-resolved clone names for repeat→mirror→repeat', () => {
+    // After DuplicateAlongLine creates `m_1..m_9`, DuplicateMirror must
+    // NOT name the new clone of `m` as `m_1` (collision). HFSS picks the
+    // next available suffix per base — so the mirror clone of `m` is
+    // `m_10`. The third op's selection must reference `m_10`, not a
+    // duplicated `m_1`. Without this, downstream transforms operate on
+    // the wrong set of objects and the final geometry is missing clones.
+    const minimal = {
+      params: { N: { expr: '10' }, off: { expr: '20' }, dy3: { expr: '-30' } },
+      components: [
+        { id: 'a', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: '5', h: '5', cutouts: [], consumedBy: 'm' },
+        { id: 'b', kind: 'rect', layer: 'electrode', cx: 8, cy: 0, w: '5', h: '5', cutouts: [], consumedBy: 'm' },
+        {
+          id: 'm', kind: 'boolean', op: 'union', operandIds: ['a', 'b'],
+          layer: 'electrode', cx: 4, cy: 0, w: '0', h: '0', cutouts: [],
+          transforms: [
+            { id: 't1', kind: 'repeat', enabled: true, n: 'N - 1', dx: '10', dy: '0', includeOriginal: true },
+            { id: 't2', kind: 'duplicate_mirror', enabled: true, axis: 'y', offset: 'off', includeOriginal: true },
+            { id: 't3', kind: 'repeat', enabled: true, n: '1', dx: '0', dy: 'dy3', includeOriginal: true },
+          ],
+        },
+      ],
+      snaps: [], mirrors: [], groups: [], booleans: [],
+      stack: scene.stack, stackName: scene.stackName, simSetup: scene.simSetup,
+    };
+    const { values: pv } = resolveParams(minimal.params);
+    const out = generateHfssNative(minimal, pv);
+    // Find the DuplicateAlongLine that comes AFTER DuplicateMirror.
+    const mirrorIdx = out.indexOf('DuplicateMirror');
+    expect(mirrorIdx).toBeGreaterThan(0);
+    const dupCalls = [...out.matchAll(/DuplicateAlongLine\([\s\S]*?\)\n/g)].map(m => m[0]);
+    const afterMirror = dupCalls.find(c => out.indexOf(c) > mirrorIdx);
+    expect(afterMirror).toBeDefined();
+    // Must include `m_10` — the actual HFSS-allocated name for the
+    // mirror clone of `m` when `m_1..m_9` already exist.
+    expect(afterMirror).toContain('m_10');
+    // Must NOT have any duplicate names in the selection list.
+    const sel = afterMirror.match(/Selections:=", "([^"]+)"/)[1];
+    const names = sel.split(',');
+    expect(new Set(names).size).toBe(names.length);
+  });
 });
