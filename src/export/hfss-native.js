@@ -1690,24 +1690,33 @@ except Exception as e:
   // Conductor layers with thickness = 0 are modeled as 2-D rectangle
   // sheets (instead of 3-D boxes). HFSS treats sheets as having no
   // material on either side unless a boundary is assigned, so we attach
-  // a surface impedance boundary with R = 0 Ω/sq and X = 0 Ω/sq — a
-  // perfect electric conductor in 2-D. Same physics as PEC, but no
-  // volumetric mesh, which is the standard HFSS optimization for thin
-  // metal traces.
+  // a near-PEC surface impedance: R = 0.001 Ω/sq, X = 0 Ω/sq.
+  //
+  // Why not exactly R=0 / X=0: some HFSS releases reject "0 Ohm/sq +
+  // j 0 Ohm/sq" as singular (the solver's surface-impedance kernel
+  // wants a small but nonzero resistance for numerical stability). The
+  // 1 mΩ/sq we use is small enough that the trace behaves as a PEC for
+  // every practical RF/photonic design, but large enough to keep HFSS
+  // happy. The user can tighten or loosen this directly in HFSS via
+  // Project > Boundaries > "PEC_sheets" > Edit if a more physically-
+  // accurate sheet resistance is wanted.
   if (zeroThicknessSheets.length > 0) {
     const objList = zeroThicknessSheets.map(n => `"${n}"`).join(', ');
     code += `
 # ===== Zero-thickness conductor sheets: impedance boundary =====
-# All conductor sheets (from layers with thickness=0) get a surface
-# impedance boundary of 0 Ohm/sq (R) + j 0 Ohm/sq (X), i.e. a perfect
-# electric conductor without a volumetric mesh.
+# All conductor sheets (from layers with thickness=0) get a near-PEC
+# surface impedance: 0.001 Ohm/sq (R) + j 0 Ohm/sq (X). Exact
+# R=X=0 is rejected as singular by some HFSS releases, but 1 mOhm/sq
+# is numerically perfect-conductor-equivalent for any practical RF or
+# photonic-RF design. Edit the boundary in HFSS if you need a true
+# physical sheet resistance.
 try:
     oBoundarySetup_imp = oDesign.GetModule("BoundarySetup")
     _delete_boundary_if_exists("PEC_sheets")
     oBoundarySetup_imp.AssignImpedance(
         ["NAME:PEC_sheets",
          "Objects:=", [${objList}],
-         "Resistance:=", "0",
+         "Resistance:=", "0.001",
          "Reactance:=", "0",
          "InfGroundPlane:=", False])
 except Exception as e:

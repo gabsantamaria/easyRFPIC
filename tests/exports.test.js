@@ -57,10 +57,12 @@ describe('generateHfssNative', () => {
     )).not.toThrow();
   });
 
-  it('emits conductor sheets + AssignImpedance when conductor thickness is 0', () => {
+  it('emits conductor sheets + near-PEC AssignImpedance when conductor thickness is 0', () => {
     // When h_cond = 0, every electrode should be a 2-D rectangle sheet
     // rather than a 3-D box, and a single AssignImpedance boundary
-    // (R=0, X=0 Ω/sq) should cover all of them.
+    // (R=0.001, X=0 Ω/sq) should cover all of them. R=0 exactly is
+    // rejected as singular by some HFSS releases — 1 mΩ/sq is a
+    // numerically-stable near-PEC surrogate.
     const zeroScene = {
       ...scene,
       params: { ...scene.params, h_cond: { ...(scene.params.h_cond || {}), expr: '0' } },
@@ -70,9 +72,9 @@ describe('generateHfssNative', () => {
     // Electrode sheets are CreateRectangle, not CreateBox.
     const rectCount = (out.match(/safe_create_rectangle/g) || []).length;
     expect(rectCount).toBeGreaterThan(0);
-    // Impedance boundary block with R=0, X=0.
+    // Impedance boundary block with R=0.001 (near-PEC), X=0.
     expect(out).toContain('AssignImpedance');
-    expect(out).toMatch(/"Resistance:=", "0"/);
+    expect(out).toMatch(/"Resistance:=", "0\.001"/);
     expect(out).toMatch(/"Reactance:=", "0"/);
     // Boundary's object list mentions each default electrode by name.
     expect(out).toMatch(/"sig"/);
