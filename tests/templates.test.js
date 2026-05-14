@@ -1,10 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import racetrack from '../src/templates/racetrack.js';
 import ringResonator from '../src/templates/ring-resonator.js';
+import meanderElectrode from '../src/templates/meander-electrode.js';
 import { BUILTIN_TEMPLATES } from '../src/templates/index.js';
 import { insertLibraryPayload } from '../src/templates/_library-insert.js';
 import { generateTemplateModuleSource } from '../src/templates/_codify.js';
 import { makeBlankScene } from '../src/scene/schema.js';
+import { resolveParams } from '../src/scene/params.js';
+import { solveLayout, resolveBooleanBboxes } from '../src/scene/solver.js';
+import { expandTransforms } from '../src/scene/transforms.js';
 
 const ctx = { viewport: { x: 0, y: 0 }, paramValues: {} };
 
@@ -71,6 +75,91 @@ describe('ring-resonator template', () => {
     expect(newParamNames.some((n) => n.endsWith('_gap'))).toBe(true);
     expect(newParamNames.some((n) => n.endsWith('_R'))).toBe(true);
     expect(newParamNames.some((n) => n.endsWith('_bus_L'))).toBe(true);
+  });
+});
+
+describe('meander-electrode template', () => {
+  it('inserts 9 united conductor primitives + 8 snaps + 1 union boolean', () => {
+    const prev = makeBlankScene();
+    const next = meanderElectrode.insert(prev, ctx);
+    // 9 primitives + 1 boolean = 10 added components
+    expect(next.components.length).toBe(prev.components.length + 10);
+    // 8 snaps anchoring the other 8 primitives to the rail anchor
+    expect(next.snaps.length).toBe(prev.snaps.length + 8);
+    const boolean = next.components.find(c => c.kind === 'boolean');
+    expect(boolean).toBeDefined();
+    expect(boolean.op).toBe('union');
+    expect(boolean.operandIds.length).toBe(9);
+    // All operands tagged consumedBy the boolean
+    for (const id of boolean.operandIds) {
+      const op = next.components.find(c => c.id === id);
+      expect(op.consumedBy).toBe(boolean.id);
+      expect(op.layer).toBe('electrode');
+    }
+  });
+
+  it('pre-installs a repeat transform driven by the N parameter', () => {
+    const prev = makeBlankScene();
+    const next = meanderElectrode.insert(prev, ctx);
+    const boolean = next.components.find(c => c.kind === 'boolean');
+    expect(boolean.transforms.length).toBe(1);
+    const t = boolean.transforms[0];
+    expect(t.kind).toBe('repeat');
+    expect(t.enabled).toBe(true);
+    expect(t.includeOriginal).toBe(true);
+    // n is the param-driven count (N - 1) so total instances = N
+    expect(t.n).toMatch(/_N\s*-\s*1/);
+    // Step in y is one cell period (cell_w + cell_s)
+    expect(t.dy).toMatch(/cell_w/);
+    expect(t.dy).toMatch(/cell_s/);
+    expect(t.dx).toBe('0');
+  });
+
+  it('adds the full set of meander parameters', () => {
+    const prev = makeBlankScene();
+    const next = meanderElectrode.insert(prev, ctx);
+    const newNames = Object.keys(next.params).filter(k => !prev.params[k]);
+    expect(newNames.some(n => n.endsWith('_cell_w'))).toBe(true);
+    expect(newNames.some(n => n.endsWith('_cell_s'))).toBe(true);
+    expect(newNames.some(n => n.endsWith('_cell_h'))).toBe(true);
+    expect(newNames.some(n => n.endsWith('_cell_d'))).toBe(true);
+    expect(newNames.some(n => n.endsWith('_trace_w'))).toBe(true);
+    expect(newNames.some(n => n.endsWith('_gap_s'))).toBe(true);
+    expect(newNames.some(n => n.endsWith('_N'))).toBe(true);
+  });
+
+  it('produces a unit cell whose AABB equals (3W+D+H) x (L+S)', () => {
+    // With defaults: trace_w=0.5, cell_d=4, cell_h=9, cell_w=25, cell_s=2.
+    // Expected: width = 3*0.5 + 4 + 9 = 14.5; height = 25 + 2 = 27.
+    const prev = makeBlankScene();
+    const next = meanderElectrode.insert(prev, ctx);
+    const { values: pv } = resolveParams(next.params);
+    let solved = solveLayout(next.components, next.snaps, pv);
+    solved = resolveBooleanBboxes(solved, pv);
+    const boolean = solved.find(c => c.kind === 'boolean');
+    expect(boolean.w).toBeCloseTo(14.5, 6);
+    expect(boolean.h).toBeCloseTo(27, 6);
+  });
+
+  it('N controls the number of cells via the repeat transform', () => {
+    const prev = makeBlankScene();
+    const next = meanderElectrode.insert(prev, ctx);
+    const { values: pv } = resolveParams(next.params);
+    let solved = solveLayout(next.components, next.snaps, pv);
+    solved = resolveBooleanBboxes(solved, pv);
+    const boolean = solved.find(c => c.kind === 'boolean');
+    const insts = expandTransforms([boolean], pv);
+    expect(insts.length).toBe(20); // default N=20
+  });
+
+  it('avoids id collisions on repeated insert', () => {
+    let scene = makeBlankScene();
+    scene = meanderElectrode.insert(scene, ctx);
+    scene = meanderElectrode.insert(scene, ctx);
+    const ids = scene.components.map(c => c.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    const paramKeys = Object.keys(scene.params);
+    expect(new Set(paramKeys).size).toBe(paramKeys.length);
   });
 });
 

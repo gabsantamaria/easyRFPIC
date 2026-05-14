@@ -11,8 +11,10 @@
 // manually so unfamiliar code doesn't ship by accident.
 import racetrack from './racetrack.js';
 import ringResonator from './ring-resonator.js';
+import meanderElectrode from './meander-electrode.js';
 
 export const BUILTIN_TEMPLATES = [
   racetrack,
   ringResonator,
+  meanderElectrode,
 ];
