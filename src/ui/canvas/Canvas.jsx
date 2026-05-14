@@ -1646,7 +1646,17 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // Map id → component for recursive resolution.
         const compById = Object.fromEntries(scene.components.map(c => [c.id, c]));
         // Resolve a component's first rendered instance (post-transform).
-        const instOf = (c) => {
+        // The optional `overrides` map lets callers force a specific
+        // instance for one or more compIds — used by the boolean renderer
+        // when expanding a transform chain: each rendered copy of a
+        // boolean rebuilds its operands at the rotated/translated position
+        // for that particular copy, and the override map plumbs those
+        // synthetic instances through the recursive renderInterior /
+        // renderOutline / collectBbox chain without needing an outer SVG
+        // <g transform> (whose interaction with mask coordinates is
+        // surprising and was preventing rotated booleans from appearing).
+        const instOf = (c, overrides) => {
+          if (overrides && overrides[c.id]) return overrides[c.id];
           const list = instancesByCompId[c.id] || [];
           return list[0] || {
             compId: c.id, idx: 0, cx: c.cx, cy: c.cy,
@@ -1661,14 +1671,14 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
 
         // Flat-bbox collector used for mask viewport sizing; recurses
         // through derived operands so the bbox covers the entire object.
-        const collectBbox = (comp) => {
+        const collectBbox = (comp, overrides) => {
           const out = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
           const visit = (c) => {
             if (!c) return;
             if (c.kind === 'boolean') {
               for (const id of (c.operandIds || [])) visit(compById[id]);
             } else {
-              const ring = shapeInstanceToRing(instOf(c));
+              const ring = shapeInstanceToRing(instOf(c, overrides));
               for (const [x, y] of ring) {
                 if (x < out.minX) out.minX = x; if (x > out.maxX) out.maxX = x;
                 if (y < out.minY) out.minY = y; if (y > out.maxY) out.maxY = y;
@@ -1677,6 +1687,60 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           };
           visit(comp);
           return out;
+        };
+
+        // Compose a boolean's per-instance transform (translation + rotation
+        // about the instance centroid) onto each operand's base instance so
+        // the operands render at the rotated/translated position directly.
+        // Returns a map compId -> synthetic instance for every operand
+        // (recursively, through nested booleans), or null if the boolean has
+        // no transforms.
+        const buildBoolInstanceOverrides = (b, bInst, bBaseCx, bBaseCy) => {
+          const dx = bInst.cx - bBaseCx;
+          const dy = bInst.cy - bBaseCy;
+          const rot = bInst.rotation || 0;
+          if (!dx && !dy && !rot) return null;
+          const rad = rot * Math.PI / 180;
+          const ca = Math.cos(rad), sa = Math.sin(rad);
+          const overrides = {};
+          // Walk the boolean's operand tree, transforming each PRIMITIVE
+          // operand it finds. Nested booleans' operands also get
+          // transformed; the parent boolean's transform applies uniformly
+          // to every descendant.
+          const visit = (c) => {
+            if (!c) return;
+            if (c.kind === 'boolean') {
+              for (const id of (c.operandIds || [])) visit(compById[id]);
+              return;
+            }
+            // Take the operand's base (un-transformed-by-the-boolean)
+            // instance. Note this is the operand's OWN first instance
+            // (which already accounts for the operand's own transforms,
+            // if any — though operands consumed by a boolean typically
+            // have no transforms of their own).
+            const base = instOf(c);
+            // Translate by (dx, dy), then rotate by `rot` about the
+            // instance centroid (which equals bInst.cx, bInst.cy after
+            // translation). This matches expandTransforms' semantics: for
+            // pivot='C' on a cluster, each instance's cx,cy already lives
+            // in world-space at the rotated location, so rotating the
+            // operand cluster about that same point reproduces the rotated
+            // cluster.
+            const tx = base.cx + dx;
+            const ty = base.cy + dy;
+            const rx = tx - bInst.cx;
+            const ry = ty - bInst.cy;
+            const newCx = rot ? bInst.cx + rx * ca - ry * sa : tx;
+            const newCy = rot ? bInst.cy + rx * sa + ry * ca : ty;
+            overrides[c.id] = {
+              ...base,
+              cx: newCx,
+              cy: newCy,
+              rotation: (base.rotation || 0) + rot,
+            };
+          };
+          visit(b);
+          return overrides;
         };
 
         // Recursively render an object's INTERIOR as SVG. The output is a
@@ -1690,11 +1754,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // interior overrides the white base in the mask).
         //
         // `depth` is for unique key generation; bumped per nesting level.
-        const renderInterior = (comp, fillColor, keyBase, dataCompId, parentClip) => {
+        const renderInterior = (comp, fillColor, keyBase, dataCompId, parentClip, overrides) => {
           if (!comp) return null;
           const isPrim = comp.kind !== 'boolean';
           if (isPrim) {
-            const inst = instOf(comp);
+            const inst = instOf(comp, overrides);
             return (
               <path
                 key={keyBase}
@@ -1716,7 +1780,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             // overlapping = same color.
             return (
               <g key={keyBase}>
-                {ops.map((opC, i) => renderInterior(opC, fillColor, `${keyBase}-u${i}`, dataCompId, parentClip))}
+                {ops.map((opC, i) => renderInterior(opC, fillColor, `${keyBase}-u${i}`, dataCompId, parentClip, overrides))}
               </g>
             );
           }
@@ -1732,7 +1796,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
               chainIds.push(id);
               chainDefs.push(
                 <clipPath key={id} id={id} clipPathUnits="userSpaceOnUse">
-                  {renderInterior(ops[i], 'white', `${id}-c`, undefined, parentId ? `url(#${parentId})` : undefined)}
+                  {renderInterior(ops[i], 'white', `${id}-c`, undefined, parentId ? `url(#${parentId})` : undefined, overrides)}
                 </clipPath>
               );
             }
@@ -1740,7 +1804,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             return (
               <g key={keyBase}>
                 <defs>{chainDefs}</defs>
-                {renderInterior(ops[0], fillColor, `${keyBase}-i0`, dataCompId, finalClip)}
+                {renderInterior(ops[0], fillColor, `${keyBase}-i0`, dataCompId, finalClip, overrides)}
               </g>
             );
           }
@@ -1751,7 +1815,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             // distinction only matters for consumedBy tagging and the
             // keep_originals export flag.
             const maskId = nextDefId(`${keyBase}-submask`);
-            const bbox = collectBbox(comp);
+            const bbox = collectBbox(comp, overrides);
             const pad = Math.max(bbox.maxX - bbox.minX, bbox.maxY - bbox.minY) * 0.1 + 1;
             const mvX = bbox.minX - pad, mvY = bbox.minY - pad;
             const mvW = (bbox.maxX - bbox.minX) + 2 * pad;
@@ -1762,14 +1826,14 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   <mask id={maskId} maskUnits="userSpaceOnUse"
                     x={mvX} y={-mvY - mvH} width={mvW} height={mvH}>
                     <rect x={mvX} y={-mvY - mvH} width={mvW} height={mvH} fill="black" />
-                    {renderInterior(ops[0], 'white', `${maskId}-base`)}
+                    {renderInterior(ops[0], 'white', `${maskId}-base`, undefined, undefined, overrides)}
                     {ops.slice(1).map((opC, i) =>
-                      renderInterior(opC, 'black', `${maskId}-sub${i}`)
+                      renderInterior(opC, 'black', `${maskId}-sub${i}`, undefined, undefined, overrides)
                     )}
                   </mask>
                 </defs>
                 <g mask={`url(#${maskId})`}>
-                  {renderInterior(ops[0], fillColor, `${keyBase}-baseunder`, dataCompId, parentClip)}
+                  {renderInterior(ops[0], fillColor, `${keyBase}-baseunder`, dataCompId, parentClip, overrides)}
                 </g>
               </g>
             );
@@ -1782,11 +1846,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // For a derived boolean: stroke each operand's perimeter with the
         // appropriate mask/clip so only edges on the result boundary
         // contribute. Recursive — operands can themselves be booleans.
-        const renderOutline = (comp, strokeColor, strokeW, keyBase) => {
+        const renderOutline = (comp, strokeColor, strokeW, keyBase, overrides) => {
           if (!comp) return null;
           const isPrim = comp.kind !== 'boolean';
           if (isPrim) {
-            const inst = instOf(comp);
+            const inst = instOf(comp, overrides);
             return (
               <path key={keyBase} d={rectPathD(inst)}
                 fill="none" stroke={strokeColor} strokeWidth={strokeW}
@@ -1804,7 +1868,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
               <g key={keyBase}>
                 {ops.map((opC, i) => {
                   const maskId = nextDefId(`${keyBase}-uout${i}`);
-                  const bbox = collectBbox(comp);
+                  const bbox = collectBbox(comp, overrides);
                   const pad = Math.max(bbox.maxX - bbox.minX, bbox.maxY - bbox.minY) * 0.1 + 1;
                   const mvX = bbox.minX - pad, mvY = bbox.minY - pad;
                   const mvW = (bbox.maxX - bbox.minX) + 2 * pad;
@@ -1817,11 +1881,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                           {/* white = visible by default; subtract OTHER operands' interiors. */}
                           <rect x={mvX} y={-mvY - mvH} width={mvW} height={mvH} fill="white" />
                           {ops.map((other, j) => i === j ? null :
-                            renderInterior(other, 'black', `${maskId}-other${j}`))}
+                            renderInterior(other, 'black', `${maskId}-other${j}`, undefined, undefined, overrides))}
                         </mask>
                       </defs>
                       <g mask={`url(#${maskId})`}>
-                        {renderOutline(opC, strokeColor, strokeW, `${keyBase}-uoinner${i}`)}
+                        {renderOutline(opC, strokeColor, strokeW, `${keyBase}-uoinner${i}`, overrides)}
                       </g>
                     </g>
                   );
@@ -1847,7 +1911,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                     chainIds.push(id);
                     chainDefs.push(
                       <clipPath key={id} id={id} clipPathUnits="userSpaceOnUse">
-                        {renderInterior(others[k], 'white', `${id}-c`, undefined, parentId ? `url(#${parentId})` : undefined)}
+                        {renderInterior(others[k], 'white', `${id}-c`, undefined, parentId ? `url(#${parentId})` : undefined, overrides)}
                       </clipPath>
                     );
                   }
@@ -1856,7 +1920,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                     <g key={`${keyBase}-iso${i}`}>
                       <defs>{chainDefs}</defs>
                       <g clipPath={finalClip}>
-                        {renderOutline(opC, strokeColor, strokeW, `${keyBase}-isoinner${i}`)}
+                        {renderOutline(opC, strokeColor, strokeW, `${keyBase}-isoinner${i}`, overrides)}
                       </g>
                     </g>
                   );
@@ -1870,7 +1934,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             // rendered identically to 'subtract' here.
             const maskId = nextDefId(`${keyBase}-subout`);
             const baseClipId = nextDefId(`${keyBase}-baseclip`);
-            const bbox = collectBbox(comp);
+            const bbox = collectBbox(comp, overrides);
             const pad = Math.max(bbox.maxX - bbox.minX, bbox.maxY - bbox.minY) * 0.1 + 1;
             const mvX = bbox.minX - pad, mvY = bbox.minY - pad;
             const mvW = (bbox.maxX - bbox.minX) + 2 * pad;
@@ -1881,21 +1945,21 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   <mask id={maskId} maskUnits="userSpaceOnUse"
                     x={mvX} y={-mvY - mvH} width={mvW} height={mvH}>
                     <rect x={mvX} y={-mvY - mvH} width={mvW} height={mvH} fill="black" />
-                    {renderInterior(ops[0], 'white', `${maskId}-base`)}
+                    {renderInterior(ops[0], 'white', `${maskId}-base`, undefined, undefined, overrides)}
                     {ops.slice(1).map((opC, i) =>
-                      renderInterior(opC, 'black', `${maskId}-sub${i}`)
+                      renderInterior(opC, 'black', `${maskId}-sub${i}`, undefined, undefined, overrides)
                     )}
                   </mask>
                   <clipPath id={baseClipId} clipPathUnits="userSpaceOnUse">
-                    {renderInterior(ops[0], 'white', `${baseClipId}-c`)}
+                    {renderInterior(ops[0], 'white', `${baseClipId}-c`, undefined, undefined, overrides)}
                   </clipPath>
                 </defs>
                 <g mask={`url(#${maskId})`}>
-                  {renderOutline(ops[0], strokeColor, strokeW, `${keyBase}-baseout`)}
+                  {renderOutline(ops[0], strokeColor, strokeW, `${keyBase}-baseout`, overrides)}
                 </g>
                 <g clipPath={`url(#${baseClipId})`}>
                   {ops.slice(1).map((opC, i) =>
-                    renderOutline(opC, strokeColor, strokeW, `${keyBase}-subout${i}`)
+                    renderOutline(opC, strokeColor, strokeW, `${keyBase}-subout${i}`, overrides)
                   )}
                 </g>
               </g>
@@ -1905,14 +1969,18 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         };
 
         // Render a single boolean cluster: fill + outline + selection halo.
-        // If the boolean carries a transform chain (e.g. a `repeat`), we emit
-        // one rendered copy per instance returned by expandTransforms. The
-        // operands themselves are unmoved — each instance just wraps the
-        // recursive renderer in an SVG <g transform="translate(...)"> that
-        // shifts the cluster by the instance's offset from the boolean's
-        // base centroid. This matches what the HFSS / pyAEDT exports do
-        // (single Unite then DuplicateAlongLine) and keeps the canvas in
-        // step with what gets exported.
+        // If the boolean carries a transform chain (e.g. a `repeat` or a
+        // `rotate`), we emit one rendered copy per instance returned by
+        // expandTransforms. Each copy is rendered by passing an OPERAND
+        // INSTANCE OVERRIDE MAP down through the recursive renderer; the
+        // override map gives every operand a synthetic instance at the
+        // copy's rotated/translated position. We do NOT use an outer
+        // <g transform> because SVG masks under outer transforms are
+        // fragile — the override approach computes the right positions
+        // directly so paths and masks stay in their natural user-space
+        // coordinate system. The HFSS / pyAEDT exports produce the
+        // matching geometry (single Unite, then DuplicateAlongLine, then
+        // Rotate on the whole cluster).
         return booleanClusters.booleanComps.flatMap((b) => {
           // Determine the display fill color from the boolean's own layer
           // (which inherits from operand[0] at creation time).
@@ -1939,48 +2007,26 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           // Per-instance offsets. expandTransforms returns [{cx, cy, ...}]
           // for each rendered copy; the first entry is the un-shifted base.
           // No transforms ⇒ single entry equal to the base.
-          const insts = instancesByCompId[b.id] || [{ cx: baseCx, cy: baseCy, idx: 0 }];
+          const insts = instancesByCompId[b.id] || [{ cx: baseCx, cy: baseCy, idx: 0, rotation: 0 }];
           return insts.map((inst, i) => {
-            const dx = inst.cx - baseCx;
-            const dy = inst.cy - baseCy;
-            const rot = inst.rotation || 0;
-            // SVG y-axis is flipped relative to world (-cy mapping). The
-            // combined transform first translates the cluster from its
-            // base centroid to the instance centroid, then rotates about
-            // the instance centroid by `rot` degrees (with sign flipped to
-            // account for the y-flip). SVG applies transforms right-to-left
-            // so the string is "rotate ... translate ..." to translate
-            // first and rotate second. For a rotate-before-repeat chain
-            // every instance carries the same `rot` and renders together as
-            // a coherent rotated cluster; for rotate-after-repeat each
-            // instance rotates about its own center (which is the existing
-            // semantics of expandTransforms).
-            let txAttr;
-            if (rot && (dx || dy)) {
-              txAttr = `rotate(${-rot} ${inst.cx} ${-inst.cy}) translate(${dx} ${-dy})`;
-            } else if (rot) {
-              txAttr = `rotate(${-rot} ${inst.cx} ${-inst.cy})`;
-            } else if (dx || dy) {
-              txAttr = `translate(${dx} ${-dy})`;
-            }
+            const overrides = buildBoolInstanceOverrides(b, inst, baseCx, baseCy);
             const isBase = i === 0;
             return (
               <g
                 key={`bool_${b.id}_${i}`}
-                transform={txAttr}
                 style={{ cursor: 'move' }}
                 opacity={isBase ? 1 : 0.85}
               >
                 {/* (1) Fill — recursive interior with the layer's fill color. */}
                 <g opacity={fillOpacity}>
-                  {renderInterior(b, fill, `bool-fill-${b.id}-${i}`, b.id)}
+                  {renderInterior(b, fill, `bool-fill-${b.id}-${i}`, b.id, undefined, overrides)}
                 </g>
                 {/* (2) Result outline — recursive perimeter in op accent. */}
-                {renderOutline(b, accent, outlineW, `bool-out-${b.id}-${i}`)}
+                {renderOutline(b, accent, outlineW, `bool-out-${b.id}-${i}`, overrides)}
                 {/* (3) Selection halo — drawn on the BASE instance only, so
                     selection reads as the boolean as a whole rather than
                     every duplicate flashing cyan. */}
-                {isSelected && isBase && renderOutline(b, haloColor, haloW, `bool-halo-${b.id}-${i}`)}
+                {isSelected && isBase && renderOutline(b, haloColor, haloW, `bool-halo-${b.id}-${i}`, overrides)}
               </g>
             );
           });
