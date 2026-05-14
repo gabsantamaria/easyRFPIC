@@ -1905,7 +1905,15 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         };
 
         // Render a single boolean cluster: fill + outline + selection halo.
-        return booleanClusters.booleanComps.map((b) => {
+        // If the boolean carries a transform chain (e.g. a `repeat`), we emit
+        // one rendered copy per instance returned by expandTransforms. The
+        // operands themselves are unmoved — each instance just wraps the
+        // recursive renderer in an SVG <g transform="translate(...)"> that
+        // shifts the cluster by the instance's offset from the boolean's
+        // base centroid. This matches what the HFSS / pyAEDT exports do
+        // (single Unite then DuplicateAlongLine) and keeps the canvas in
+        // step with what gets exported.
+        return booleanClusters.booleanComps.flatMap((b) => {
           // Determine the display fill color from the boolean's own layer
           // (which inherits from operand[0] at creation time).
           const layer = b.layer || 'waveguide';
@@ -1922,19 +1930,43 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           const bbox = collectBbox(b);
           // Don't render if the bbox is degenerate (e.g., missing operands).
           if (!Number.isFinite(bbox.minX)) return null;
-          return (
-            <g key={`bool_${b.id}`} style={{ cursor: 'move' }}>
-              {/* (1) Fill — recursive interior with the layer's fill color. */}
-              <g opacity={fillOpacity}>
-                {renderInterior(b, fill, `bool-fill-${b.id}`, b.id)}
+          // Solved counterpart carries the numeric centroid (b.cx, b.cy) the
+          // boolean's transform chain expanded from. The scene-side `b` has
+          // string placeholders for w/h but cx/cy is numeric on both sides.
+          const solvedB = solved.find(c => c.id === b.id) || b;
+          const baseCx = solvedB.cx;
+          const baseCy = solvedB.cy;
+          // Per-instance offsets. expandTransforms returns [{cx, cy, ...}]
+          // for each rendered copy; the first entry is the un-shifted base.
+          // No transforms ⇒ single entry equal to the base.
+          const insts = instancesByCompId[b.id] || [{ cx: baseCx, cy: baseCy, idx: 0 }];
+          return insts.map((inst, i) => {
+            const dx = inst.cx - baseCx;
+            const dy = inst.cy - baseCy;
+            // SVG y-axis is flipped relative to world (-cy mapping); for the
+            // translate wrapper we mirror the world dy to screen.
+            const txAttr = (dx || dy) ? `translate(${dx} ${-dy})` : undefined;
+            const isBase = i === 0;
+            return (
+              <g
+                key={`bool_${b.id}_${i}`}
+                transform={txAttr}
+                style={{ cursor: 'move' }}
+                opacity={isBase ? 1 : 0.85}
+              >
+                {/* (1) Fill — recursive interior with the layer's fill color. */}
+                <g opacity={fillOpacity}>
+                  {renderInterior(b, fill, `bool-fill-${b.id}-${i}`, b.id)}
+                </g>
+                {/* (2) Result outline — recursive perimeter in op accent. */}
+                {renderOutline(b, accent, outlineW, `bool-out-${b.id}-${i}`)}
+                {/* (3) Selection halo — drawn on the BASE instance only, so
+                    selection reads as the boolean as a whole rather than
+                    every duplicate flashing cyan. */}
+                {isSelected && isBase && renderOutline(b, haloColor, haloW, `bool-halo-${b.id}-${i}`)}
               </g>
-              {/* (2) Result outline — recursive perimeter in op accent. */}
-              {renderOutline(b, accent, outlineW, `bool-out-${b.id}`)}
-              {/* (3) Selection halo — same outline path, thicker, cyan,
-                  drawn on top so it dominates visually when selected. */}
-              {isSelected && renderOutline(b, haloColor, haloW, `bool-halo-${b.id}`)}
-            </g>
-          );
+            );
+          });
         });
       })()}
 
