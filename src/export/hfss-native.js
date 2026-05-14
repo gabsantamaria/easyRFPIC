@@ -1941,8 +1941,15 @@ oBoundarySetup = oDesign.GetModule("BoundarySetup")
       const portName = `LumpedPort_${portId}`;
       const impedance = (comp.lumpedPort && comp.lumpedPort.impedance) || '50';
       // IntLine endpoints are emitted as BARE numeric literals at the
-      // export-time port edges (with a 1 nm inward inset to absorb
-      // any sub-µm HFSS↔JS evaluation drift).
+      // export-time port edges. They MUST sit EXACTLY on opposite port
+      // edges — HFSS's lumped-port assignment rejects interior points
+      // with "Both endpoints of port lines must lie on the port". An
+      // earlier version of this code applied a 1 nm inward inset to
+      // absorb sub-µm evaluation drift between HFSS and JS, but that
+      // pushes the endpoints into the port's interior and HFSS treats
+      // them as off-edge. The parametric port expressions emitted above
+      // (XStart = port_cx - w/2, YStart = port_cy - h/2) evaluate to the
+      // SAME doubles HFSS uses here, so edge-exact endpoints align.
       //
       // The IntLine COM field rejects any non-literal here: variable
       // refs evaluate to 0 ("length zero"), arithmetic expressions
@@ -1957,13 +1964,12 @@ oBoundarySetup = oDesign.GetModule("BoundarySetup")
       // follows the port through any subsequent parameter sweep.
       // Until you do that, re-export to refresh the IntLine after
       // changing snap-chain parameters.
-      const INSET = 0.001;
       const pw = evalExpr(comp.w, paramValues);
       const ph = evalExpr(comp.h, paramValues);
-      const xMin = String(comp.cx - pw / 2 + INSET);
-      const xMax = String(comp.cx + pw / 2 - INSET);
-      const yMin = String(comp.cy - ph / 2 + INSET);
-      const yMax = String(comp.cy + ph / 2 - INSET);
+      const xMin = String(comp.cx - pw / 2);
+      const xMax = String(comp.cx + pw / 2);
+      const yMin = String(comp.cy - ph / 2);
+      const yMax = String(comp.cy + ph / 2);
       const xMid = String(comp.cx);
       const yMid = String(comp.cy);
       const zStr = String(portZ_um);
