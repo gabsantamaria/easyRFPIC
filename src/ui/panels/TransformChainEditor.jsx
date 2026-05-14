@@ -26,12 +26,13 @@ function ExprField({ label, value, onChange, fieldKey, paramValues, commitExpr }
     <div className="flex-1 min-w-0">
       <label className="text-[9px] uppercase tracking-wider text-slate-500">{label}</label>
       <DeferredTextInput
+        autoGrow
         value={value ?? ''}
         onCommit={(v) => {
           onChange(v);
           commitExpr && commitExpr(v, '0', 'µm', `Auto-created (transform.${fieldKey})`);
         }}
-        className="w-full bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-[11px] font-mono text-white outline-none focus:border-cyan-400"
+        className="w-full bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-[11px] font-mono text-white outline-none focus:border-cyan-400 whitespace-pre-wrap break-words leading-tight"
         spellCheck={false}
       />
       <p className="text-[9px] text-slate-500 mt-0.5 font-mono">= {(() => {

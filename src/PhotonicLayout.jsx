@@ -3438,14 +3438,35 @@ export default function App() {
         {/* Row 1 — primary tools and identity */}
         <div className="flex items-center justify-between px-4 py-2">
           <div className="flex items-center gap-3">
-            <div className="w-7 h-7 rounded flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #3ec27a, #f4a72e)' }}>
-              <Box size={15} className="text-white" />
-            </div>
+            {/* Logo: a stylized photonic-RF IC — green waveguide running
+                horizontally through a slate chip outline, with a gold
+                meander electrode pair flanking it above and below. The
+                same glyph is in /public/favicon.svg at higher detail. */}
+            <svg viewBox="0 0 64 64" width="28" height="28" aria-hidden="true">
+              <rect x="2" y="2" width="60" height="60" rx="10" ry="10" fill="#0f172a" stroke="#334155" strokeWidth="1.5"/>
+              <path d="M 8 22 H 56" stroke="#daa520" strokeWidth="3" fill="none" strokeLinecap="round"/>
+              <g stroke="#daa520" strokeWidth="2" fill="none" strokeLinejoin="round">
+                <rect x="11" y="10" width="7" height="9"/>
+                <rect x="22" y="10" width="7" height="9"/>
+                <rect x="33" y="10" width="7" height="9"/>
+                <rect x="44" y="10" width="7" height="9"/>
+              </g>
+              <path d="M 8 42 H 56" stroke="#daa520" strokeWidth="3" fill="none" strokeLinecap="round"/>
+              <g stroke="#daa520" strokeWidth="2" fill="none" strokeLinejoin="round">
+                <rect x="11" y="45" width="7" height="9"/>
+                <rect x="22" y="45" width="7" height="9"/>
+                <rect x="33" y="45" width="7" height="9"/>
+                <rect x="44" y="45" width="7" height="9"/>
+              </g>
+              <path d="M 0 32 H 64" stroke="#10b981" strokeWidth="4" fill="none" strokeLinecap="round"/>
+              <path d="M 0 32 H 64" stroke="#34d399" strokeWidth="1.5" fill="none" strokeLinecap="round" opacity="0.8"/>
+            </svg>
             <div>
               <h1 className="font-bold tracking-tight text-sm" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
-                PHOTONIC<span className="text-emerald-400">·</span>LAYOUT
+                <span className="text-slate-100">MPL</span>{' '}
+                <span className="text-emerald-400">easy</span><span className="text-amber-500">RF</span><span className="text-cyan-300">PIC</span>
               </h1>
-              <p className="text-[10px] text-slate-400">parametric primitives · pyAEDT export</p>
+              <p className="text-[10px] text-slate-400">parametric photonic-RF IC layout · pyAEDT &amp; native HFSS export</p>
             </div>
           </div>
           <div className="flex items-center gap-1">
@@ -4425,11 +4446,11 @@ export default function App() {
                     <div className="grid grid-cols-2 gap-1 mt-1">
                       <div>
                         <label className="text-[9px] text-slate-500">dx</label>
-                        <DeferredTextInput value={s.dx} onCommit={(v) => updateSnap(s.id, { dx: v })} className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-white outline-none focus:border-cyan-400" />
+                        <DeferredTextInput autoGrow value={s.dx} onCommit={(v) => updateSnap(s.id, { dx: v })} className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-white outline-none focus:border-cyan-400 whitespace-pre-wrap break-words leading-tight" spellCheck={false} />
                       </div>
                       <div>
                         <label className="text-[9px] text-slate-500">dy</label>
-                        <DeferredTextInput value={s.dy} onCommit={(v) => updateSnap(s.id, { dy: v })} className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-white outline-none focus:border-cyan-400" />
+                        <DeferredTextInput autoGrow value={s.dy} onCommit={(v) => updateSnap(s.id, { dy: v })} className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-white outline-none focus:border-cyan-400 whitespace-pre-wrap break-words leading-tight" spellCheck={false} />
                       </div>
                     </div>
                   </div>
@@ -4871,12 +4892,14 @@ export default function App() {
                       <div>
                         <label className="text-[10px] uppercase tracking-wider text-slate-500">{label}</label>
                         <DeferredTextInput
+                          autoGrow
                           value={value}
                           onCommit={(v) => {
                             onChange(v);
                             commitExpr(v, '1', 'µm', `Auto-created (${selected.id}.${key})`);
                           }}
-                          className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-white outline-none focus:border-cyan-400"
+                          className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-white outline-none focus:border-cyan-400 whitespace-pre-wrap break-words leading-tight"
+                          spellCheck={false}
                         />
                         <p className="text-[9px] text-slate-500 mt-0.5 font-mono">= {(() => {
                           const v = evalExpr(value, paramValues);

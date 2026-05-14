@@ -28,6 +28,11 @@ export function DeferredTextInput({
   // draft on commit (falling back to 0 for empty / NaN). Used for the
   // cx/cy numeric inputs.
   numeric = false,
+  // Auto-grow: on focus, expand the box to fit content (single-line when
+  // unfocused, multi-line wrap when active). Forces `as='textarea'` so the
+  // element type doesn't swap mid-edit (which would remount and reset the
+  // caret). Same UX as the expression field in the PARAMS panel.
+  autoGrow = false,
   ...rest
 }) {
   // The draft is the string the user is currently editing. We always hold
@@ -56,11 +61,35 @@ export function DeferredTextInput({
     }
   };
 
-  const Element = as === 'textarea' ? 'textarea' : 'input';
+  // autoGrow implies textarea so the element doesn't swap tag types on
+  // focus (which would remount, dropping the caret position).
+  const effectiveAs = autoGrow ? 'textarea' : as;
+  const Element = effectiveAs === 'textarea' ? 'textarea' : 'input';
+  const taRef = useRef(null);
+  const [focused, setFocused] = useState(false);
+
+  // Auto-grow: while focused, expand the textarea's height to fit content
+  // (capped at 240px so very long expressions don't push the panel off
+  // screen). Reset to a single-line height when unfocused.
+  useEffect(() => {
+    if (!autoGrow) return;
+    const el = taRef.current;
+    if (!el) return;
+    if (focused) {
+      el.style.height = 'auto';
+      el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
+    } else {
+      el.style.height = '';
+    }
+  }, [autoGrow, focused, draft]);
 
   return (
     <Element
       {...rest}
+      ref={autoGrow ? taRef : rest.ref}
+      // For autoGrow, rows=1 so the textarea LOOKS like a single-line input
+      // until focused. The effect above bumps height while focused.
+      {...(autoGrow ? { rows: 1, style: { resize: 'none', ...(rest.style || {}) } } : {})}
       value={draft}
       onChange={(e) => {
         setDraft(e.target.value);
@@ -68,17 +97,19 @@ export function DeferredTextInput({
       }}
       onFocus={(e) => {
         focusedRef.current = true;
+        if (autoGrow) setFocused(true);
         onFocusProp?.(e);
       }}
       onBlur={(e) => {
         focusedRef.current = false;
+        if (autoGrow) setFocused(false);
         commit(e);
         onBlurProp?.(e);
       }}
       onKeyDown={(e) => {
         // For <textarea>, plain Enter inserts a newline; only commit on
         // Enter when Shift isn't held. For <input>, Enter always commits.
-        const isTextarea = as === 'textarea';
+        const isTextarea = effectiveAs === 'textarea';
         if (e.key === 'Enter' && (!isTextarea || !e.shiftKey)) {
           e.preventDefault();
           e.target.blur();

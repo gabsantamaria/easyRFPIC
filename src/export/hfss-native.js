@@ -605,6 +605,28 @@ def _delete_boundary_if_exists(name):
     except:
         pass
 
+def _delete_cs_if_exists(name):
+    # Delete a relative coordinate system if it exists. Re-running the
+    # script in APPEND mode would otherwise fail on "CS already exists"
+    # when CreateRelativeCS is called again. Each waveguide emits its
+    # own CS named "<wg_id>_cs" near the top of the rib.
+    if not APPEND_MODE:
+        return
+    try:
+        existing = list(oEditor.GetCoordinateSystems())
+    except:
+        existing = []
+    if name not in existing:
+        return
+    # CSes are deleted via oEditor.Delete with the CS name in the
+    # Selections list. If that API differs on your HFSS version, the
+    # try/except around CreateRelativeCS will still let the script
+    # continue — the existing CS stays at its prior position.
+    try:
+        oEditor.Delete(["NAME:Selections", "Selections:=", name])
+    except:
+        pass
+
 # Wrap CreateBox so one bad call doesn't abort the whole script.
 def safe_create_box(box_params, attributes, name):
     _delete_geom_if_exists(name)
@@ -1068,6 +1090,46 @@ except Exception as e:
 except Exception as e:
     try:
         oDesktop.AddMessage("", "", 1, "Failed to build rib WG ${wgName}: " + str(e))
+    except:
+        pass
+`;
+
+      // ── Relative coordinate system at one end of the waveguide ────────
+      // For each rib waveguide, emit an HFSS Relative CS whose origin
+      // sits centered on the ridge cross-section at the START end of the
+      // WG, just above the slab (z = wgZ + slab_height). The local X-axis
+      // runs along the waveguide direction; local Y is the in-plane
+      // perpendicular (the rib's width direction); local Z is the chip
+      // out-of-plane direction (= global Z). Useful as a base for ports,
+      // mode integration lines, field probes, anchor points for spline
+      // bends, etc. Created in a try/except so it doesn't fail the script
+      // if a CS with the same name already exists (re-run protection).
+      const csName = `${id}_cs`;
+      const csOriginXExpr = (axis === 'x') ? `(${cxExprUm}) - (${wExprUm})/2` : cxExprUm;
+      const csOriginYExpr = (axis === 'y') ? `(${cyExprUm}) - (${hExprUm})/2` : cyExprUm;
+      const csOriginZExpr = `${(wgZ + safeSlabH).toFixed(4)}um`;
+      // X-axis unit vector along the WG axis; Y-axis perpendicular in-plane
+      // (right-handed so Z stays out of plane).
+      const csXAxis = axis === 'x' ? [1, 0, 0] : [0, 1, 0];
+      const csYAxis = axis === 'x' ? [0, 1, 0] : [-1, 0, 0];
+      code += `try:
+    _delete_cs_if_exists("${csName}")
+    oEditor.CreateRelativeCS(
+        ["NAME:RelativeCSParameters",
+         "Mode:=", "Axis/Position",
+         "OriginX:=", "${csOriginXExpr}",
+         "OriginY:=", "${csOriginYExpr}",
+         "OriginZ:=", "${csOriginZExpr}",
+         "XAxisXvec:=", "${csXAxis[0]}",
+         "XAxisYvec:=", "${csXAxis[1]}",
+         "XAxisZvec:=", "${csXAxis[2]}",
+         "YAxisXvec:=", "${csYAxis[0]}",
+         "YAxisYvec:=", "${csYAxis[1]}",
+         "YAxisZvec:=", "${csYAxis[2]}"],
+        ["NAME:Attributes", "Name:=", "${csName}"])
+except Exception as e:
+    try:
+        oDesktop.AddMessage("", "", 1, "Failed to create relative CS ${csName}: " + str(e))
     except:
         pass
 `;
