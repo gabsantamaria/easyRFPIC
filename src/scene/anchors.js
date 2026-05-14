@@ -45,6 +45,17 @@ export function anchorLocal(anchorName, w, h) {
 }
 
 export function anchorWorld(comp, anchorName, paramValues) {
+  // For booleans with a transform chain, `displayBbox` carries the post-
+  // transform AABB (the visible footprint of the rotated/replicated
+  // cluster). Snaps targeting such a boolean should land on its visible
+  // perimeter, not the pre-transform operand AABB — otherwise dragging an
+  // object onto a rotated meander's "top-right corner" would snap to a
+  // point that's nowhere near the visible cluster.
+  if (comp.displayBbox) {
+    const { cx, cy, w, h } = comp.displayBbox;
+    const local = anchorLocal(anchorName, w, h);
+    return { x: cx + local.x, y: cy + local.y };
+  }
   // Accept already-resolved numeric w/h (booleans pre-computed by
   // solveLayout) as well as expression-string w/h (primitives).
   const w = typeof comp.w === 'number' ? comp.w : evalExpr(comp.w, paramValues);

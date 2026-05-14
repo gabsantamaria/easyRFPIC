@@ -381,6 +381,62 @@ export function resolveBooleanBboxes(solved, paramValues) {
       c.cy = (minY + maxY) / 2;
       c.w = (maxX - minX);
       c.h = (maxY - minY);
+      // ── POST-TRANSFORM AABB (display + snap targeting) ─────────────────
+      // If the boolean carries a transform chain (e.g. repeat + rotate),
+      // its visible footprint after transforms is different from the
+      // pre-transform operand AABB just set. We expand the chain and take
+      // the union AABB across all rendered instances, accounting for each
+      // instance's rotation. The result is stored as `displayBbox` on the
+      // solved record — `{cx, cy, w, h}` of the rotated/replicated cluster.
+      //
+      // Downstream consumers prefer displayBbox over the bare cx/cy/w/h:
+      //   - anchor dots (snap-mode) sit on the rotated cluster's AABB edges
+      //   - the selection-halo bbox encloses the visible footprint
+      //   - new snaps from/to this boolean compute offsets against the
+      //     post-transform anchor world positions
+      //   - anchorWorld treats displayBbox as the canonical world bbox.
+      //
+      // We do NOT overwrite cx/cy/w/h directly because the canvas's
+      // boolean renderer expects them to be the PRE-transform centroid:
+      // operand positions are pre-transform, and the per-instance override
+      // math (buildBoolInstanceOverrides) computes operand offsets from
+      // the pre-transform centroid. Storing the post-transform bbox in a
+      // separate field keeps both consumers correct.
+      if (c.transforms && c.transforms.some(t => t && t.enabled !== false)) {
+        const insts = expandTransforms([c], paramValues);
+        if (insts.length > 0) {
+          const baseW = c.w, baseH = c.h;
+          let pMinX = Infinity, pMaxX = -Infinity, pMinY = Infinity, pMaxY = -Infinity;
+          for (const inst of insts) {
+            const halfW = baseW / 2, halfH = baseH / 2;
+            let corners = [
+              [-halfW, -halfH], [halfW, -halfH],
+              [halfW, halfH], [-halfW, halfH],
+            ];
+            const rot = inst.rotation || 0;
+            if (Math.abs(rot) > 1e-9) {
+              const rad = rot * Math.PI / 180;
+              const ca = Math.cos(rad), sa = Math.sin(rad);
+              corners = corners.map(([lx, ly]) => [lx * ca - ly * sa, lx * sa + ly * ca]);
+            }
+            for (const [lx, ly] of corners) {
+              const x = inst.cx + lx, y = inst.cy + ly;
+              if (x < pMinX) pMinX = x;
+              if (x > pMaxX) pMaxX = x;
+              if (y < pMinY) pMinY = y;
+              if (y > pMaxY) pMaxY = y;
+            }
+          }
+          if (Number.isFinite(pMinX)) {
+            c.displayBbox = {
+              cx: (pMinX + pMaxX) / 2,
+              cy: (pMinY + pMaxY) / 2,
+              w: pMaxX - pMinX,
+              h: pMaxY - pMinY,
+            };
+          }
+        }
+      }
       resolved.add(c.id);
       progress = true;
     }

@@ -2008,7 +2008,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           // for each rendered copy; the first entry is the un-shifted base.
           // No transforms ⇒ single entry equal to the base.
           const insts = instancesByCompId[b.id] || [{ cx: baseCx, cy: baseCy, idx: 0, rotation: 0 }];
-          return insts.map((inst, i) => {
+          const elements = insts.map((inst, i) => {
             const overrides = buildBoolInstanceOverrides(b, inst, baseCx, baseCy);
             const isBase = i === 0;
             return (
@@ -2023,13 +2023,34 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                 </g>
                 {/* (2) Result outline — recursive perimeter in op accent. */}
                 {renderOutline(b, accent, outlineW, `bool-out-${b.id}-${i}`, overrides)}
-                {/* (3) Selection halo — drawn on the BASE instance only, so
-                    selection reads as the boolean as a whole rather than
-                    every duplicate flashing cyan. */}
-                {isSelected && isBase && renderOutline(b, haloColor, haloW, `bool-halo-${b.id}-${i}`, overrides)}
               </g>
             );
           });
+          // Selection halo: a single AXIS-ALIGNED bbox around the whole
+          // cluster (post-transform footprint when displayBbox is set, the
+          // pre-transform operand AABB otherwise). One rectangle reads as
+          // "this boolean is selected" without making every duplicate
+          // flash cyan — which was confusing when the chain repeated.
+          if (isSelected) {
+            const halo = solvedB.displayBbox || { cx: solvedB.cx, cy: solvedB.cy, w: solvedB.w, h: solvedB.h };
+            if (Number.isFinite(halo.w) && Number.isFinite(halo.h) && halo.w > 0 && halo.h > 0) {
+              elements.push(
+                <rect
+                  key={`bool-halo-${b.id}`}
+                  x={halo.cx - halo.w / 2}
+                  y={-(halo.cy + halo.h / 2)}
+                  width={halo.w}
+                  height={halo.h}
+                  fill="none"
+                  stroke={haloColor}
+                  strokeWidth={haloW}
+                  strokeDasharray={`${HALO_W * 1.6},${HALO_W * 1.1}`}
+                  pointerEvents="none"
+                />
+              );
+            }
+          }
+          return elements;
         });
       })()}
 
@@ -2046,7 +2067,16 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // numeric dimensions written by solveLayout/refreshBooleanBbox.
         // Without this, the placeholder strings evaluate to zero and the
         // anchor dots either don't render or all stack at (0, 0).
-        const b = solved.find(c => c.id === bScene.id) || bScene;
+        const bSolved = solved.find(c => c.id === bScene.id) || bScene;
+        // If the boolean carries transforms, `displayBbox` holds the
+        // post-transform AABB — the visible footprint of the rotated /
+        // repeated cluster. Anchor dots should sit on THAT bbox so the
+        // user can snap something else to (e.g.) the rotated meander's
+        // top-right corner. Fall back to the raw cx/cy/w/h for plain
+        // booleans without transforms.
+        const b = bSolved.displayBbox
+          ? { id: bScene.id, cx: bSolved.displayBbox.cx, cy: bSolved.displayBbox.cy, w: bSolved.displayBbox.w, h: bSolved.displayBbox.h }
+          : bSolved;
         const w = typeof b.w === 'string' ? evalExpr(b.w, paramValues) : b.w;
         const h = typeof b.h === 'string' ? evalExpr(b.h, paramValues) : b.h;
         if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return null;
