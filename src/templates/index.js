@@ -12,9 +12,11 @@
 import racetrack from './racetrack.js';
 import ringResonator from './ring-resonator.js';
 import meanderElectrode from './meander-electrode.js';
+import meanderElectrodeHorizontal from './meander-electrode-horizontal.js';
 
 export const BUILTIN_TEMPLATES = [
   racetrack,
   ringResonator,
   meanderElectrode,
+  meanderElectrodeHorizontal,
 ];
