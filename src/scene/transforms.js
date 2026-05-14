@@ -13,9 +13,20 @@
 //   { kind: 'repeat',    enabled, n, dx, dy, includeOriginal }     — emits N additional copies
 //                          along the (dx, dy) vector. If includeOriginal is false,
 //                          the base instance is dropped (the chain produces only the copies).
+//   { kind: 'mirror',    enabled, axis, pivot }                    — reflects each instance
+//                          across a line through `pivot` perpendicular to `axis`. axis is
+//                          'x' (vertical mirror line, flips x) or 'y' (horizontal, flips y).
+//                          pivot is 'C' (instance's own center, default) or 'origin'.
+//                          Toggles instance.scaleX/scaleY and negates rotation.
+//   { kind: 'duplicate_mirror', enabled, axis, offset, includeOriginal }
+//                          emits one mirrored copy. The mirror line sits at `offset` from
+//                          the source instance's center along `axis` (so the duplicate's
+//                          center lands at +2*offset from the source). Useful for symmetric
+//                          structures like top/bottom electrode pairs.
 //
 // Returns { instances: [...] } where each instance has:
-//   { compId, idx, cx, cy, w, h, rotation, transformPath }
+//   { compId, idx, cx, cy, w, h, rotation, scaleX, scaleY, transformPath }
+// scaleX / scaleY are ±1 (default 1); -1 means the shape is mirror-flipped along that axis.
 // `idx` is a 0-based index into the component's instance list (0 = base/first).
 // `transformPath` is a string like '#0' or '#3' identifying which copy this is,
 // useful for keying SVG elements.
@@ -57,12 +68,13 @@ export function expandTransforms(components, paramValues) {
     }
     if (!Number.isFinite(w) || !Number.isFinite(h)) {
       // Skip degenerate components — keeps render path tolerant.
-      instances.push({ compId: c.id, idx: 0, kind, cx: c.cx, cy: c.cy, w: 0, h: 0, rotation: 0, transformPath: '#0', ...shapeFields });
+      instances.push({ compId: c.id, idx: 0, kind, cx: c.cx, cy: c.cy, w: 0, h: 0, rotation: 0, scaleX: 1, scaleY: 1, transformPath: '#0', ...shapeFields });
       continue;
     }
     // Start with a single-instance list. Each ENABLED transform either
     // mutates each instance in place, or extends the list (repeat).
-    let stream = [{ cx: c.cx, cy: c.cy, w, h, rotation: 0, ...shapeFields }];
+    // scaleX / scaleY default to 1; mirror transforms flip them to -1.
+    let stream = [{ cx: c.cx, cy: c.cy, w, h, rotation: 0, scaleX: 1, scaleY: 1, ...shapeFields }];
     for (const t of (c.transforms || [])) {
       if (!t || t.enabled === false) continue;
       if (t.kind === 'displace') {
@@ -190,6 +202,58 @@ export function expandTransforms(components, paramValues) {
           }
         }
         stream = next;
+      } else if (t.kind === 'mirror') {
+        // Reflect each instance across a line through `pivot`, perpendicular
+        // to `axis`. axis='x' flips x (vertical mirror line); axis='y' flips y.
+        // Rendering pipeline applies scale before rotation, so mirroring the
+        // visible (already-rotated) shape needs to ALSO negate the rotation
+        // field — derived from composing the mirror matrix with the existing
+        // rotation matrix (worked out in the matching comment in rings.js).
+        const axis = t.axis === 'y' ? 'y' : 'x';
+        const pivot = t.pivot === 'origin' ? 'origin' : 'C';
+        stream = stream.map(inst => {
+          const sx = inst.scaleX ?? 1;
+          const sy = inst.scaleY ?? 1;
+          const newSx = axis === 'x' ? -sx : sx;
+          const newSy = axis === 'y' ? -sy : sy;
+          let newCx = inst.cx, newCy = inst.cy;
+          if (pivot === 'origin') {
+            if (axis === 'x') newCx = -inst.cx;
+            else newCy = -inst.cy;
+          }
+          // pivot='C': mirror about the instance's own center → cx/cy unchanged.
+          return {
+            ...inst,
+            cx: newCx, cy: newCy,
+            rotation: -(inst.rotation || 0),
+            scaleX: newSx, scaleY: newSy,
+          };
+        });
+      } else if (t.kind === 'duplicate_mirror') {
+        // Emit one mirrored copy per existing instance. The mirror line sits
+        // at `offset` from the source instance's center along `axis`; the
+        // duplicate's center lands at +2*offset from the source. Useful for
+        // top/bottom or left/right symmetric pairs — e.g. a meander and its
+        // mirror image across a feed-trace axis.
+        const axis = t.axis === 'y' ? 'y' : 'x';
+        const offsetNum = evalExpr(t.offset ?? '0', paramValues);
+        if (!Number.isFinite(offsetNum)) continue;
+        const includeOriginal = t.includeOriginal !== false;
+        const next = [];
+        for (const inst of stream) {
+          if (includeOriginal) next.push(inst);
+          const sx = inst.scaleX ?? 1;
+          const sy = inst.scaleY ?? 1;
+          next.push({
+            ...inst,
+            cx: axis === 'x' ? inst.cx + 2 * offsetNum : inst.cx,
+            cy: axis === 'y' ? inst.cy + 2 * offsetNum : inst.cy,
+            rotation: -(inst.rotation || 0),
+            scaleX: axis === 'x' ? -sx : sx,
+            scaleY: axis === 'y' ? -sy : sy,
+          });
+        }
+        stream = next;
       }
       // Unknown kinds are silently ignored — defensive against future schema.
     }
@@ -199,6 +263,8 @@ export function expandTransforms(components, paramValues) {
         kind,
         cx: inst.cx, cy: inst.cy, w: inst.w, h: inst.h,
         rotation: inst.rotation,
+        scaleX: inst.scaleX ?? 1,
+        scaleY: inst.scaleY ?? 1,
         transformPath: `#${idx}`,
       };
       // Carry shape-specific numeric fields through (r, rx, ry, n,

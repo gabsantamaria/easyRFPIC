@@ -1339,6 +1339,85 @@ except Exception as e:
         // original part's location, matching the canvas semantics.
         curCx += nNum * dxNum / 2;
         curCy += nNum * dyNum / 2;
+      } else if (t.kind === 'mirror') {
+        // oEditor.Mirror flips the selection across a plane defined by a
+        // base point + normal vector. axis='x' ⇒ normal=(1,0,0) (mirror
+        // line is vertical, parallel to Y); axis='y' ⇒ normal=(0,1,0).
+        const axis = t.axis === 'y' ? 'y' : 'x';
+        const pivot = t.pivot === 'origin' ? 'origin' : 'C';
+        const baseX = pivot === 'origin' ? 0 : curCx;
+        const baseY = pivot === 'origin' ? 0 : curCy;
+        const nx = axis === 'x' ? 1 : 0;
+        const ny = axis === 'y' ? 1 : 0;
+        code += `try:
+    oEditor.Mirror(
+        ["NAME:Selections", "Selections:=", "${selStr}", "NewPartsModelFlag:=", "Model"],
+        ["NAME:MirrorParameters",
+         "MirrorBaseX:=", "${baseX.toFixed(4)}um",
+         "MirrorBaseY:=", "${baseY.toFixed(4)}um",
+         "MirrorBaseZ:=", "0um",
+         "MirrorNormalX:=", "${nx}",
+         "MirrorNormalY:=", "${ny}",
+         "MirrorNormalZ:=", "0"])
+except Exception as e:
+    oDesktop.AddMessage("", "", 1, "Mirror failed for ${selStr}: " + str(e))
+`;
+        // Centroid invariance: mirror about own center keeps the centroid;
+        // mirror about origin negates the coordinate along the axis.
+        if (pivot === 'origin') {
+          if (axis === 'x') curCx = -curCx;
+          else curCy = -curCy;
+        }
+        curRotation = -curRotation;
+      } else if (t.kind === 'duplicate_mirror') {
+        // oEditor.DuplicateMirror emits one mirrored copy. The mirror
+        // plane is placed at distance `offset` from the source center
+        // along the chosen axis, so the duplicate's center lands at
+        // 2·offset from the source — matching the canvas semantics.
+        const axis = t.axis === 'y' ? 'y' : 'x';
+        const offsetNum = evalExpr(t.offset ?? '0', paramValues);
+        if (!Number.isFinite(offsetNum)) continue;
+        const offsetExpr = (typeof t.offset === 'string' && /[A-Za-z_]/.test(t.offset))
+          ? ascii(t.offset)
+          : `${offsetNum.toFixed(4)}um`;
+        // Mirror plane base point: current centroid + offset along axis.
+        const baseXExpr = axis === 'x'
+          ? `${curCx.toFixed(4)}um + (${offsetExpr})`
+          : `${curCx.toFixed(4)}um`;
+        const baseYExpr = axis === 'y'
+          ? `${curCy.toFixed(4)}um + (${offsetExpr})`
+          : `${curCy.toFixed(4)}um`;
+        const nx = axis === 'x' ? 1 : 0;
+        const ny = axis === 'y' ? 1 : 0;
+        code += `try:
+    oEditor.DuplicateMirror(
+        ["NAME:Selections", "Selections:=", "${selStr}", "NewPartsModelFlag:=", "Model"],
+        ["NAME:DuplicateToMirrorParameters",
+         "DuplicateMirrorBaseX:=", "${baseXExpr}",
+         "DuplicateMirrorBaseY:=", "${baseYExpr}",
+         "DuplicateMirrorBaseZ:=", "0um",
+         "DuplicateMirrorNormalX:=", "${nx}",
+         "DuplicateMirrorNormalY:=", "${ny}",
+         "DuplicateMirrorNormalZ:=", "0"],
+        ["NAME:Options", "DuplicateAssignments:=", False],
+        ["CreateGroupsForNewObjects:=", False])
+except Exception as e:
+    oDesktop.AddMessage("", "", 1, "DuplicateMirror failed for ${selStr}: " + str(e))
+`;
+        if (t.includeOriginal === false) {
+          code += `# NOTE: 'includeOriginal=false' on canvas; HFSS keeps the original. Delete ${partIds[0]} manually if needed.\n`;
+        }
+        // Extend the active selection with the mirrored copies. HFSS's
+        // DuplicateMirror names them `{base}_1` per base, same convention
+        // as DuplicateAlongLine.
+        const newNames = activePartIds.map(b => `${b}_1`);
+        activePartIds = [...activePartIds, ...newNames];
+        selStr = activePartIds.join(',');
+        // Advance tracked centroid to the cluster centroid (midpoint of
+        // source and its mirror). For axis='x' offset, the cluster's new
+        // centroid is shifted by `offset` along x.
+        if (axis === 'x') curCx += offsetNum;
+        else curCy += offsetNum;
       }
     }
   };

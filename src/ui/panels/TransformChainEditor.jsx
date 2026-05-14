@@ -12,7 +12,7 @@
 //
 // Extracted from PhotonicLayout.jsx as Stage 4.7 of the planned refactor.
 import React from 'react';
-import { Move, RotateCw, Repeat, Trash2, Eye, EyeOff, ArrowUp, ArrowDown } from 'lucide-react';
+import { Move, RotateCw, Repeat, Trash2, Eye, EyeOff, ArrowUp, ArrowDown, FlipHorizontal, FlipVertical, Copy } from 'lucide-react';
 import { evalExpr } from '../../scene/params.js';
 import { DeferredTextInput } from '../DeferredTextInput.jsx';
 
@@ -55,6 +55,8 @@ function TransformRow({
   const kindColor = t.kind === 'displace' ? '#0ea5e9'
     : t.kind === 'rotate' ? '#a855f7'
     : t.kind === 'repeat' ? '#22c55e'
+    : t.kind === 'mirror' ? '#f97316'
+    : t.kind === 'duplicate_mirror' ? '#fb923c'
     : '#94a3b8';
   return (
     <div className={`rounded border p-1.5 mb-1 ${dimClass}`} style={{ borderColor: kindColor + '60', background: 'rgba(15,23,42,0.4)' }}>
@@ -128,6 +130,58 @@ function TransformRow({
           </label>
         </div>
       )}
+      {t.kind === 'mirror' && (
+        <div className="flex gap-1.5">
+          <div className="flex-1 min-w-0">
+            <label className="text-[9px] uppercase tracking-wider text-slate-500">axis</label>
+            <select
+              value={t.axis || 'x'}
+              onChange={(e) => onUpdate({ axis: e.target.value })}
+              className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[11px] font-mono text-white outline-none focus:border-orange-400"
+            >
+              <option value="x">x (flip x — vertical mirror line)</option>
+              <option value="y">y (flip y — horizontal mirror line)</option>
+            </select>
+          </div>
+          <div className="flex-1 min-w-0">
+            <label className="text-[9px] uppercase tracking-wider text-slate-500">pivot</label>
+            <select
+              value={t.pivot || 'C'}
+              onChange={(e) => onUpdate({ pivot: e.target.value })}
+              className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[11px] font-mono text-white outline-none focus:border-orange-400"
+            >
+              <option value="C">C (own center)</option>
+              <option value="origin">world origin</option>
+            </select>
+            <p className="text-[9px] text-slate-500 mt-0.5">mirror line position</p>
+          </div>
+        </div>
+      )}
+      {t.kind === 'duplicate_mirror' && (
+        <div className="space-y-1">
+          <div className="flex gap-1.5">
+            <div className="flex-1 min-w-0">
+              <label className="text-[9px] uppercase tracking-wider text-slate-500">axis</label>
+              <select
+                value={t.axis || 'x'}
+                onChange={(e) => onUpdate({ axis: e.target.value })}
+                className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[11px] font-mono text-white outline-none focus:border-orange-400"
+              >
+                <option value="x">x (mirror along ±x)</option>
+                <option value="y">y (mirror along ±y)</option>
+              </select>
+            </div>
+            <ExprField label="offset (to mirror line)" value={t.offset} onChange={(v) => onUpdate({ offset: v })} fieldKey="offset" paramValues={paramValues} commitExpr={commitExpr} />
+          </div>
+          <p className="text-[9px] text-slate-500 leading-snug">
+            Mirror line sits at <span className="font-mono">offset</span> from source center; duplicate lands at <span className="font-mono">+2·offset</span>.
+          </p>
+          <label className="flex items-center gap-1 text-[10px] text-slate-400">
+            <input type="checkbox" checked={t.includeOriginal !== false} onChange={(e) => onUpdate({ includeOriginal: e.target.checked })} />
+            keep the original
+          </label>
+        </div>
+      )}
     </div>
   );
 }
@@ -145,6 +199,8 @@ export function TransformChainEditor({ component, onUpdateComp, paramValues, com
     // an ungrouped component this falls back to pivot='C' (own center).
     else if (kind === 'rotate') t = { id, kind, enabled: true, angle: '0', pivot: isGrouped ? 'group' : 'C' };
     else if (kind === 'repeat') t = { id, kind, enabled: true, n: '1', dx: '0', dy: '0', includeOriginal: true };
+    else if (kind === 'mirror') t = { id, kind, enabled: true, axis: 'x', pivot: 'C' };
+    else if (kind === 'duplicate_mirror') t = { id, kind, enabled: true, axis: 'x', offset: '0', includeOriginal: true };
     setTransforms([...transforms, t]);
   };
   const updateTransform = (idx, patch) => {
@@ -186,10 +242,24 @@ export function TransformChainEditor({ component, onUpdateComp, paramValues, com
           >
             <Repeat size={10} /> repeat
           </button>
+          <button
+            onClick={() => addTransform('mirror')}
+            className="flex items-center gap-1 px-1.5 py-0.5 rounded border border-slate-600 hover:border-orange-400 text-[10px] text-slate-300 hover:text-orange-300"
+            title="Add a mirror transform: reflects the shape across a vertical (axis=x) or horizontal (axis=y) mirror line through its own center."
+          >
+            <FlipHorizontal size={10} /> mirror
+          </button>
+          <button
+            onClick={() => addTransform('duplicate_mirror')}
+            className="flex items-center gap-1 px-1.5 py-0.5 rounded border border-slate-600 hover:border-orange-400 text-[10px] text-slate-300 hover:text-orange-300"
+            title="Add a duplicate-and-mirror transform: emits one mirrored copy offset by 2·offset from the source along the chosen axis. Useful for top/bottom or left/right symmetric pairs."
+          >
+            <Copy size={10} /> dup-mirror
+          </button>
         </div>
       </div>
       {transforms.length === 0 ? (
-        <p className="text-[10px] text-slate-500 italic">No transforms applied. Add one above to displace, rotate, or repeat this rectangle. Transforms apply in order; toggle the eye icon to suppress one without losing its parameters.</p>
+        <p className="text-[10px] text-slate-500 italic">No transforms applied. Add one above to displace, rotate, repeat, or mirror this shape. Transforms apply in order; toggle the eye icon to suppress one without losing its parameters.</p>
       ) : (
         <div>
           {transforms.map((t, i) => (

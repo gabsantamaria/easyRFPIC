@@ -16,6 +16,14 @@ const CIRCLE_TESSELATION = 64;
 
 // Convert an axis-aligned-or-rotated rectangle (cx, cy, w, h, rotation)
 // to a 4-point polygon ring in world coordinates.
+// Composition order (scale → rotate → translate): scaleX/scaleY are
+// applied to the local-space corners first so that mirroring an
+// already-rotated shape produces the geometric mirror image rather
+// than a different rotation angle. Mathematically, mirroring a rotated
+// rect at angle θ is equivalent to taking the mirrored corners at
+// angle -θ — and `expandTransforms` already negates the rotation field
+// when a mirror transform fires, so applying scale-first here gives
+// the right pixels (see the matching comment in transforms.js).
 export function rectInstanceToRing(inst) {
   const halfW = inst.w / 2;
   const halfH = inst.h / 2;
@@ -23,6 +31,11 @@ export function rectInstanceToRing(inst) {
     [-halfW, -halfH], [halfW, -halfH],
     [halfW, halfH], [-halfW, halfH],
   ];
+  const sx = inst.scaleX ?? 1;
+  const sy = inst.scaleY ?? 1;
+  if (sx !== 1 || sy !== 1) {
+    corners = corners.map(([lx, ly]) => [lx * sx, ly * sy]);
+  }
   const rot = inst.rotation || 0;
   if (Math.abs(rot) > 1e-9) {
     const rad = rot * Math.PI / 180;
@@ -49,10 +62,19 @@ export function shapeInstanceToRing(inst) {
   const rot = inst.rotation || 0;
   const rad = rot * Math.PI / 180;
   const ca = Math.cos(rad), sa = Math.sin(rad);
-  const xform = (lx, ly) => [
-    inst.cx + lx * ca - ly * sa,
-    inst.cy + lx * sa + ly * ca,
-  ];
+  // scaleX/scaleY (±1; default 1) implement mirror transforms. We apply
+  // them in local space BEFORE the rotation so that mirroring a rotated
+  // shape produces its geometric mirror image. See the matching comment
+  // on rectInstanceToRing above.
+  const sx = inst.scaleX ?? 1;
+  const sy = inst.scaleY ?? 1;
+  const xform = (lx, ly) => {
+    const mx = lx * sx, my = ly * sy;
+    return [
+      inst.cx + mx * ca - my * sa,
+      inst.cy + mx * sa + my * ca,
+    ];
+  };
   if (kind === 'circle') {
     const r = Number.isFinite(inst.r) ? inst.r : 0;
     const out = [];

@@ -160,6 +160,64 @@ describe('expandTransforms', () => {
     for (const i of insts) expect(i.rotation).toBe(90);
   });
 
+  it('mirror about own center keeps cx/cy, flips scaleX/scaleY, negates rotation', () => {
+    const insts = expandTransforms([
+      baseRect({
+        cx: 5, cy: 7,
+        transforms: [
+          { kind: 'rotate', enabled: true, angle: '30', pivot: 'C' },
+          { kind: 'mirror', enabled: true, axis: 'x', pivot: 'C' },
+        ],
+      }),
+    ], {});
+    expect(insts).toHaveLength(1);
+    expect(insts[0].cx).toBe(5);
+    expect(insts[0].cy).toBe(7);
+    expect(insts[0].scaleX).toBe(-1);
+    expect(insts[0].scaleY).toBe(1);
+    expect(insts[0].rotation).toBe(-30);
+  });
+
+  it('mirror about origin negates the relevant coordinate', () => {
+    const insts = expandTransforms([
+      baseRect({
+        cx: 5, cy: 7,
+        transforms: [{ kind: 'mirror', enabled: true, axis: 'y', pivot: 'origin' }],
+      }),
+    ], {});
+    expect(insts[0].cx).toBe(5);
+    expect(insts[0].cy).toBe(-7);
+    expect(insts[0].scaleY).toBe(-1);
+  });
+
+  it('duplicate_mirror emits one mirrored copy at 2·offset', () => {
+    const insts = expandTransforms([
+      baseRect({
+        cx: 10, cy: 0,
+        transforms: [{ kind: 'duplicate_mirror', enabled: true, axis: 'x', offset: '25', includeOriginal: true }],
+      }),
+    ], {});
+    expect(insts).toHaveLength(2);
+    expect(insts[0].cx).toBe(10);
+    expect(insts[0].scaleX).toBe(1);
+    expect(insts[1].cx).toBe(60); // 10 + 2*25
+    expect(insts[1].scaleX).toBe(-1);
+    expect(insts[1].cy).toBe(0);
+  });
+
+  it('duplicate_mirror with includeOriginal=false drops the source', () => {
+    const insts = expandTransforms([
+      baseRect({
+        cx: 0, cy: 0,
+        transforms: [{ kind: 'duplicate_mirror', enabled: true, axis: 'y', offset: '15', includeOriginal: false }],
+      }),
+    ], {});
+    expect(insts).toHaveLength(1);
+    expect(insts[0].cx).toBe(0);
+    expect(insts[0].cy).toBe(30);
+    expect(insts[0].scaleY).toBe(-1);
+  });
+
   it('rotate with pivot=group on an ungrouped component falls back to pivot=C', () => {
     // No `group` field set ⇒ the 'group' pivot can't find members and
     // degrades to plain rotate-in-place semantics.

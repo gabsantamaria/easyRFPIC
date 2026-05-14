@@ -289,6 +289,45 @@ def build_wg(name, cx, cy, w, h):
         // the HFSS-native exporter.
         curCx += nNum * dxNum / 2;
         curCy += nNum * dyNum / 2;
+      } else if (t.kind === 'mirror') {
+        // pyAEDT mirror: reflects the selection across a plane defined by
+        // a base point and normal vector. axis='x' ⇒ normal=(1,0,0).
+        const axis = t.axis === 'y' ? 'y' : 'x';
+        const pivot = t.pivot === 'origin' ? 'origin' : 'C';
+        const baseX = pivot === 'origin' ? 0 : curCx;
+        const baseY = pivot === 'origin' ? 0 : curCy;
+        const nx = axis === 'x' ? 1 : 0;
+        const ny = axis === 'y' ? 1 : 0;
+        code += `hfss.modeler.mirror([${partsStr}], [["${baseX.toFixed(4)}um", "${baseY.toFixed(4)}um", "0um"], [${nx}, ${ny}, 0]])\n`;
+        if (pivot === 'origin') {
+          if (axis === 'x') curCx = -curCx;
+          else curCy = -curCy;
+        }
+        curRotation = -curRotation;
+      } else if (t.kind === 'duplicate_mirror') {
+        // pyAEDT duplicate_and_mirror creates one mirrored copy. We pass
+        // the mirror plane as base point + normal vector. Plane base sits
+        // at distance `offset` from current centroid along the chosen axis.
+        const axis = t.axis === 'y' ? 'y' : 'x';
+        const offsetNum = evalExpr(t.offset ?? '0', paramValues);
+        if (!Number.isFinite(offsetNum)) continue;
+        const offsetExpr = (typeof t.offset === 'string' && /[A-Za-z_]/.test(t.offset))
+          ? ascii(t.offset)
+          : `${offsetNum.toFixed(4)}um`;
+        const baseXExpr = axis === 'x'
+          ? `"${curCx.toFixed(4)}um + (${offsetExpr})"`
+          : `"${curCx.toFixed(4)}um"`;
+        const baseYExpr = axis === 'y'
+          ? `"${curCy.toFixed(4)}um + (${offsetExpr})"`
+          : `"${curCy.toFixed(4)}um"`;
+        const nx = axis === 'x' ? 1 : 0;
+        const ny = axis === 'y' ? 1 : 0;
+        code += `hfss.modeler.duplicate_and_mirror([${partsStr}], [${baseXExpr}, ${baseYExpr}, "0um"], [${nx}, ${ny}, 0])\n`;
+        // Extend selection with the mirrored copies (named base_1).
+        const newNames = partTargets.map(b => `${b}_1`);
+        partTargets = [...partTargets, ...newNames];
+        if (axis === 'x') curCx += offsetNum;
+        else curCy += offsetNum;
       }
       // Unknown kinds silently ignored.
     }
@@ -380,6 +419,40 @@ def build_wg(name, cx, cy, w, h):
         // pivots about the cluster centroid, matching canvas semantics.
         curCx += nNum * dxNum / 2;
         curCy += nNum * dyNum / 2;
+      } else if (t.kind === 'mirror') {
+        const axis = t.axis === 'y' ? 'y' : 'x';
+        const pivot = t.pivot === 'origin' ? 'origin' : 'C';
+        const baseX = pivot === 'origin' ? 0 : curCx;
+        const baseY = pivot === 'origin' ? 0 : curCy;
+        const nx = axis === 'x' ? 1 : 0;
+        const ny = axis === 'y' ? 1 : 0;
+        code += `hfss.modeler.mirror([${partsStr}], [["${baseX.toFixed(4)}um", "${baseY.toFixed(4)}um", "0um"], [${nx}, ${ny}, 0]])\n`;
+        if (pivot === 'origin') {
+          if (axis === 'x') curCx = -curCx;
+          else curCy = -curCy;
+        }
+        curRotation = -curRotation;
+      } else if (t.kind === 'duplicate_mirror') {
+        const axis = t.axis === 'y' ? 'y' : 'x';
+        const offsetNum = evalExpr(t.offset ?? '0', paramValues);
+        if (!Number.isFinite(offsetNum)) continue;
+        const offsetExpr = (typeof t.offset === 'string' && /[A-Za-z_]/.test(t.offset))
+          ? ascii(t.offset)
+          : `${offsetNum.toFixed(4)}um`;
+        const baseXExpr = axis === 'x'
+          ? `"${curCx.toFixed(4)}um + (${offsetExpr})"`
+          : `"${curCx.toFixed(4)}um"`;
+        const baseYExpr = axis === 'y'
+          ? `"${curCy.toFixed(4)}um + (${offsetExpr})"`
+          : `"${curCy.toFixed(4)}um"`;
+        const nx = axis === 'x' ? 1 : 0;
+        const ny = axis === 'y' ? 1 : 0;
+        code += `hfss.modeler.duplicate_and_mirror([${partsStr}], [${baseXExpr}, ${baseYExpr}, "0um"], [${nx}, ${ny}, 0])\n`;
+        const newNames = activePartIds.map(b => `${b}_1`);
+        activePartIds = [...activePartIds, ...newNames];
+        partsStr = activePartIds.map(p => `"${p}"`).join(', ');
+        if (axis === 'x') curCx += offsetNum;
+        else curCy += offsetNum;
       }
     }
   };

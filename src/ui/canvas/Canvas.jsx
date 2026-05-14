@@ -1699,7 +1699,9 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           const dx = bInst.cx - bBaseCx;
           const dy = bInst.cy - bBaseCy;
           const rot = bInst.rotation || 0;
-          if (!dx && !dy && !rot) return null;
+          const bSx = bInst.scaleX ?? 1;
+          const bSy = bInst.scaleY ?? 1;
+          if (!dx && !dy && !rot && bSx === 1 && bSy === 1) return null;
           const rad = rot * Math.PI / 180;
           const ca = Math.cos(rad), sa = Math.sin(rad);
           const overrides = {};
@@ -1726,17 +1728,34 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             // in world-space at the rotated location, so rotating the
             // operand cluster about that same point reproduces the rotated
             // cluster.
+            // Step 1: translate the operand by (dx, dy) so its position is
+            // expressed in the post-translation frame around bInst.
             const tx = base.cx + dx;
             const ty = base.cy + dy;
-            const rx = tx - bInst.cx;
-            const ry = ty - bInst.cy;
-            const newCx = rot ? bInst.cx + rx * ca - ry * sa : tx;
-            const newCy = rot ? bInst.cy + rx * sa + ry * ca : ty;
+            // Step 2: if the boolean carries a mirror, reflect the operand
+            // about the boolean's instance center along the appropriate
+            // axis. This flips the operand's position AND toggles its own
+            // scale flags so the operand's shape (rect corners, polygon
+            // vertices, …) renders mirrored, not just repositioned.
+            let mx = tx, my = ty;
+            let opSx = base.scaleX ?? 1, opSy = base.scaleY ?? 1;
+            if (bSx === -1) { mx = 2 * bInst.cx - tx; opSx = -opSx; }
+            if (bSy === -1) { my = 2 * bInst.cy - ty; opSy = -opSy; }
+            // Step 3: rotate the (translated-then-mirrored) point about
+            // the boolean's instance center. expandTransforms already
+            // negated rotation when a mirror fired, so the recorded `rot`
+            // is correct for the final orientation.
+            const rx = mx - bInst.cx;
+            const ry = my - bInst.cy;
+            const newCx = rot ? bInst.cx + rx * ca - ry * sa : mx;
+            const newCy = rot ? bInst.cy + rx * sa + ry * ca : my;
             overrides[c.id] = {
               ...base,
               cx: newCx,
               cy: newCy,
               rotation: (base.rotation || 0) + rot,
+              scaleX: opSx,
+              scaleY: opSy,
             };
           };
           visit(b);

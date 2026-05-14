@@ -4211,6 +4211,8 @@ export default function App() {
                 if (t.kind === 'displace') return `Move(dx=${t.dx ?? '0'}, dy=${t.dy ?? '0'})${dis}`;
                 if (t.kind === 'rotate') return `Rotate(${t.angle ?? '0'}°, ${t.pivot || 'C'})${dis}`;
                 if (t.kind === 'repeat') return `Duplicate(N=${t.n ?? '0'}, dx=${t.dx ?? '0'}, dy=${t.dy ?? '0'})${dis}`;
+                if (t.kind === 'mirror') return `Mirror(${t.axis || 'x'}, ${t.pivot || 'C'})${dis}`;
+                if (t.kind === 'duplicate_mirror') return `DupMirror(${t.axis || 'x'}, offset=${t.offset ?? '0'})${dis}`;
                 return `${t.kind}${dis}`;
               };
 
