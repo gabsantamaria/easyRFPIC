@@ -144,7 +144,16 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   // (their position is tgt = 2*axis - src, computed numerically). For mirrored
   // components we fall back to numeric positions in HFSS too. Snap-chained
   // (non-mirrored) components stay parametric.
-  const parametricPos = computeParametricPositions(components, snaps);
+  //
+  // We pass `solved` instead of `components` so that any cluster-shift the
+  // solver applied (e.g. for a snap targeting a boolean — see solver.js's
+  // cluster-shift branch, which translates a boolean's consumed operands so
+  // the boolean's AABB lands at the snap target) is reflected in the leaf
+  // positions of the parametric chain. Without this, the export emits the
+  // raw scene-stored cx/cy of "free" operands (which can be inconsistent
+  // with the boolean's stored cx/cy), producing geometry that's shifted
+  // from what the canvas shows.
+  const parametricPos = computeParametricPositions(solved, snaps);
   // Identify mirror-target ids; those don't get parametric positions.
   const mirrorTargetIds = new Set();
   for (const m of mirrors || []) {
@@ -175,7 +184,7 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   // `_comp_<id>_cx` / `_comp_<id>_cy` to track each parent's CURRENT solved
   // position. HFSS doesn't know about those synthetics — we expand them to
   // each parent's full parametric chain expression (which IS valid HFSS).
-  const parametricPosForExport = computeParametricPositions(components, snaps);
+  const parametricPosForExport = computeParametricPositions(solved, snaps);
   const compsById = Object.fromEntries(components.map(c => [c.id, c]));
   const resolveSynthetics = (expr) => {
     if (typeof expr !== 'string') return expr;
