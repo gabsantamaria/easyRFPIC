@@ -685,6 +685,16 @@ def safe_create_polyline(poly_params, attributes, name):
   const emittedWgNames = [];
   const emittedElecNames = [];
   const emittedPortNames = [];
+  // Names of conductor objects emitted as ZERO-THICKNESS SHEETS rather
+  // than 3D boxes. Triggered when their conductor layer's thickness
+  // evaluates to 0. At the end of the geometry block we assign a
+  // surface-impedance boundary (R = 0 Ω/sq, X = 0 Ω/sq) to every name
+  // in this list, modeling a perfect 2D conductor — the standard HFSS
+  // workaround for thin-film traces where solving a 3D mesh is wasteful.
+  // The list mirrors emittedElecNames in shape: boolean ops rename/remove
+  // entries the same way (Unite collapses operands → result name; punch
+  // / subtract removes the tool entries).
+  const zeroThicknessSheets = [];
   for (const c of solved) {
     // Boolean components are emitted separately AFTER all primitives are
     // built (see the Boolean operations section below). Their operands are
@@ -1222,7 +1232,28 @@ except Exception as e:
       const elecMaterial = elecLayer ? elecLayer.material : condMaterial;
       const elecZ_um = `${elecZ.toFixed(4)}um`;
       const elecT_um = `${elecThickness.toFixed(4)}um`;
-      code += `safe_create_box(
+      // If the conductor layer's thickness is zero, emit the trace as a
+      // 2D SHEET (rectangle on the XY plane) instead of a 3D box. We
+      // track the name so the impedance-boundary block at the end of
+      // the script can assign R=0 / X=0 Ω/sq, modeling it as a perfect
+      // electric conductor with no volumetric mesh — much cheaper for
+      // thin metal traces.
+      if (Math.abs(elecThickness) < 1e-9) {
+        zeroThicknessSheets.push(id);
+        code += `safe_create_rectangle(
+    ["NAME:RectangleParameters",
+     "IsCovered:=", True,
+     "XStart:=", "${xLoExprUm}", "YStart:=", "${yLoExprUm}", "ZStart:=", "${elecZ_um}",
+     "Width:=", "${wExprUm}", "Height:=", "${hExprUm}",
+     "WhichAxis:=", "Z"],
+    ["NAME:Attributes",
+     "Name:=", "${id}", "Flags:=", "", "Color:=", "(218 165 32)",
+     "Transparency:=", 0.0, "PartCoordinateSystem:=", "Global",
+     "MaterialValue:=", "\\"${ascii(elecMaterial)}\\"", "SolveInside:=", False],
+    "${id}")
+`;
+      } else {
+        code += `safe_create_box(
     ["NAME:BoxParameters",
      "XPosition:=", "${xLoExprUm}", "YPosition:=", "${yLoExprUm}", "ZPosition:=", "${elecZ_um}",
      "XSize:=", "${wExprUm}", "YSize:=", "${hExprUm}", "ZSize:=", "${elecT_um}"],
@@ -1232,6 +1263,7 @@ except Exception as e:
      "MaterialValue:=", "\\"${ascii(elecMaterial)}\\"", "SolveInside:=", False],
     "${id}")
 `;
+      }
     }
   }
 
@@ -1268,7 +1300,7 @@ except Exception as e:
     return { x: gx / members.length, y: gy / members.length };
   };
   const emitTransformChainHfss = (transforms, partIds, startCx, startCy, baseW, baseH, componentGroup) => {
-    if (!transforms || transforms.length === 0) return;
+    if (!transforms || transforms.length === 0) return [...partIds];
     let curCx = startCx, curCy = startCy, curRotation = 0;
     // Active selection list. Starts as the caller's partIds, but grows
     // every time a `repeat` or `duplicate_mirror` transform fires so that
@@ -1512,6 +1544,10 @@ except Exception as e:
         else curCy += offsetNum;
       }
     }
+    // Return the final selection so callers can track clone names — e.g.
+    // for the zero-thickness conductor sheet list, where every duplicate
+    // also needs to get the impedance boundary assigned.
+    return activePartIds;
   };
 
   for (const c of solved) {
@@ -1531,7 +1567,18 @@ except Exception as e:
     const baseW = typeof c.w === 'number' ? c.w : evalExpr(c.w, paramValues);
     const baseH = typeof c.h === 'number' ? c.h : evalExpr(c.h, paramValues);
     code += `\n# ===== Transforms for ${c.id} =====\n`;
-    emitTransformChainHfss(c.transforms, partIds, c.cx, c.cy, baseW || 0, baseH || 0, c.group);
+    const finalPartIds = emitTransformChainHfss(c.transforms, partIds, c.cx, c.cy, baseW || 0, baseH || 0, c.group);
+    // If this part is a zero-thickness conductor sheet, every clone the
+    // transform chain creates also needs the impedance boundary. Extend
+    // the sheet list with the new names so the boundary block at the end
+    // covers the entire cluster.
+    if (zeroThicknessSheets.includes(id)) {
+      for (const name of finalPartIds) {
+        if (name !== id && !zeroThicknessSheets.includes(name)) {
+          zeroThicknessSheets.push(name);
+        }
+      }
+    }
   }
 
   // ===== Boolean operations =====
@@ -1612,7 +1659,19 @@ except Exception as e:
       const solvedB = solved.find(sc => sc.id === b.id) || b;
       const bW = typeof solvedB.w === 'number' ? solvedB.w : evalExpr(solvedB.w, paramValues);
       const bH = typeof solvedB.h === 'number' ? solvedB.h : evalExpr(solvedB.h, paramValues);
-      emitTransformChainHfss(b.transforms || [], [safeBoolId], solvedB.cx, solvedB.cy, bW || 0, bH || 0, b.group);
+      const finalBoolIds = emitTransformChainHfss(b.transforms || [], [safeBoolId], solvedB.cx, solvedB.cy, bW || 0, bH || 0, b.group);
+      // If the boolean result is a zero-thickness conductor sheet (any
+      // operand sat on a zero-thickness conductor layer ⇒ Unite/Subtract
+      // produces a sheet), every clone the transform chain creates also
+      // needs the impedance boundary. Add the new names so the boundary
+      // block at the end covers the entire cluster.
+      if (zeroThicknessSheets.includes(safeBoolId)) {
+        for (const name of finalBoolIds) {
+          if (name !== safeBoolId && !zeroThicknessSheets.includes(name)) {
+            zeroThicknessSheets.push(name);
+          }
+        }
+      }
       // ----------------------------------------------------------------
       // After the boolean: operand 0 has been renamed to the boolean's
       // id, and (for everything except 'punch' with KeepOriginals) the
@@ -1631,14 +1690,51 @@ except Exception as e:
       };
       renameInList(emittedElecNames, safeIds[0], safeBoolId);
       renameInList(emittedWgNames, safeIds[0], safeBoolId);
+      // Zero-thickness conductor sheets — boolean ops produce a sheet
+      // result when the operands are sheets, so the boolean's id
+      // inherits the sheet treatment (and the impedance boundary).
+      renameInList(zeroThicknessSheets, safeIds[0], safeBoolId);
       // Non-first operands are consumed by the subtract (and clones in
       // a punch are consumed too — they're the "Tool Parts" of the
       // KeepOriginals=False subtract).
       for (const oldId of safeIds.slice(1)) {
         removeFromList(emittedElecNames, oldId);
         removeFromList(emittedWgNames, oldId);
+        removeFromList(zeroThicknessSheets, oldId);
       }
     }
+  }
+
+  // ===== Zero-thickness conductor sheets: surface-impedance boundary =====
+  // Conductor layers with thickness = 0 are modeled as 2-D rectangle
+  // sheets (instead of 3-D boxes). HFSS treats sheets as having no
+  // material on either side unless a boundary is assigned, so we attach
+  // a surface impedance boundary with R = 0 Ω/sq and X = 0 Ω/sq — a
+  // perfect electric conductor in 2-D. Same physics as PEC, but no
+  // volumetric mesh, which is the standard HFSS optimization for thin
+  // metal traces.
+  if (zeroThicknessSheets.length > 0) {
+    const objList = zeroThicknessSheets.map(n => `"${n}"`).join(', ');
+    code += `
+# ===== Zero-thickness conductor sheets: impedance boundary =====
+# All conductor sheets (from layers with thickness=0) get a surface
+# impedance boundary of 0 Ohm/sq (R) + j 0 Ohm/sq (X), i.e. a perfect
+# electric conductor without a volumetric mesh.
+try:
+    oBoundarySetup_imp = oDesign.GetModule("BoundarySetup")
+    _delete_boundary_if_exists("PEC_sheets")
+    oBoundarySetup_imp.AssignImpedance(
+        ["NAME:PEC_sheets",
+         "Objects:=", [${objList}],
+         "Resistance:=", "0",
+         "Reactance:=", "0",
+         "InfGroundPlane:=", False])
+except Exception as e:
+    try:
+        oDesktop.AddMessage("", "", 1, "Failed to assign impedance boundary on conductor sheets: " + str(e))
+    except:
+        pass
+`;
   }
 
   // Cladding: created LAST, then subtracts all WGs and electrodes from itself.
@@ -1669,8 +1765,14 @@ except Exception as e:
      "MaterialValue:=", "\\"${matName}\\"", "SolveInside:=", True],
     "${id}")
 `;
-      // Subtract waveguides + electrodes (intersecting parts only) from the cladding.
-      const toolNames = [...emittedWgNames, ...emittedElecNames];
+      // Subtract waveguides + 3-D electrodes from the cladding. Skip
+      // zero-thickness conductor sheets — they have no volume to subtract
+      // and HFSS would either no-op or carve a thin slit through the
+      // cladding, neither of which is what we want for a 2-D PEC trace.
+      const toolNames = [
+        ...emittedWgNames,
+        ...emittedElecNames.filter(n => !zeroThicknessSheets.includes(n)),
+      ];
       if (toolNames.length > 0) {
         const toolList = toolNames.join(',');
         code += `oEditor.Subtract(

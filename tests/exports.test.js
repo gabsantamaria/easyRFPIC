@@ -57,6 +57,29 @@ describe('generateHfssNative', () => {
     )).not.toThrow();
   });
 
+  it('emits conductor sheets + AssignImpedance when conductor thickness is 0', () => {
+    // When h_cond = 0, every electrode should be a 2-D rectangle sheet
+    // rather than a 3-D box, and a single AssignImpedance boundary
+    // (R=0, X=0 Ω/sq) should cover all of them.
+    const zeroScene = {
+      ...scene,
+      params: { ...scene.params, h_cond: { ...(scene.params.h_cond || {}), expr: '0' } },
+    };
+    const { values: pv } = resolveParams(zeroScene.params);
+    const out = generateHfssNative(zeroScene, pv);
+    // Electrode sheets are CreateRectangle, not CreateBox.
+    const rectCount = (out.match(/safe_create_rectangle/g) || []).length;
+    expect(rectCount).toBeGreaterThan(0);
+    // Impedance boundary block with R=0, X=0.
+    expect(out).toContain('AssignImpedance');
+    expect(out).toMatch(/"Resistance:=", "0"/);
+    expect(out).toMatch(/"Reactance:=", "0"/);
+    // Boundary's object list mentions each default electrode by name.
+    expect(out).toMatch(/"sig"/);
+    expect(out).toMatch(/"gnd_top"/);
+    expect(out).toMatch(/"gnd_bot"/);
+  });
+
   it('predicts HFSS collision-resolved clone names for repeat→mirror→repeat', () => {
     // After DuplicateAlongLine creates `m_1..m_9`, DuplicateMirror must
     // NOT name the new clone of `m` as `m_1` (collision). HFSS picks the
