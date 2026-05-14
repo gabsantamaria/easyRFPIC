@@ -221,8 +221,12 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   };
 
   // Format a value for SetVariableValue. For bare numbers attach the unit; otherwise leave as expression.
+  // Identifier-to-identifier hyphens get a space around them, same as
+  // in exprWithUm — HFSS's parser otherwise reads "cap_s-feed_w" as a
+  // single unknown identifier and silently evaluates the whole
+  // expression to 0.
   const formatVarValue = (p) => {
-    const expr = ascii(resolveSynthetics(String(p.expr ?? '')));
+    const expr = spaceHyphens(ascii(resolveSynthetics(String(p.expr ?? ''))));
     const unit = unitFor(p.unit);
     const isBareNumber = /^[\d\s+\-*/.()]+$/.test(expr);
     return expr + (unit && isBareNumber ? unit : '');
