@@ -1465,6 +1465,54 @@ except Exception as e:
     }
   }
 
+  // ===== Field-plot plane =====
+  // A non-model sheet at the conductor's mid-Z, spanning the chip
+  // footprint. Useful as a reusable surface for plotting E/H fields,
+  // currents, or any other near-field quantity at the conductor
+  // plane without having to redraw a measurement surface each time.
+  // Marked non-model via ChangeProperty so it doesn't perturb the
+  // simulation (HFSS skips non-model objects during meshing /
+  // solving).
+  const condZBottom = condLayer && layerZ[condLayer.id] ? layerZ[condLayer.id].zBottom : 0;
+  const condZThick  = condLayer && layerZ[condLayer.id] ? layerZ[condLayer.id].thickness : cond_z;
+  const fieldPlotZ_um = `${(condZBottom + condZThick / 2).toFixed(4)}um`;
+  code += `
+# ===== Field-plot plane (non-model) =====
+# Sheet at the conductor's mid-Z spanning the chip footprint, useful
+# for plotting E/H fields, currents, etc. at the conductor plane.
+# Non-model — does not participate in meshing / solving.
+try:
+    safe_create_rectangle(
+        ["NAME:RectangleParameters",
+         "IsCovered:=", True,
+         "XStart:=", "${bbXPos}", "YStart:=", "${bbYPos}", "ZStart:=", "${fieldPlotZ_um}",
+         "Width:=", "${bbXSize}", "Height:=", "${bbYSize}",
+         "WhichAxis:=", "Z"],
+        ["NAME:Attributes",
+         "Name:=", "field_plot_plane", "Flags:=", "NonModel#",
+         "Color:=", "(100 180 220)", "Transparency:=", 0.7,
+         "PartCoordinateSystem:=", "Global",
+         "MaterialValue:=", "\\"vacuum\\"", "SolveInside:=", True],
+        "field_plot_plane")
+    # The "NonModel#" flag in Attributes covers it on creation, but
+    # belt-and-suspenders: also set Model=False via ChangeProperty so
+    # older HFSS releases that ignore the Flags hint still get it.
+    try:
+        oEditor.ChangeProperty(
+            ["NAME:AllTabs",
+             ["NAME:Geometry3DAttributeTab",
+              ["NAME:PropServers", "field_plot_plane"],
+              ["NAME:ChangedProps",
+               ["NAME:Model", "Value:=", False]]]])
+    except:
+        pass
+except Exception as e:
+    try:
+        oDesktop.AddMessage("", "", 1, "Field-plot plane failed: " + str(e))
+    except:
+        pass
+`;
+
   // ===== Open-region radiation boundary =====
   // Compute the airbox dimensions explicitly and emit a CreateBox +
   // AssignRadiation pair. HFSS's CreateOpenRegion isn't exposed on

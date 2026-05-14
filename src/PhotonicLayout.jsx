@@ -3371,11 +3371,20 @@ export default function App() {
     setExportPreview({ filename, content, downloaded: ok });
   };
 
-  const handleExportPyAEDT = () => handleExport('layout.py', generatePyAEDT);
+  // Sanitize the design name for use as a filename. Keep alphanumerics,
+  // underscore, hyphen, and dot; replace anything else with '_'. Empty
+  // / 'Untitled' falls back to 'layout' so we never produce an oddly
+  // named file like '_.py'.
+  const designFileBase = () => {
+    const raw = String(designName || '').trim();
+    if (!raw || raw === 'Untitled') return 'layout';
+    return raw.replace(/[^A-Za-z0-9_.\-]+/g, '_');
+  };
+  const handleExportPyAEDT = () => handleExport(`${designFileBase()}.py`, generatePyAEDT);
   const handleExportHfssNative = () => {
     const appendToActive = !!(scene.simSetup && scene.simSetup.appendToActive);
-    const filename = appendToActive ? 'layout_hfss_append.py' : 'layout_hfss.py';
-    return handleExport(filename, generateHfssNative, { appendToActive });
+    const suffix = appendToActive ? '_hfss_append' : '_hfss';
+    return handleExport(`${designFileBase()}${suffix}.py`, generateHfssNative, { appendToActive });
   };
   const handleExportGDS = async () => {
     let bytes;
@@ -3391,14 +3400,15 @@ export default function App() {
       await alertDialog('Failed to generate GDS.', 'Export error');
       return;
     }
-    const ok = downloadFile('layout.gds', bytes, 'application/octet-stream');
+    const gdsName = `${designFileBase()}.gds`;
+    const ok = downloadFile(gdsName, bytes, 'application/octet-stream');
     if (!ok) {
       await alertDialog('Failed to start GDS download.', 'Export error');
     } else {
       // Show a brief confirmation in the export preview modal — but with a
       // text summary instead of the binary content (which is unprintable).
       const summary = [
-        `GDS-II file: layout.gds (${bytes.length} bytes)`,
+        `GDS-II file: ${gdsName} (${bytes.length} bytes)`,
         '',
         'Layer mapping:',
         '  1   = waveguide',
@@ -3413,7 +3423,7 @@ export default function App() {
         '  shapes since GDS doesn\'t natively encode subtraction.',
         '- Mirrored components are exported with their solved (mirrored) positions.',
       ].join('\n');
-      setExportPreview({ filename: 'layout.gds', content: summary, downloaded: ok, binary: true });
+      setExportPreview({ filename: gdsName, content: summary, downloaded: ok, binary: true });
     }
   };
 
