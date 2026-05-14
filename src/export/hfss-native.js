@@ -605,27 +605,19 @@ def _delete_boundary_if_exists(name):
     except:
         pass
 
-def _delete_cs_if_exists(name):
-    # Delete a relative coordinate system if it exists. Re-running the
-    # script in APPEND mode would otherwise fail on "CS already exists"
-    # when CreateRelativeCS is called again. Each waveguide emits its
-    # own CS named "<wg_id>_cs" near the top of the rib.
-    if not APPEND_MODE:
-        return
+def _relative_cs_exists(name):
+    # Probe whether a relative CS already exists. Used to skip re-creating
+    # it on a subsequent APPEND-mode run. We deliberately do NOT attempt
+    # to delete the existing CS: oEditor.Delete with a CS name in the
+    # Selections list has been observed to cascade-delete parts whose
+    # PartCoordinateSystem resolves through that CS, which would wipe
+    # the waveguide slab + rib + neighboring substrates. Leaving the old
+    # CS in place is harmless (its origin / orientation are recomputed
+    # parametrically by HFSS anyway when the user sweeps geometry).
     try:
-        existing = list(oEditor.GetCoordinateSystems())
+        return name in list(oEditor.GetCoordinateSystems())
     except:
-        existing = []
-    if name not in existing:
-        return
-    # CSes are deleted via oEditor.Delete with the CS name in the
-    # Selections list. If that API differs on your HFSS version, the
-    # try/except around CreateRelativeCS will still let the script
-    # continue — the existing CS stays at its prior position.
-    try:
-        oEditor.Delete(["NAME:Selections", "Selections:=", name])
-    except:
-        pass
+        return False
 
 # Wrap CreateBox so one bad call doesn't abort the whole script.
 def safe_create_box(box_params, attributes, name):
@@ -1122,21 +1114,26 @@ except Exception as e:
       // (right-handed so Z stays out of plane).
       const csXAxis = axis === 'x' ? [1, 0, 0] : [0, 1, 0];
       const csYAxis = axis === 'x' ? [0, 1, 0] : [-1, 0, 0];
+      // Re-runs in APPEND mode skip CS creation if a CS with the same
+      // name already exists. We do NOT delete-and-recreate — that would
+      // risk cascade-deleting parts whose PartCoordinateSystem resolves
+      // through this CS (a real-world HFSS gotcha that wiped wg_slab /
+      // wg_rib geometry in earlier iterations of this exporter).
       code += `try:
-    _delete_cs_if_exists("${csName}")
-    oEditor.CreateRelativeCS(
-        ["NAME:RelativeCSParameters",
-         "Mode:=", "Axis/Position",
-         "OriginX:=", "${csOriginXExpr}",
-         "OriginY:=", "${csOriginYExpr}",
-         "OriginZ:=", "${csOriginZExpr}",
-         "XAxisXvec:=", "${csXAxis[0]}",
-         "XAxisYvec:=", "${csXAxis[1]}",
-         "XAxisZvec:=", "${csXAxis[2]}",
-         "YAxisXvec:=", "${csYAxis[0]}",
-         "YAxisYvec:=", "${csYAxis[1]}",
-         "YAxisZvec:=", "${csYAxis[2]}"],
-        ["NAME:Attributes", "Name:=", "${csName}"])
+    if not _relative_cs_exists("${csName}"):
+        oEditor.CreateRelativeCS(
+            ["NAME:RelativeCSParameters",
+             "Mode:=", "Axis/Position",
+             "OriginX:=", "${csOriginXExpr}",
+             "OriginY:=", "${csOriginYExpr}",
+             "OriginZ:=", "${csOriginZExpr}",
+             "XAxisXvec:=", "${csXAxis[0]}",
+             "XAxisYvec:=", "${csXAxis[1]}",
+             "XAxisZvec:=", "${csXAxis[2]}",
+             "YAxisXvec:=", "${csYAxis[0]}",
+             "YAxisYvec:=", "${csYAxis[1]}",
+             "YAxisZvec:=", "${csYAxis[2]}"],
+            ["NAME:Attributes", "Name:=", "${csName}"])
 except Exception as e:
     try:
         oDesktop.AddMessage("", "", 1, "Failed to create relative CS ${csName}: " + str(e))
