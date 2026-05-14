@@ -66,7 +66,7 @@ export default {
       [pCellD]:  { expr: '4',    unit: 'µm', desc: `${baseId} rail-to-outer-bar gap` },
       [pTraceW]: { expr: '0.5',  unit: 'µm', desc: `${baseId} trace width` },
       [pGapS]:   { expr: '0.5',  unit: 'µm', desc: `${baseId} centered gap in outer bar / rail` },
-      [pN]:      { expr: '20',   unit: '',   desc: `${baseId} number of cells (drives repeat transform)` },
+      [pN]:      { expr: '3',    unit: '',   desc: `${baseId} number of cells (drives repeat transform)` },
     };
 
     const W = `(${pTraceW})`;

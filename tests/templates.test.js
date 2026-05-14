@@ -149,7 +149,7 @@ describe('meander-electrode template', () => {
     solved = resolveBooleanBboxes(solved, pv);
     const boolean = solved.find(c => c.kind === 'boolean');
     const insts = expandTransforms([boolean], pv);
-    expect(insts.length).toBe(20); // default N=20
+    expect(insts.length).toBe(3); // default N=3
   });
 
   it('avoids id collisions on repeated insert', () => {
