@@ -1551,6 +1551,15 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
   const MIN_HIT_PX = 8;
   const pxPerWorld = (svgRef.current?.clientWidth || 1) / viewport.w;
   const minHitWorld = pxPerWorld > 0 ? MIN_HIT_PX / pxPerWorld : 0;
+  // Convert a desired SCREEN-PIXEL dimension into the world-unit value
+  // that produces it at the current zoom. Used for ruler/dimension
+  // labels and stroke widths so they stay readable across the full zoom
+  // range instead of inflating at high zoom (the prior heuristic of
+  // "world size = small % of viewport.w" let zoom-in blow labels up by
+  // the same factor as the geometry — exactly what the user doesn't
+  // want). A `min` floor keeps SVG numbers sane on first render before
+  // svgRef has measured the DOM.
+  const screen = (px) => (pxPerWorld > 0 ? px / pxPerWorld : px * 0.05);
 
   return (
     <svg
@@ -2684,16 +2693,22 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             }
           }
         }
-        // Geometry constants (in world units, scaled by viewport so they
-        // stay legible at any zoom).
-        const vScale = Math.max(viewport.w, viewport.h);
-        const offsetDist = vScale * 0.025;   // distance from geometry to dim line
-        const extOverhang = vScale * 0.005;  // how far ext line passes beyond dim line
-        const arrowLen = vScale * 0.012;
-        const arrowSpread = vScale * 0.005;
-        const fontSize = Math.max(2, vScale * 0.01);
-        const labelPadX = fontSize * 0.5;
-        const labelPadY = fontSize * 0.3;
+        // Geometry constants. Sized in SCREEN PIXELS via the `screen()`
+        // helper so the overlay stays the same visible size at every
+        // zoom level. (The previous approach used a small fraction of
+        // viewport.w in world units; zoom-in shrunk viewport.w but the
+        // overlay's *screen* size grew at the same rate as the
+        // geometry — labels ballooned to dozens of pixels tall.)
+        const offsetDist = screen(28);      // dim line ~28 px off the geometry
+        const extOverhang = screen(6);
+        const arrowLen = screen(14);
+        const arrowSpread = screen(5);
+        const fontSize = screen(11);        // ~11 px font on screen
+        const labelPadX = screen(5);
+        const labelPadY = screen(3);
+        const dimStroke = screen(0.9);
+        const extStroke = screen(0.5);
+        const labelStroke = screen(0.4);
         // Estimate character width for label-fits-on-line check.
         const charW = fontSize * 0.6;
 
@@ -2743,13 +2758,13 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
               return (
                 <g key={`dim_${i}_${d.kind}`}>
                   {/* Extension lines */}
-                  <line x1={d.p1.x} y1={-d.p1.y} x2={ext1.x} y2={-ext1.y} stroke="#a78bfa" strokeWidth={0.25} opacity={0.85} />
-                  <line x1={d.p2.x} y1={-d.p2.y} x2={ext2.x} y2={-ext2.y} stroke="#a78bfa" strokeWidth={0.25} opacity={0.85} />
+                  <line x1={d.p1.x} y1={-d.p1.y} x2={ext1.x} y2={-ext1.y} stroke="#a78bfa" strokeWidth={extStroke} opacity={0.85} />
+                  <line x1={d.p2.x} y1={-d.p2.y} x2={ext2.x} y2={-ext2.y} stroke="#a78bfa" strokeWidth={extStroke} opacity={0.85} />
                   {/* Dim line */}
-                  <line x1={dimP1.x} y1={-dimP1.y} x2={dimP2.x} y2={-dimP2.y} stroke="#a78bfa" strokeWidth={0.4} opacity={0.95} />
+                  <line x1={dimP1.x} y1={-dimP1.y} x2={dimP2.x} y2={-dimP2.y} stroke="#a78bfa" strokeWidth={dimStroke} opacity={0.95} />
                   {/* Arrowheads (point outward from line center) */}
-                  <polyline points={arrowAt(dimP1, -1)} fill="none" stroke="#a78bfa" strokeWidth={0.4} strokeLinecap="round" strokeLinejoin="round" />
-                  <polyline points={arrowAt(dimP2,  1)} fill="none" stroke="#a78bfa" strokeWidth={0.4} strokeLinecap="round" strokeLinejoin="round" />
+                  <polyline points={arrowAt(dimP1, -1)} fill="none" stroke="#a78bfa" strokeWidth={dimStroke} strokeLinecap="round" strokeLinejoin="round" />
+                  <polyline points={arrowAt(dimP2,  1)} fill="none" stroke="#a78bfa" strokeWidth={dimStroke} strokeLinecap="round" strokeLinejoin="round" />
                   {/* Label pill */}
                   <rect
                     x={mx - textW / 2 - labelPadX}
@@ -2758,7 +2773,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                     height={fontSize + 2 * labelPadY}
                     fill="rgba(15,23,42,0.92)"
                     stroke="#a78bfa"
-                    strokeWidth={0.2}
+                    strokeWidth={labelStroke}
                     rx={fontSize * 0.2}
                   />
                   <text
@@ -3184,31 +3199,44 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           the right side of the readout deletes that one measurement;
           the toolbar's "clear (N)" button still clears them all in
           bulk. */}
+      {/* Ruler measurements + dimensions use screen-pixel sizing for
+          line widths, dot radii, font, and the padding around the
+          readout box so the on-canvas overlay stays roughly the same
+          size in actual pixels regardless of zoom. World-unit sizing
+          would let labels balloon at high zoom and disappear at low. */}
       {rulerMeasurements.map(m => {
         const dx = m.p2.x - m.p1.x;
         const dy = m.p2.y - m.p1.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
         const mx = (m.p1.x + m.p2.x) / 2;
         const my = (m.p1.y + m.p2.y) / 2;
-        const xBtnX = mx + 13;
-        const xBtnY = -my - 2.6;
+        // Screen-stable sizing
+        const lineW = screen(1.4);              // ~1.4 px line
+        const dotR = screen(2.5);               // ~2.5 px endpoint dot
+        const dotStrokeW = screen(0.5);
+        const fontDist = screen(11);            // distance label (px)
+        const fontDelta = screen(9);            // delta-x / delta-y label (px)
+        const padX1 = screen(46), padY1 = screen(14);
+        const padX2 = screen(60), padY2 = screen(13);
+        const xBtnX = mx + screen(60);
+        const xBtnY = -my - screen(11);
         return (
           <g key={m.id}>
             <g pointerEvents="none">
               <line
                 x1={m.p1.x} y1={-m.p1.y} x2={m.p2.x} y2={-m.p2.y}
-                stroke="#22d3ee" strokeWidth={0.5} opacity={0.95}
+                stroke="#22d3ee" strokeWidth={lineW} opacity={0.95}
               />
-              <circle cx={m.p1.x} cy={-m.p1.y} r={0.9} fill="#22d3ee" stroke="white" strokeWidth={0.2} />
-              <circle cx={m.p2.x} cy={-m.p2.y} r={0.9} fill="#22d3ee" stroke="white" strokeWidth={0.2} />
+              <circle cx={m.p1.x} cy={-m.p1.y} r={dotR} fill="#22d3ee" stroke="white" strokeWidth={dotStrokeW} />
+              <circle cx={m.p2.x} cy={-m.p2.y} r={dotR} fill="#22d3ee" stroke="white" strokeWidth={dotStrokeW} />
               {dist > 0.01 && (
                 <g>
-                  <rect x={mx - 11} y={-my - 4.6} width={22} height={4} fill="rgba(15,23,42,0.9)" rx={0.5} />
-                  <text x={mx} y={-my - 1.4} fontSize={2.6} fontFamily="monospace" fill="#67e8f9" textAnchor="middle">
+                  <rect x={mx - padX1 / 2} y={-my - padY1 - screen(2)} width={padX1} height={padY1} fill="rgba(15,23,42,0.9)" rx={screen(2)} />
+                  <text x={mx} y={-my - screen(5)} fontSize={fontDist} fontFamily="monospace" fill="#67e8f9" textAnchor="middle">
                     {`${dist.toFixed(2)}um`}
                   </text>
-                  <rect x={mx - 13} y={-my - 0.4} width={26} height={3.2} fill="rgba(15,23,42,0.85)" rx={0.5} />
-                  <text x={mx} y={-my + 1.95} fontSize={2.1} fontFamily="monospace" fill="#94a3b8" textAnchor="middle">
+                  <rect x={mx - padX2 / 2} y={-my - screen(2)} width={padX2} height={padY2} fill="rgba(15,23,42,0.85)" rx={screen(2)} />
+                  <text x={mx} y={-my + screen(7)} fontSize={fontDelta} fontFamily="monospace" fill="#94a3b8" textAnchor="middle">
                     {`Δx=${dx.toFixed(2)} Δy=${dy.toFixed(2)}`}
                   </text>
                 </g>
@@ -3222,10 +3250,10 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                 onClick={(e) => { e.stopPropagation(); deleteRuler(m.id); }}
                 style={{ cursor: 'pointer' }}
               >
-                <circle cx={xBtnX} cy={xBtnY} r={1.6} fill="#0f172a" stroke="#475569" strokeWidth={0.18} />
+                <circle cx={xBtnX} cy={xBtnY} r={screen(6)} fill="#0f172a" stroke="#475569" strokeWidth={screen(0.6)} />
                 <text
-                  x={xBtnX} y={xBtnY + 0.85}
-                  fontSize={2.1} fontFamily="monospace" fill="#cbd5e1"
+                  x={xBtnX} y={xBtnY + screen(3)}
+                  fontSize={screen(9)} fontFamily="monospace" fill="#cbd5e1"
                   textAnchor="middle" pointerEvents="none"
                 >×</text>
                 <title>Remove this measurement</title>
@@ -3246,33 +3274,45 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           if (Math.abs(rdx) > Math.abs(rdy)) p2 = { x: p2.x, y: p1.y };
           else                                p2 = { x: p1.x, y: p2.y };
         }
+        const previewLineW = screen(1.4);
+        const previewDotR = screen(2.5);
         return (
           <g pointerEvents="none">
             <line
               x1={p1.x} y1={-p1.y} x2={p2.x} y2={-p2.y}
               stroke="#22d3ee"
-              strokeWidth={sw * 0.85}
-              strokeDasharray={shiftKey ? '0' : `${sw * 3},${sw * 1.5}`}
+              strokeWidth={previewLineW}
+              strokeDasharray={shiftKey ? '0' : `${screen(5)},${screen(3)}`}
               opacity={0.85}
             />
-            <circle cx={p1.x} cy={-p1.y} r={hr * 0.45} fill="#22d3ee" stroke="white" strokeWidth={sw * 0.35} />
-            <circle cx={p2.x} cy={-p2.y} r={hr * 0.45} fill="#22d3ee" stroke="white" strokeWidth={sw * 0.35} />
+            <circle cx={p1.x} cy={-p1.y} r={previewDotR} fill="#22d3ee" stroke="white" strokeWidth={screen(0.5)} />
+            <circle cx={p2.x} cy={-p2.y} r={previewDotR} fill="#22d3ee" stroke="white" strokeWidth={screen(0.5)} />
             {/* Δx/Δy/dist are shown in the bottom status bar to keep the canvas clear. */}
           </g>
         );
       })()}
 
-      {/* Ruler tool: hover snap-target indicator */}
+      {/* Ruler tool: hover snap-target indicator. Sized in SCREEN pixels
+          so the hover dot stays prominently visible at every zoom level
+          (it's the user's primary cue that "you're about to snap to
+          THIS point" — too small was hard to find at high zoom). */}
       {rulerMode && rulerSnapPoint && rulerSnapPoint.label && (
         <g pointerEvents="none">
+          {/* Soft outer halo: large, low-opacity, for "look here" pop. */}
           <circle
-            cx={rulerSnapPoint.x} cy={-rulerSnapPoint.y} r={hr * 0.7}
-            fill="none" stroke="#22d3ee" strokeWidth={sw * 0.85}
-            opacity={0.9}
+            cx={rulerSnapPoint.x} cy={-rulerSnapPoint.y} r={screen(14)}
+            fill="#22d3ee" opacity={0.18}
           />
+          {/* Ring */}
           <circle
-            cx={rulerSnapPoint.x} cy={-rulerSnapPoint.y} r={hr * 0.25}
-            fill="#22d3ee"
+            cx={rulerSnapPoint.x} cy={-rulerSnapPoint.y} r={screen(9)}
+            fill="none" stroke="#22d3ee" strokeWidth={screen(1.6)}
+            opacity={0.95}
+          />
+          {/* Solid inner dot. */}
+          <circle
+            cx={rulerSnapPoint.x} cy={-rulerSnapPoint.y} r={screen(3.5)}
+            fill="#22d3ee" stroke="white" strokeWidth={screen(0.6)}
           />
         </g>
       )}
