@@ -1299,11 +1299,14 @@ except Exception as e:
     if (!c.transforms || c.transforms.length === 0) continue;
     if (!c.transforms.some(t => t && t.enabled !== false)) continue;
     const id = c.id.replace(/[^A-Za-z0-9_]/g, '_');
-    // For waveguides built as a rib + slab pair, transforms target the
-    // rib part (named `<id>_rib`); for other shapes/layers, the part is
-    // named directly with the component id.
+    // For rib-waveguide rects, both the slab and the rib are emitted
+    // as separate parts (`<id>_wg_slab`, `<id>_wg_rib`). Transforms
+    // need to move BOTH parts together — repeating only the rib
+    // would leave the slab behind, and naming the rib `<id>_rib`
+    // (without the `_wg` infix used at creation) would target a
+    // part that doesn't exist.
     const partIds = (c.layer === 'waveguide' && (c.kind || 'rect') === 'rect')
-      ? [`${id}_rib`]
+      ? [`${id}_wg_slab`, `${id}_wg_rib`]
       : [id];
     const baseW = typeof c.w === 'number' ? c.w : evalExpr(c.w, paramValues);
     const baseH = typeof c.h === 'number' ? c.h : evalExpr(c.h, paramValues);
