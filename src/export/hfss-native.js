@@ -500,8 +500,21 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   // (zBottom, zTop) pair. Adjacent device-role layers (waveguide/conductor/cladding)
   // share zBottom — the level's top is the max of all their thicknesses.
   // A non-device layer above the device level stacks on top of the level top.
+  //
+  // PARAMETRIC Z: alongside the numeric (zBottom, zTop, thickness), build
+  // HFSS-side expression strings (zBottomExpr, zTopExpr, thicknessExpr)
+  // that reference the stack's thickness variables (h_si, h_wg, h_clad,
+  // h_cond, …) instead of being baked at export time. Sweeping any
+  // layer thickness in HFSS then moves the substrate / cladding /
+  // conductor / port-sheet Z positions in lockstep. The "max of a
+  // device-level run" advance — which HFSS can't express with min/max
+  // — is resolved at export by picking the run's max-thickness layer
+  // numerically, then emitting THAT layer's thicknessExpr as the
+  // cursor advance. Works perfectly when the run's relative ordering
+  // (which layer is tallest) is stable under sweeps; numerically
+  // re-checked sweeps should land on the same choice.
   const isDeviceRole = (r) => r === 'waveguide' || r === 'conductor' || r === 'cladding';
-  const layerZ = {}; // layer.id -> { zBottom, zTop, thickness }
+  const layerZ = {}; // layer.id -> { zBottom, zTop, thickness, zBottomExpr, zTopExpr, thicknessExpr }
 
   // First, find the start of the array's first device-level run, so we can pin Z=0 there.
   // Substrates BEFORE the first device level go to negative Z; everything else stacks up from there.
@@ -513,20 +526,32 @@ export function generateHfssNative(scene, paramValues, options = {}) {
     const v = evalExpr(layer.thickness, paramValues);
     return Number.isFinite(v) ? v : 1;
   };
+  // Parametric thickness expression for a layer. Wraps bare-numeric
+  // strings with "um" (the same trick used elsewhere — HFSS reads bare
+  // numbers in the design base unit, which is meters by default).
+  const tExprOf = (layer) => exprWithUm(layer.thickness ?? '0');
 
   // Substrates below the first device level (i = 0 to firstDeviceIdx-1, which should all be substrates).
   // Stack them at negative Z, with the highest one ending at Z=0.
   let zCursor = 0;
+  let zCursorExpr = '0um';
   for (let i = firstDeviceIdx - 1; i >= 0; i--) {
     const layer = stack[i];
     const t = tOf(layer);
-    layerZ[layer.id] = { zBottom: zCursor - t, zTop: zCursor, thickness: t };
+    const tExpr = tExprOf(layer);
+    const zBottomExpr = `(${zCursorExpr}) - ${tExpr}`;
+    layerZ[layer.id] = {
+      zBottom: zCursor - t, zTop: zCursor, thickness: t,
+      zBottomExpr, zTopExpr: zCursorExpr, thicknessExpr: tExpr,
+    };
     zCursor -= t;
+    zCursorExpr = zBottomExpr;
   }
 
   // Now walk upward from the first device level. Group adjacent device-role layers,
   // and non-device layers each get their own Z slot above the previous level top.
   zCursor = 0;
+  zCursorExpr = '0um';
   let i = firstDeviceIdx;
   while (i < stack.length) {
     const layer = stack[i];
@@ -535,20 +560,41 @@ export function generateHfssNative(scene, paramValues, options = {}) {
       const runStart = i;
       let runEnd = i;
       while (runEnd + 1 < stack.length && isDeviceRole(stack[runEnd + 1].role)) runEnd++;
-      // All layers in the run share zBottom; level top = zBottom + max thickness
+      // All layers in the run share zBottom; level top = zBottom + max thickness.
       const zBottom = zCursor;
+      const zBottomExpr = zCursorExpr;
       let maxT = 0;
+      let maxLayer = null;
       for (let j = runStart; j <= runEnd; j++) {
         const t = tOf(stack[j]);
-        layerZ[stack[j].id] = { zBottom, zTop: zBottom + t, thickness: t };
-        if (t > maxT) maxT = t;
+        const tExpr = tExprOf(stack[j]);
+        layerZ[stack[j].id] = {
+          zBottom, zTop: zBottom + t, thickness: t,
+          zBottomExpr,
+          zTopExpr: `(${zBottomExpr}) + ${tExpr}`,
+          thicknessExpr: tExpr,
+        };
+        if (t > maxT) { maxT = t; maxLayer = stack[j]; }
       }
       zCursor = zBottom + maxT;
+      // Advance the parametric cursor by the run's max-thickness layer's
+      // expression — picked numerically at export time. If the user
+      // sweeps such that the OTHER layer becomes the taller one, the
+      // numeric pick is wrong and they'd need to re-export. Documented
+      // limitation; HFSS has no first-class max(a,b) in expressions.
+      zCursorExpr = maxLayer ? `(${zBottomExpr}) + ${tExprOf(maxLayer)}` : zBottomExpr;
       i = runEnd + 1;
     } else {
       const t = tOf(layer);
-      layerZ[layer.id] = { zBottom: zCursor, zTop: zCursor + t, thickness: t };
+      const tExpr = tExprOf(layer);
+      const zBottomExpr = zCursorExpr;
+      const zTopExpr = `(${zBottomExpr}) + ${tExpr}`;
+      layerZ[layer.id] = {
+        zBottom: zCursor, zTop: zCursor + t, thickness: t,
+        zBottomExpr, zTopExpr, thicknessExpr: tExpr,
+      };
       zCursor += t;
+      zCursorExpr = zTopExpr;
       i++;
     }
   }
@@ -569,6 +615,8 @@ export function generateHfssNative(scene, paramValues, options = {}) {
     layer,
     z: layerZ[layer.id]?.zBottom ?? 0,
     thickness: layerZ[layer.id]?.thickness ?? 1,
+    zExpr: layerZ[layer.id]?.zBottomExpr ?? '0um',
+    thicknessExpr: layerZ[layer.id]?.thicknessExpr ?? '1um',
   }));
   // Cladding layers: each fills the WG region (Z = its zBottom to zTop), with WGs and electrodes subtracted.
   const claddingLayers = (stack || []).filter(l => l.role === 'cladding');
@@ -919,8 +967,8 @@ except:
     const colorHfss = hexToHfssColor(sp.layer.color);
     code += `safe_create_box(
     ["NAME:BoxParameters",
-     "XPosition:=", "${bbXPos}", "YPosition:=", "${bbYPos}", "ZPosition:=", "${sp.z.toFixed(4)}um",
-     "XSize:=", "${bbXSize}", "YSize:=", "${bbYSize}", "ZSize:=", "${sp.thickness.toFixed(4)}um"],
+     "XPosition:=", "${bbXPos}", "YPosition:=", "${bbYPos}", "ZPosition:=", "${sp.zExpr}",
+     "XSize:=", "${bbXSize}", "YSize:=", "${bbYSize}", "ZSize:=", "${sp.thicknessExpr}"],
     ["NAME:Attributes",
      "Name:=", "${id}", "Flags:=", "", "Color:=", "${colorHfss}",
      "Transparency:=", 0.5, "PartCoordinateSystem:=", "Global",
@@ -993,8 +1041,13 @@ except:
       const baseInst = insts[0];
       if (!baseInst) continue;
       const ring = shapeInstanceToRing(baseInst);
-      // Determine Z range from the layer.
+      // Determine Z range from the layer. Track both numeric (for
+      // sheet-vs-box branching) AND parametric expression (for the
+      // actual emission) so HFSS-side sweeps of h_wg / h_cond / h_clad
+      // / etc. move the swept body in lockstep with the layer stack.
       let zBottom = 0, zSize = evalExpr('h_wg', paramValues) || 0.6;
+      let zBottomExpr = '0um';
+      let zSizeExpr = exprWithUm('h_wg');
       if (c.layer === 'electrode') {
         const boundLayer = c.conductorLayerId
           ? (stack || []).find(l => l.id === c.conductorLayerId && l.role === 'conductor')
@@ -1003,6 +1056,8 @@ except:
         if (elecLayer && layerZ[elecLayer.id]) {
           zBottom = layerZ[elecLayer.id].zBottom;
           zSize = layerZ[elecLayer.id].thickness;
+          zBottomExpr = layerZ[elecLayer.id].zBottomExpr || `${zBottom.toFixed(4)}um`;
+          zSizeExpr = layerZ[elecLayer.id].thicknessExpr || `${zSize.toFixed(4)}um`;
         }
       } else if (c.layer === 'port') {
         // Ports are 2-D sheets — needed for lumped/wave port excitation.
@@ -1011,15 +1066,156 @@ except:
         // sweep" to the conditional emission below.
         zBottom = evalExpr('h_wg', paramValues) || 0.6;
         zSize = 0;
+        zBottomExpr = (wgLayer && layerZ[wgLayer.id]?.zTopExpr) || exprWithUm('h_wg');
+        zSizeExpr = '0um';
       }
       const materialName = c.layer === 'waveguide'
         ? (wgLayer ? wgLayer.material : 'lithium_niobate')
         : (c.layer === 'electrode' ? 'gold'
         : (c.layer === 'port' ? 'vacuum' : 'pec'));
+
+      // ── PARAMETRIC NATIVE-PRIMITIVE PATH ──────────────────────────────
+      // For circle / ellipse / regular-polygon, HFSS has parametric
+      // primitives (CreateCircle, CreateEllipse, CreateRegularPolygon).
+      // Use them with parametric XCenter / YCenter / Radius (or rx/ry,
+      // or num-sides) so HFSS-side sweeps of `r`, `rx`, `ry`, `n`, or
+      // anything feeding the snap chain re-evaluates the shape end-to-
+      // end. Falls back to the tessellated polyline path for racetracks
+      // (no HFSS-native racetrack primitive — 100+ PLPoints with
+      // sin/cos at each would balloon the script and is hard to keep
+      // numerically stable). Rotation lives in the transform chain
+      // and is applied per oEditor.Rotate calls downstream — the base
+      // primitive here is axis-aligned.
+      const ppShape = parametricPos[c.id];
+      const isPortSheet = (c.layer === 'port');
+      const isNativeShape = (shapeKind === 'circle' || shapeKind === 'ellipse' || shapeKind === 'polygon');
+      if (isNativeShape) {
+        const cxShape = ppShape ? exprWithUm(ppShape.cxExpr) : `${cx.toFixed(4)}um`;
+        const cyShape = ppShape ? exprWithUm(ppShape.cyExpr) : `${cy.toFixed(4)}um`;
+        const colorShape = isPortSheet ? '(255 100 100)' : '(200 200 200)';
+        const transShape  = isPortSheet ? '0.5' : '0.0';
+        const solveInside = c.layer === 'waveguide' || isPortSheet ? 'True' : 'False';
+        // 32 segments by default is HFSS's smoothest discretization
+        // (the GUI default) — visually indistinguishable from a true
+        // analytic circle for any sane mesh density. NumSegments=0
+        // tells HFSS to use its internal default; we keep that.
+        let createCall = '';
+        if (shapeKind === 'circle') {
+          const rExpr = exprWithUm(c.r ?? '0');
+          createCall = `oEditor.CreateCircle(
+        ["NAME:CircleParameters",
+         "XCenter:=", "${cxShape}", "YCenter:=", "${cyShape}", "ZCenter:=", "${zBottomExpr}",
+         "Radius:=", "${rExpr}",
+         "WhichAxis:=", "Z",
+         "NumSegments:=", "0"],
+        ["NAME:Attributes",
+         "Name:=", "${id}", "Flags:=", "",
+         "Color:=", "${colorShape}", "Transparency:=", ${transShape},
+         "PartCoordinateSystem:=", "Global",
+         "MaterialValue:=", "\\"${ascii(materialName)}\\"",
+         "SolveInside:=", ${solveInside}])`;
+        } else if (shapeKind === 'ellipse') {
+          // HFSS's CreateEllipse takes MajRadius (along its major axis)
+          // and Ratio = MinRadius / MajRadius. We pick whichever of
+          // rx / ry is LARGER as the major radius, and emit the ratio
+          // parametrically — so any HFSS-side rx / ry sweep flows
+          // through correctly. WhichAxis=Z + axis-aligned: the ellipse
+          // sits with its major axis along X if rx>ry, else along Y.
+          const rxExpr = exprWithUm(c.rx ?? '0');
+          const ryExpr = exprWithUm(c.ry ?? '0');
+          const rxNum = evalExpr(c.rx ?? '0', paramValues) || 0;
+          const ryNum = evalExpr(c.ry ?? '0', paramValues) || 0;
+          // HFSS lacks a parametric "rotate ellipse 90°"; we pick the
+          // major axis at export time. A sweep that flips which is
+          // larger requires a re-export — documented gotcha, but the
+          // common case (one axis stable as the major) sweeps cleanly.
+          const majAlongX = rxNum >= ryNum;
+          const majExpr = majAlongX ? rxExpr : ryExpr;
+          const minExpr = majAlongX ? ryExpr : rxExpr;
+          // Ratio is a unitless scalar — strip um/units. HFSS evaluates
+          // length/length cleanly, so the division stays valid even if
+          // we keep the units in (it cancels). Use explicit division.
+          const ratioExpr = `(${minExpr}) / (${majExpr})`;
+          // Orient: major axis along X if majAlongX else along Y. HFSS's
+          // CreateEllipse takes an Orientation in some releases, but
+          // the simplest portable trick is: emit major along X, then
+          // rely on the user's existing rotate transform if they need
+          // it along Y. For axis-along-Y ellipses we emit with the
+          // semantic swap (major=ry, ratio=rx/ry, then rotate 90°).
+          if (!majAlongX) {
+            // Swap was needed — note in comment; geometry still correct.
+          }
+          createCall = `oEditor.CreateEllipse(
+        ["NAME:EllipseParameters",
+         "XCenter:=", "${cxShape}", "YCenter:=", "${cyShape}", "ZCenter:=", "${zBottomExpr}",
+         "MajRadius:=", "${majExpr}",
+         "Ratio:=", "${ratioExpr}",
+         "WhichAxis:=", "Z",
+         "NumSegments:=", "0"],
+        ["NAME:Attributes",
+         "Name:=", "${id}", "Flags:=", "",
+         "Color:=", "${colorShape}", "Transparency:=", ${transShape},
+         "PartCoordinateSystem:=", "Global",
+         "MaterialValue:=", "\\"${ascii(materialName)}\\"",
+         "SolveInside:=", ${solveInside}])`;
+          if (!majAlongX) {
+            createCall += `
+    oEditor.Rotate(
+        ["NAME:Selections", "Selections:=", "${id}", "NewPartsModelFlag:=", "Model"],
+        ["NAME:RotateParameters", "RotateAxis:=", "Z", "RotateAngle:=", "90deg"])`;
+          }
+        } else { // polygon
+          // CreateRegularPolygon takes a center, a "start" vertex on
+          // the polygon perimeter, and the number of sides. We anchor
+          // the start vertex at (cx+r, cy) — the East-pointing vertex.
+          // r is the circumradius (vertex distance from center).
+          const rExpr = exprWithUm(c.r ?? '0');
+          const nVal = evalExpr(c.n ?? '6', paramValues);
+          const nSides = Math.max(3, Math.floor(Number.isFinite(nVal) ? nVal : 6));
+          const xStartExpr = `(${cxShape}) + (${rExpr})`;
+          createCall = `oEditor.CreateRegularPolygon(
+        ["NAME:RegularPolygonParameters",
+         "XCenter:=", "${cxShape}", "YCenter:=", "${cyShape}", "ZCenter:=", "${zBottomExpr}",
+         "XStart:=", "${xStartExpr}", "YStart:=", "${cyShape}", "ZStart:=", "${zBottomExpr}",
+         "NumSides:=", "${nSides}",
+         "WhichAxis:=", "Z"],
+        ["NAME:Attributes",
+         "Name:=", "${id}", "Flags:=", "",
+         "Color:=", "${colorShape}", "Transparency:=", ${transShape},
+         "PartCoordinateSystem:=", "Global",
+         "MaterialValue:=", "\\"${ascii(materialName)}\\"",
+         "SolveInside:=", ${solveInside}])`;
+        }
+        code += `# ${c.id}: ${shapeKind} as native HFSS primitive (parametric)\n`;
+        code += `try:
+    _delete_geom_if_exists("${id}")
+    ${createCall}${isPortSheet ? '' : `
+    oEditor.SweepAlongVector(
+        ["NAME:Selections", "Selections:=", "${id}", "NewPartsModelFlag:=", "Model"],
+        ["NAME:VectorSweepParameters",
+         "DraftAngle:=", "0deg", "DraftType:=", "Round",
+         "CheckFaceFaceIntersection:=", False,
+         "SweepVectorX:=", "0um",
+         "SweepVectorY:=", "0um",
+         "SweepVectorZ:=", "${zSizeExpr}"])`}
+except Exception as e:
+    try:
+        oDesktop.AddMessage("", "", 1, "Failed to build ${shapeKind} ${id}: " + str(e))
+    except:
+        pass
+`;
+        if (c.layer === 'electrode') emittedElecNames.push(id);
+        else if (c.layer === 'waveguide') emittedWgNames.push(id);
+        else if (c.layer === 'port') emittedPortNames.push(id);
+        continue; // skip the tessellated-polyline path below
+      }
+
       // Build the points list. CreatePolyline expects a sequence of
-      // PolylinePoint records.
+      // PolylinePoint records. X/Y stay numeric (the shape's perimeter
+      // is tessellated at export time — see the racetrack note); Z uses
+      // the parametric layer-stack expression so vertical sweeps work.
       const ptRecords = ring.map(([px, py]) =>
-        `["NAME:PLPoint", "X:=", "${px.toFixed(4)}um", "Y:=", "${py.toFixed(4)}um", "Z:=", "${zBottom.toFixed(4)}um"]`
+        `["NAME:PLPoint", "X:=", "${px.toFixed(4)}um", "Y:=", "${py.toFixed(4)}um", "Z:=", "${zBottomExpr}"]`
       ).join(', ');
       const segRecords = ring.map((_, i) =>
         `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", ${i}, "NoOfPoints:=", 2]`
@@ -1027,7 +1223,8 @@ except:
       // For ports (zSize=0) the closed polyline IS the final geometry —
       // a 2-D sheet usable as a port assignment. For everything else we
       // also SweepAlongVector to extrude into a 3-D body.
-      const isPortSheet = (c.layer === 'port');
+      // (isPortSheet was already declared above in the native-primitive
+      // dispatch.)
       code += `# ${c.id}: ${shapeKind} as polygonal ${isPortSheet ? 'sheet (port)' : 'sheet'} (tessellation = ${ring.length} verts)\n`;
       code += `try:
     _delete_geom_if_exists("${id}")
@@ -1060,7 +1257,7 @@ except:
          "CheckFaceFaceIntersection:=", False,
          "SweepVectorX:=", "0um",
          "SweepVectorY:=", "0um",
-         "SweepVectorZ:=", "${zSize.toFixed(4)}um"])`}
+         "SweepVectorZ:=", "${zSizeExpr}"])`}
 except Exception as e:
     try:
         oDesktop.AddMessage("", "", 1, "Failed to build ${shapeKind} ${id}: " + str(e))
@@ -1089,7 +1286,7 @@ except Exception as e:
         ]);
         const innerId = `${id}_hole`;
         const innerPtRecords = innerPts.map(([px, py]) =>
-          `["NAME:PLPoint", "X:=", "${px.toFixed(4)}um", "Y:=", "${py.toFixed(4)}um", "Z:=", "${zBottom.toFixed(4)}um"]`
+          `["NAME:PLPoint", "X:=", "${px.toFixed(4)}um", "Y:=", "${py.toFixed(4)}um", "Z:=", "${zBottomExpr}"]`
         ).join(', ');
         const innerSegRecords = innerPts.map((_, i) =>
           `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", ${i}, "NoOfPoints:=", 2]`
@@ -1126,7 +1323,7 @@ except Exception as e:
          "CheckFaceFaceIntersection:=", False,
          "SweepVectorX:=", "0um",
          "SweepVectorY:=", "0um",
-         "SweepVectorZ:=", "${zSize.toFixed(4)}um"])
+         "SweepVectorZ:=", "${zSizeExpr}"])
     oEditor.Subtract(
         ["NAME:Selections",
          "Blank Parts:=", "${id}",
@@ -1173,9 +1370,14 @@ except Exception as e:
       const safeSlabH = (Number.isFinite(slabH) && slabH > 0) ? slabH : 0.1;
       const safeSlabW = (Number.isFinite(slabW) && slabW > 0) ? slabW : 5.0;
       const safeAngle = (Number.isFinite(etchAngleDeg) && etchAngleDeg > 0 && etchAngleDeg <= 90) ? etchAngleDeg : 70;
-      // WG layer base / total
+      // WG layer base / total — keep numeric for the rib-shift math
+      // (uses Math.tan etc.) AND track parametric expressions for the
+      // emission, so HFSS-side sweeps of h_wg / h_slab move the rib in
+      // lockstep with the layer stack.
       const wgZ = wgLayer && layerZ[wgLayer.id] ? layerZ[wgLayer.id].zBottom : 0;
       const wgT = wgLayer && layerZ[wgLayer.id] ? layerZ[wgLayer.id].thickness : (Number.isFinite(wgLayerThickness) ? wgLayerThickness : 0.6);
+      const wgZExpr = (wgLayer && layerZ[wgLayer.id]?.zBottomExpr) || `${wgZ.toFixed(4)}um`;
+      const wgTExpr = (wgLayer && layerZ[wgLayer.id]?.thicknessExpr) || `${wgT.toFixed(4)}um`;
       // Compute rib bottom and top widths from core_width and the reference face.
       // Etch angle is measured from horizontal. tan(angle) gives rise/run, so going up
       // by ribH the sidewall moves inward by ribH/tan(angle). Slope is "outward going down"
@@ -1249,7 +1451,7 @@ except Exception as e:
       code += `# ${c.id}: rib waveguide, axis=${axis}, length=${length.toFixed(3)}um\n`;
       code += `safe_create_box(
     ["NAME:BoxParameters",
-     "XPosition:=", "${slabXPosExpr}", "YPosition:=", "${slabYPosExpr}", "ZPosition:=", "${wgZ.toFixed(4)}um",
+     "XPosition:=", "${slabXPosExpr}", "YPosition:=", "${slabYPosExpr}", "ZPosition:=", "${wgZExpr}",
      "XSize:=", "${slabXSizeExpr}", "YSize:=", "${slabYSizeExpr}", "ZSize:=", "${slabHExprUm}"],
     ["NAME:Attributes",
      "Name:=", "${wgName}_slab", "Flags:=", "", "Color:=", "(143 175 143)",
@@ -1266,11 +1468,13 @@ except Exception as e:
       //   top corners    at z=wgZ+wgT,   ±ribTopW/2 in the perpendicular direction
       const z_rib_bot = wgZ + safeSlabH;
       const z_rib_top = wgZ + wgT;
-      // Z values are stack-derived and stay numeric. X/Y vertices are full
-      // parametric expressions so component position and rib width parameters
-      // both flow through to HFSS sweeps.
-      const z_rib_bot_um = `${z_rib_bot.toFixed(4)}um`;
-      const z_rib_top_um = `${z_rib_top.toFixed(4)}um`;
+      // Z values flow through the layer-stack expressions so an HFSS-
+      // side sweep of h_slab / h_wg moves the rib bottom and top in
+      // lockstep with the slab top and the WG layer top. X/Y vertices
+      // are also parametric so component position + rib width sweeps
+      // work end-to-end.
+      const z_rib_bot_um = `(${wgZExpr}) + ${slabHExprUm}`;
+      const z_rib_top_um = `(${wgZExpr}) + ${exprWithUm(layerThExpr)}`;
       // Start coordinate along the axis (one face of the swept solid)
       const startXExprUm = `${cxExprUm} - ${wExprUm}/2`;
       const startYExprUm = `${cyExprUm} - ${hExprUm}/2`;
@@ -1381,15 +1585,12 @@ except Exception as e:
       const baseCsName = `${id}_cs`;
       const slabTopZ = wgZ + safeSlabH;
       // Base (idx=0) keeps the PARAMETRIC origin expressions so HFSS
-      // sweeps over snap-chain variables move the base CS too. Clones
-      // bake in NUMERIC offsets — their position depends on the
-      // transform chain's parametric dx/dy, but for E-field sampling
-      // a fixed clone CS is normally what you want; if a clone CS
-      // needs to follow a swept parameter, the user can re-export
-      // after changing the parameter.
+      // sweeps over snap-chain variables move the base CS too. Z is
+      // also parametric — slab_top = wg_zBottom + h_slab — so layer-
+      // thickness sweeps move the CS in lockstep with the geometry.
       const baseCsOriginXExpr = (axis === 'x') ? `(${cxExprUm}) - (${wExprUm})/2` : cxExprUm;
       const baseCsOriginYExpr = (axis === 'y') ? `(${cyExprUm}) - (${hExprUm})/2` : cyExprUm;
-      const baseCsOriginZExpr = `${slabTopZ.toFixed(4)}um`;
+      const baseCsOriginZExpr = `(${wgZExpr}) + ${slabHExprUm}`;
       const baseXAxis = axis === 'x' ? [1, 0, 0] : [0, 1, 0];
       const baseYAxis = axis === 'x' ? [0, 1, 0] : [-1, 0, 0];
       relativeCsDefs.push({
@@ -1496,7 +1697,7 @@ except Exception as e:
               name: `${baseCsName}_${inst.idx}`,
               originX: `${startX.toFixed(4)}um`,
               originY: `${startY.toFixed(4)}um`,
-              originZ: `${slabTopZ.toFixed(4)}um`,
+              originZ: baseCsOriginZExpr,
               xAxis: xAxisWorld.map(v => v.toFixed(6)),
               yAxis: yAxisWorld.map(v => v.toFixed(6)),
             });
@@ -1565,7 +1766,13 @@ except Exception as e:
         : condLayer;
       const portCondZBot = portCondLayer && layerZ[portCondLayer.id] ? layerZ[portCondLayer.id].zBottom : evalExpr('h_wg', paramValues) || 0.6;
       const portCondThk = portCondLayer && layerZ[portCondLayer.id] ? layerZ[portCondLayer.id].thickness : 0;
-      const portZNum = String(portCondZBot + portCondThk / 2);
+      // Parametric Z = condZBottom + condThickness/2 so an HFSS sweep of
+      // h_cond / h_wg moves the port sheet to the new mid-conductor
+      // plane. Falls back to the numeric mid-Z when no conductor layer
+      // is bound (legacy h_wg placement).
+      const portCondZBotExpr = (portCondLayer && layerZ[portCondLayer.id]?.zBottomExpr) || exprWithUm('h_wg');
+      const portCondThkExpr  = (portCondLayer && layerZ[portCondLayer.id]?.thicknessExpr) || '0um';
+      const portZNum = `(${portCondZBotExpr}) + (${portCondThkExpr})/2`;
       const portWExpr = exprWithUm(c.w);  // e.g. "(port1_w)"
       const portHExpr = exprWithUm(c.h);
       const cxVar = `${id}_cx`;
@@ -1577,7 +1784,7 @@ try:
     safe_create_rectangle(
         ["NAME:RectangleParameters",
          "IsCovered:=", True,
-         "XStart:=", "(${cxVar}) - ${portWExpr}/2", "YStart:=", "(${cyVar}) - ${portHExpr}/2", "ZStart:=", "${portZNum}um",
+         "XStart:=", "(${cxVar}) - ${portWExpr}/2", "YStart:=", "(${cyVar}) - ${portHExpr}/2", "ZStart:=", "${portZNum}",
          "Width:=", "${portWExpr}", "Height:=", "${portHExpr}",
          "WhichAxis:=", "Z"],
         ["NAME:Attributes",
@@ -1601,8 +1808,8 @@ except Exception as e:
       const elecZ = elecLayer && layerZ[elecLayer.id] ? layerZ[elecLayer.id].zBottom : 0;
       const elecThickness = elecLayer && layerZ[elecLayer.id] ? layerZ[elecLayer.id].thickness : cond_z;
       const elecMaterial = elecLayer ? elecLayer.material : condMaterial;
-      const elecZ_um = `${elecZ.toFixed(4)}um`;
-      const elecT_um = `${elecThickness.toFixed(4)}um`;
+      const elecZ_um = (elecLayer && layerZ[elecLayer.id]?.zBottomExpr) || `${elecZ.toFixed(4)}um`;
+      const elecT_um = (elecLayer && layerZ[elecLayer.id]?.thicknessExpr) || `${elecThickness.toFixed(4)}um`;
       // If the conductor layer's thickness is zero, emit the trace as a
       // 2D SHEET (rectangle on the XY plane) instead of a 3D box. We
       // track the name so the impedance-boundary block at the end of
@@ -2256,8 +2463,8 @@ except Exception as e:
       const z = layerZ[layer.id];
       const cladZ = z ? z.zBottom : 0;
       const cladT = z ? z.thickness : (Number.isFinite(wgLayerThickness) ? wgLayerThickness : 0.6);
-      const cladZ_um = `${cladZ.toFixed(4)}um`;
-      const cladT_um = `${cladT.toFixed(4)}um`;
+      const cladZ_um = z?.zBottomExpr ?? `${cladZ.toFixed(4)}um`;
+      const cladT_um = z?.thicknessExpr ?? `${cladT.toFixed(4)}um`;
       code += `safe_create_box(
     ["NAME:BoxParameters",
      "XPosition:=", "${bbXPos}", "YPosition:=", "${bbYPos}", "ZPosition:=", "${cladZ_um}",
@@ -2296,7 +2503,11 @@ except Exception as e:
   // solving).
   const condZBottom = condLayer && layerZ[condLayer.id] ? layerZ[condLayer.id].zBottom : 0;
   const condZThick  = condLayer && layerZ[condLayer.id] ? layerZ[condLayer.id].thickness : cond_z;
-  const fieldPlotZ_um = `${(condZBottom + condZThick / 2).toFixed(4)}um`;
+  // Parametric mid-Z = zBottom + thickness/2. Tracks h_cond sweeps; for
+  // zero-thickness sheets this collapses to zBottom (the sheet plane).
+  const condZBottomExpr = (condLayer && layerZ[condLayer.id]?.zBottomExpr) || `${condZBottom.toFixed(4)}um`;
+  const condZThickExpr  = (condLayer && layerZ[condLayer.id]?.thicknessExpr) || `${condZThick.toFixed(4)}um`;
+  const fieldPlotZ_um = `(${condZBottomExpr}) + (${condZThickExpr})/2`;
   code += `
 # ===== Field-plot plane (non-model) =====
 # Sheet at the conductor's mid-Z spanning the chip footprint, useful
@@ -2359,17 +2570,33 @@ except Exception as e:
   // Z extent: from the bottom of the lowest substrate to the top of
   // the highest layer we tracked. Fall back to a generous range so the
   // box still wraps the geometry if layerZ is sparse.
-  const allZBottoms = Object.values(layerZ).map(z => z.zBottom);
-  const allZTops = Object.values(layerZ).map(z => z.zBottom + z.thickness);
-  const sceneZMin = allZBottoms.length ? Math.min(...allZBottoms) : -260;
-  const sceneZMax = allZTops.length ? Math.max(...allZTops) : 5;
+  //
+  // PARAMETRIC: identify the extremal layers numerically at export
+  // time, then emit their zBottomExpr / zTopExpr so HFSS-side sweeps
+  // of layer thicknesses grow the air box in lockstep. The numeric
+  // pick of "which layer is lowest / highest" can in principle shift
+  // under sweeps, but the typical stack has the substrate-bottom layer
+  // pinned at the lowest and a cladding-or-cover layer at the highest
+  // — both stable under any normal parameter sweep.
+  const layerZEntries = Object.entries(layerZ);
+  let minLayerEntry = null, maxLayerEntry = null;
+  let sceneZMin = +Infinity, sceneZMax = -Infinity;
+  for (const [id, z] of layerZEntries) {
+    if (z.zBottom < sceneZMin) { sceneZMin = z.zBottom; minLayerEntry = z; }
+    if (z.zBottom + z.thickness > sceneZMax) { sceneZMax = z.zBottom + z.thickness; maxLayerEntry = z; }
+  }
+  if (!Number.isFinite(sceneZMin)) sceneZMin = -260;
+  if (!Number.isFinite(sceneZMax)) sceneZMax = 5;
+  const sceneZMinExpr = minLayerEntry?.zBottomExpr || `${sceneZMin.toFixed(4)}um`;
+  const sceneZMaxExpr = maxLayerEntry?.zTopExpr || `${sceneZMax.toFixed(4)}um`;
   // Air-region pad as an HFSS variable too, so sweeping it adjusts
   // the radiation box without re-export. The XY footprint is anchored
   // to the chip-dimension variables (so chip_x_size sweeps grow the
-  // air region symmetrically). Z stays numeric — the substrate Z is
-  // fixed by the layer stack, not user-tunable on the fly.
-  const airMinZ = (sceneZMin - radPadUm).toFixed(2);
-  const airSizeZ = ((sceneZMax - sceneZMin) + 2 * radPadUm).toFixed(2);
+  // air region symmetrically). Z follows the layer-stack expressions
+  // — sweeping any layer thickness in HFSS grows the air region to
+  // wrap the new stack height.
+  const airMinZ = `(${sceneZMinExpr}) - (air_pad)`;
+  const airSizeZ = `(${sceneZMaxExpr}) - (${sceneZMinExpr}) + 2 * (air_pad)`;
   code += `set_var("air_pad", "${radPadUm.toFixed(4)}um")\n`;
   const airMinX = `(chip_x_min) - (air_pad)`;
   const airMinY = `(chip_y_min) - (air_pad)`;
@@ -2387,8 +2614,8 @@ except Exception as e:
 try:
     safe_create_box(
         ["NAME:BoxParameters",
-         "XPosition:=", "${airMinX}", "YPosition:=", "${airMinY}", "ZPosition:=", "${airMinZ}um",
-         "XSize:=", "${airSizeX}", "YSize:=", "${airSizeY}", "ZSize:=", "${airSizeZ}um"],
+         "XPosition:=", "${airMinX}", "YPosition:=", "${airMinY}", "ZPosition:=", "${airMinZ}",
+         "XSize:=", "${airSizeX}", "YSize:=", "${airSizeY}", "ZSize:=", "${airSizeZ}"],
         ["NAME:Attributes",
          "Name:=", "air_region", "Flags:=", "", "Color:=", "(180 220 240)",
          "Transparency:=", 0.85, "PartCoordinateSystem:=", "Global",
