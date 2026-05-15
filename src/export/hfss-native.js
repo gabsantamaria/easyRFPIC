@@ -76,8 +76,42 @@ function computeParametricPositions(components, snaps) {
   const incomingSnap = new Map(); // toCompId -> snap
   for (const s of snaps) incomingSnap.set(s.to.compId, s);
 
-  const positions = {}; // compId -> { cxExpr, cyExpr }
+  const positions = {}; // compId -> { cxExpr, cyExpr, wExpr, hExpr }
   const visiting = new Set();
+
+  // Width/height expression for a component, suitable for use in HFSS-
+  // side arithmetic. For primitives it's the raw scene expression (which
+  // already names HFSS variables); for booleans we recurse so the
+  // boolean's bbox is expressed in terms of its operands' parametric
+  // chains rather than the numeric AABB that resolveBooleanBboxes
+  // wrote into c.w / c.h. Without that recursion a snap targeting
+  // a boolean would freeze the boolean's width at export-time numeric
+  // value — and any HFSS-side parameter sweep that moves the operands
+  // would leave snapped-to-boolean children stranded.
+  const dimExprForComp = (c) => {
+    if (!c) return { wExpr: '0', hExpr: '0' };
+    if (c.kind !== 'boolean') {
+      return { wExpr: String(c.w ?? '0'), hExpr: String(c.h ?? '0') };
+    }
+    // Boolean: derive bbox parametrically through the operand tree.
+    const op = c.op;
+    const ops = (c.operandIds || []).map(id => byId[id]).filter(Boolean);
+    if (ops.length === 0) return { wExpr: '0', hExpr: '0' };
+    if (op === 'subtract' || op === 'intersect' || op === 'punch') {
+      // Bbox = base operand's bbox.
+      return dimExprForComp(ops[0]);
+    }
+    // Union: bbox = AABB across all operands. For HFSS this would need
+    // min/max ops which aren't first-class in its expression engine, so
+    // fall back to the post-solve numeric AABB tagged with "um". This
+    // path still tracks parameter changes if every operand sits at the
+    // same place (which is the common case for cluster unions), but the
+    // edges won't follow individual operand sweeps. Worth a future
+    // upgrade — log here so it's surveyable.
+    const wNum = typeof c.w === 'number' ? c.w : 0;
+    const hNum = typeof c.h === 'number' ? c.h : 0;
+    return { wExpr: `${wNum}um`, hExpr: `${hNum}um` };
+  };
 
   const resolve = (compId) => {
     if (positions[compId]) return positions[compId];
@@ -86,16 +120,37 @@ function computeParametricPositions(components, snaps) {
       const c = byId[compId];
       const cx = (c && Number.isFinite(c.cx)) ? c.cx : 0;
       const cy = (c && Number.isFinite(c.cy)) ? c.cy : 0;
-      positions[compId] = { cxExpr: `${cx}um`, cyExpr: `${cy}um` };
+      const dims = dimExprForComp(c);
+      positions[compId] = { cxExpr: `${cx}um`, cyExpr: `${cy}um`, wExpr: dims.wExpr, hExpr: dims.hExpr };
       return positions[compId];
     }
     visiting.add(compId);
     const c = byId[compId];
     if (!c) {
       visiting.delete(compId);
-      const fallback = { cxExpr: '0um', cyExpr: '0um' };
+      const fallback = { cxExpr: '0um', cyExpr: '0um', wExpr: '0', hExpr: '0' };
       positions[compId] = fallback;
       return fallback;
+    }
+    // ── BOOLEAN PASS-THROUGH ─────────────────────────────────────────
+    // For subtract / intersect / punch booleans the AABB equals the BASE
+    // operand's AABB, so the boolean's parametric cx/cy/w/h is just the
+    // base operand's chain. Re-using it (rather than freezing the
+    // boolean's solved cx/cy as a numeric literal) keeps snaps that
+    // TARGET this boolean — e.g. `cond20.E ← diff1.W` — tracking every
+    // parameter that already feeds the operand chain. Union booleans
+    // fall through to the regular numeric-leaf path because the AABB
+    // requires min/max across operand positions, which HFSS's
+    // expression engine doesn't support cleanly.
+    if (c.kind === 'boolean' && (c.operandIds || []).length > 0) {
+      const op = c.op;
+      if (op === 'subtract' || op === 'intersect' || op === 'punch') {
+        const baseId = c.operandIds[0];
+        const basePos = resolve(baseId);
+        positions[compId] = basePos;
+        visiting.delete(compId);
+        return basePos;
+      }
     }
     const snap = incomingSnap.get(compId);
     if (!snap) {
@@ -104,7 +159,8 @@ function computeParametricPositions(components, snaps) {
       // (which are unit-bearing), HFSS evaluates the whole chain in length units.
       const cx = Number.isFinite(c.cx) ? c.cx : 0;
       const cy = Number.isFinite(c.cy) ? c.cy : 0;
-      const result = { cxExpr: `${cx}um`, cyExpr: `${cy}um` };
+      const dims = dimExprForComp(c);
+      const result = { cxExpr: `${cx}um`, cyExpr: `${cy}um`, wExpr: dims.wExpr, hExpr: dims.hExpr };
       positions[compId] = result;
       visiting.delete(compId);
       return result;
@@ -113,18 +169,24 @@ function computeParametricPositions(components, snaps) {
     const parent = byId[snap.from.compId];
     const parentPos = resolve(snap.from.compId);
     if (!parent) {
-      const fallback = { cxExpr: '0um', cyExpr: '0um' };
+      const dims = dimExprForComp(c);
+      const fallback = { cxExpr: '0um', cyExpr: '0um', wExpr: dims.wExpr, hExpr: dims.hExpr };
       positions[compId] = fallback;
       visiting.delete(compId);
       return fallback;
     }
-    const fromOff = anchorOffsetExpr(snap.from.anchor, parent.w, parent.h);
-    const toOff   = anchorOffsetExpr(snap.to.anchor,   c.w,      c.h);
+    // Use the PARENT's parametric w/h from its resolved chain — NOT the
+    // raw parent.w / parent.h, which for booleans is the numeric AABB
+    // that resolveBooleanBboxes wrote in. Same reason as the boolean
+    // pass-through above: we want anchor offsets to track parameters.
+    const fromOff = anchorOffsetExpr(snap.from.anchor, parentPos.wExpr, parentPos.hExpr);
+    const toOff   = anchorOffsetExpr(snap.to.anchor,   c.w,             c.h);
     // Solver: toComp.cx = fromAnchorWorld.x + dx - toAnchor.local.x
     //                  = (parent.cx + fromOff.x) + dx - toOff.x
     const cxExpr = `(${parentPos.cxExpr}) + (${fromOff.xOff}) + (${snap.dx}) - (${toOff.xOff})`;
     const cyExpr = `(${parentPos.cyExpr}) + (${fromOff.yOff}) + (${snap.dy}) - (${toOff.yOff})`;
-    const result = { cxExpr, cyExpr };
+    const dims = dimExprForComp(c);
+    const result = { cxExpr, cyExpr, wExpr: dims.wExpr, hExpr: dims.hExpr };
     positions[compId] = result;
     visiting.delete(compId);
     return result;

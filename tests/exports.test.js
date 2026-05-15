@@ -57,6 +57,64 @@ describe('generateHfssNative', () => {
     )).not.toThrow();
   });
 
+  it('boolean parent passes parametric chain through to its base operand', () => {
+    // A child snapped to a boolean's anchor must inherit the boolean's
+    // parametric chain — NOT a frozen numeric snapshot. For subtract /
+    // intersect / punch booleans the bbox is the base operand's bbox,
+    // so the child's chain expression should reach back through the
+    // base operand's own parametric chain (and thus track every
+    // parameter that feeds it). The earlier regression: changing a
+    // slab-related variable in HFSS shifted the boolean's operands but
+    // left the child stranded because the child's chain had numeric
+    // literals for the boolean's cx / w.
+    const s = {
+      params: {
+        gap_p: { expr: '7' },
+        feed_w: { expr: '3' },
+        child_w: { expr: '15' },
+      },
+      components: [
+        // A primitive whose POSITION depends on a parameter (gap_p).
+        { id: 'leaf', kind: 'rect', layer: 'electrode', cx: 100, cy: 0, w: 'feed_w', h: '4', cutouts: [] },
+        // A primitive snapped to `leaf` with a gap_p offset, then
+        // consumed by a punch boolean.
+        { id: 'op', kind: 'rect', layer: 'electrode', cx: 90, cy: 0, w: 'feed_w', h: '4', cutouts: [], consumedBy: 'pb' },
+        { id: 'tool', kind: 'rect', layer: 'electrode', cx: 90, cy: 0, w: '1', h: '1', cutouts: [], consumedBy: 'pb' },
+        {
+          id: 'pb', kind: 'boolean', op: 'punch', operandIds: ['op', 'tool'],
+          layer: 'electrode', cx: 90, cy: 0, w: '0', h: '0', cutouts: [],
+        },
+        // The child rect — snapped to the boolean's W anchor. Its
+        // chain must reach all the way back through op → leaf so
+        // gap_p still controls its position.
+        { id: 'child', kind: 'rect', layer: 'electrode', cx: 70, cy: 0, w: 'child_w', h: '2', cutouts: [] },
+      ],
+      snaps: [
+        // op's NW pins to leaf.SW with a gap_p offset — gap_p in chain.
+        { id: 's_op', from: { compId: 'leaf', anchor: 'W' }, to: { compId: 'op', anchor: 'E' }, dx: '-gap_p', dy: '0' },
+        // child snapped to the boolean's W.
+        { id: 's_child', from: { compId: 'pb', anchor: 'W' }, to: { compId: 'child', anchor: 'E' }, dx: '0', dy: '0' },
+      ],
+      mirrors: [], groups: [], booleans: [],
+      stack: scene.stack, stackName: scene.stackName, simSetup: scene.simSetup,
+    };
+    const { values: pv } = resolveParams(s.params);
+    const out = generateHfssNative(s, pv);
+    const nameIdx = out.indexOf('"Name:=", "child"');
+    expect(nameIdx).toBeGreaterThan(0);
+    const blockStart = out.lastIndexOf('safe_create_', nameIdx);
+    const block = out.slice(blockStart, nameIdx);
+    const xStart = block.match(/XStart:=", "([^"]+)"/)[1];
+    // The child's XStart must reference `gap_p` (proving the chain
+    // walked through the boolean's base operand). The earlier bug
+    // would leave a numeric `(<solved-cx>um)` instead.
+    expect(xStart).toContain('gap_p');
+    // And must reference the LEAF's w/h variables (feed_w from `op`),
+    // confirming we're passing parametric w/h up through the boolean,
+    // not the boolean's solved numeric AABB.
+    expect(xStart).toContain('feed_w');
+  });
+
   it('tags boolean-parent numeric w/h with "um" in snap-chain offsets', () => {
     // When a primitive is snapped to a BOOLEAN parent, the parent's w/h
     // is a number written by resolveBooleanBboxes (e.g. 8). Embedding
