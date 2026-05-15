@@ -158,13 +158,20 @@ describe('generateHfssNative', () => {
     const xStartMatch = block.match(/XStart:=", "([^"]+)"/);
     expect(xStartMatch).toBeTruthy();
     const xStart = xStartMatch[1];
-    // The chain must contain a unit-bearing width reference for the
-    // boolean (b's solved w = 8). Acceptable forms are `(8um)/2` or
-    // `(8)um/2`. A bare `(8)/2` would be dimensionless and is the bug.
-    expect(xStart).toMatch(/\(8(?:um)?\)\s*(?:um\s*)?\/\s*2/);
-    // And specifically no bare-numeric `(8)/2` (no `um` anywhere
-    // adjacent) is allowed.
-    expect(xStart).not.toMatch(/\(8\)\s*\/\s*2/);
+    // The chain must compose b's bbox from its operand widths, with
+    // every bare-numeric term tagged with "um". The exporter now
+    // expresses the bbox parametrically as a difference of operand
+    // edge expressions (e.g. `((5um) + (3um)/2) - ((0um) - (3um)/2)`),
+    // which is even tighter than the previous `(8um)/2` because it
+    // also tracks individual operand parameter sweeps. Either form
+    // (parametric expansion OR literal `(8um)`) is acceptable —
+    // what matters is that EVERY numeric width division has a unit.
+    // A bare `(8)/2` or `(3)/2` would be dimensionless (= the bug).
+    expect(xStart).not.toMatch(/\((?:[0-9]+(?:\.[0-9]+)?)\)\s*\/\s*2/);
+    // And the operand widths (3 each) should show up with units in
+    // the bbox expression — confirming we're using the parametric
+    // form, not freezing at the numeric AABB.
+    expect(xStart).toMatch(/3um|8um/);
   });
 
   it('emits conductor sheets + near-PEC AssignImpedance when conductor thickness is 0', () => {

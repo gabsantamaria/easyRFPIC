@@ -37,7 +37,7 @@ import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/ra
 //   Fixed anchor like 'NW': (-w/2, +h/2)
 //   Edge anchor 'T:0.3':    ((0.3 - 0.5) * w, +h/2)
 // Component w/h are themselves expression strings (e.g., 'cap_W' or '20').
-function computeParametricPositions(components, snaps) {
+function computeParametricPositions(components, snaps, paramValues = {}) {
   const byId = Object.fromEntries(components.map(c => [c.id, c]));
   // Helper: produce an expression for the X/Y offset of an anchor on a comp
   // whose width-expression is wExpr and height-expression is hExpr.
@@ -51,7 +51,16 @@ function computeParametricPositions(components, snaps) {
   // downstream, throwing the snapped child off by millions of µm. Tag
   // numeric w/h with "um" here so every term in the emitted offset
   // expression carries its unit explicitly.
-  const dimExprStr = (v) => (typeof v === 'number' ? `${v}um` : String(v ?? '0'));
+  const dimExprStr = (v) => {
+    if (typeof v === 'number') return `${v}um`;
+    const s = String(v ?? '0');
+    // Bare-numeric string (e.g. '3', '-2.5') from a primitive's
+    // scene-literal w/h field. HFSS reads bare numbers in the
+    // design's base unit — tag with "um" so it doesn't become
+    // 3 meters and ship the child to the next universe.
+    if (/^-?\d+(?:\.\d+)?$/.test(s.trim())) return `${s}um`;
+    return s;
+  };
   const anchorOffsetExpr = (anchorName, wExpr, hExpr) => {
     const wExprS = dimExprStr(wExpr);
     const hExprS = dimExprStr(hExpr);
@@ -101,16 +110,125 @@ function computeParametricPositions(components, snaps) {
       // Bbox = base operand's bbox.
       return dimExprForComp(ops[0]);
     }
-    // Union: bbox = AABB across all operands. For HFSS this would need
-    // min/max ops which aren't first-class in its expression engine, so
-    // fall back to the post-solve numeric AABB tagged with "um". This
-    // path still tracks parameter changes if every operand sits at the
-    // same place (which is the common case for cluster unions), but the
-    // edges won't follow individual operand sweeps. Worth a future
-    // upgrade — log here so it's surveyable.
-    const wNum = typeof c.w === 'number' ? c.w : 0;
-    const hNum = typeof c.h === 'number' ? c.h : 0;
-    return { wExpr: `${wNum}um`, hExpr: `${hNum}um` };
+    // Union: bbox = AABB across all operands. HFSS expressions have no
+    // first-class min/max, but at EXPORT time the solved numeric
+    // positions tell us WHICH operand is extremal along each axis.
+    // We emit the bbox as a parametric difference between those two
+    // operands' edge expressions, computed via the snap chain WITHOUT
+    // cluster pass-through (otherwise we'd recurse into the very
+    // boolean whose bbox we're computing).
+    //
+    // The cluster-root operand's absolute position cancels out of the
+    // difference, so the result depends only on the parametric snap-
+    // chain deltas between operands — i.e. the union's internal cell
+    // geometry. Sweeping `meander_h_cell_w` / `meander_h_cell_h` / etc.
+    // in HFSS now correctly resizes the bbox and any child snapped
+    // to one of its anchors.
+    //
+    // Fallback to the post-solve numeric AABB (tagged with "um") for
+    // edge cases — zero operands, unresolved positions, or any other
+    // bail-out.
+    const fallbackDims = () => {
+      const wNum = typeof c.w === 'number' ? c.w : 0;
+      const hNum = typeof c.h === 'number' ? c.h : 0;
+      return { wExpr: `${wNum}um`, hExpr: `${hNum}um` };
+    };
+    if (ops.length === 1) {
+      // Singleton union: bbox = operand bbox.
+      return dimExprForComp(ops[0]);
+    }
+    // Find extremal operands using SOLVED numerics
+    let minXOp = ops[0], maxXOp = ops[0], minYOp = ops[0], maxYOp = ops[0];
+    let minX = +Infinity, maxX = -Infinity, minY = +Infinity, maxY = -Infinity;
+    for (const op of ops) {
+      const ocx = Number.isFinite(op.cx) ? op.cx : 0;
+      const ocy = Number.isFinite(op.cy) ? op.cy : 0;
+      const ow  = typeof op.w === 'number' ? op.w : (Number.isFinite(evalExpr(op.w, paramValues)) ? evalExpr(op.w, paramValues) : 0);
+      const oh  = typeof op.h === 'number' ? op.h : (Number.isFinite(evalExpr(op.h, paramValues)) ? evalExpr(op.h, paramValues) : 0);
+      if (ocx - ow/2 < minX) { minX = ocx - ow/2; minXOp = op; }
+      if (ocx + ow/2 > maxX) { maxX = ocx + ow/2; maxXOp = op; }
+      if (ocy - oh/2 < minY) { minY = ocy - oh/2; minYOp = op; }
+      if (ocy + oh/2 > maxY) { maxY = ocy + oh/2; maxYOp = op; }
+    }
+    // Resolve each extremal operand's snap-chain position WITHOUT
+    // cluster pass-through, so we don't loop back into THIS boolean.
+    const minXPos = resolveNoCluster(minXOp.id);
+    const maxXPos = resolveNoCluster(maxXOp.id);
+    const minYPos = resolveNoCluster(minYOp.id);
+    const maxYPos = resolveNoCluster(maxYOp.id);
+    if (!minXPos || !maxXPos || !minYPos || !maxYPos) return fallbackDims();
+    // Per-operand dimensions for the parametric edge expressions.
+    // For boolean operands we'd recurse — bail out to numeric for now
+    // (nested-union bboxes are rare and not worth the complexity).
+    const opDims = (op) => {
+      if (op.kind === 'boolean') return null;
+      // Run through dimExprStr so bare-numeric strings (e.g. '3') pick
+      // up a "um" suffix — otherwise the resulting edge expression
+      // mixes meters and µm and HFSS evaluates the bbox out by a
+      // factor of 10^6.
+      return { wExpr: dimExprStr(op.w), hExpr: dimExprStr(op.h) };
+    };
+    const dMinX = opDims(minXOp), dMaxX = opDims(maxXOp);
+    const dMinY = opDims(minYOp), dMaxY = opDims(maxYOp);
+    if (!dMinX || !dMaxX || !dMinY || !dMaxY) return fallbackDims();
+    const wExpr = `((${maxXPos.cxExpr}) + (${dMaxX.wExpr})/2) - ((${minXPos.cxExpr}) - (${dMinX.wExpr})/2)`;
+    const hExpr = `((${maxYPos.cyExpr}) + (${dMaxY.hExpr})/2) - ((${minYPos.cyExpr}) - (${dMinY.hExpr})/2)`;
+    return { wExpr, hExpr };
+  };
+
+  // Non-memoized snap-chain resolution used by dimExprForComp(union) to
+  // compute parametric bbox without falling into the cluster-operand
+  // pass-through (which would create a cycle: union bbox needs operand
+  // positions, but operand positions chain through the union).
+  //
+  // Free-root operands return their scene-literal cx/cy. The CALLER
+  // takes the DIFFERENCE between two operand positions for bbox
+  // dimensions, so the absolute root position cancels out and the
+  // result is a pure-parametric expression of the operands' relative
+  // snap-chain deltas.
+  const resolveNoCluster = (compId, stack = new Set()) => {
+    if (stack.has(compId)) {
+      const cc = byId[compId];
+      return {
+        cxExpr: `${Number.isFinite(cc?.cx) ? cc.cx : 0}um`,
+        cyExpr: `${Number.isFinite(cc?.cy) ? cc.cy : 0}um`,
+      };
+    }
+    stack.add(compId);
+    const cc = byId[compId];
+    if (!cc) return null;
+    const sn = incomingSnap.get(compId);
+    if (!sn) {
+      return {
+        cxExpr: `${Number.isFinite(cc.cx) ? cc.cx : 0}um`,
+        cyExpr: `${Number.isFinite(cc.cy) ? cc.cy : 0}um`,
+      };
+    }
+    const parent = byId[sn.from.compId];
+    if (!parent) return null;
+    const parentPos = resolveNoCluster(sn.from.compId, new Set(stack));
+    if (!parentPos) return null;
+    // Parent / child dims: prefer parametric scene expressions; for
+    // boolean parents fall back to the numeric AABB (which doesn't
+    // recurse here — keeps this lookup linear).
+    const pwExpr = parent.kind === 'boolean'
+      ? `${typeof parent.w === 'number' ? parent.w : 0}um`
+      : String(parent.w ?? '0');
+    const phExpr = parent.kind === 'boolean'
+      ? `${typeof parent.h === 'number' ? parent.h : 0}um`
+      : String(parent.h ?? '0');
+    const cwExpr = cc.kind === 'boolean'
+      ? `${typeof cc.w === 'number' ? cc.w : 0}um`
+      : String(cc.w ?? '0');
+    const chExpr = cc.kind === 'boolean'
+      ? `${typeof cc.h === 'number' ? cc.h : 0}um`
+      : String(cc.h ?? '0');
+    const fromOff = anchorOffsetExpr(sn.from.anchor, pwExpr, phExpr);
+    const toOff   = anchorOffsetExpr(sn.to.anchor,   cwExpr, chExpr);
+    return {
+      cxExpr: `(${parentPos.cxExpr}) + (${fromOff.xOff}) + (${sn.dx}) - (${toOff.xOff})`,
+      cyExpr: `(${parentPos.cyExpr}) + (${fromOff.yOff}) + (${sn.dy}) - (${toOff.yOff})`,
+    };
   };
 
   const resolve = (compId) => {
@@ -279,7 +397,7 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   // raw scene-stored cx/cy of "free" operands (which can be inconsistent
   // with the boolean's stored cx/cy), producing geometry that's shifted
   // from what the canvas shows.
-  const parametricPos = computeParametricPositions(solved, snaps);
+  const parametricPos = computeParametricPositions(solved, snaps, paramValues);
   // Identify mirror-target ids; those don't get parametric positions.
   const mirrorTargetIds = new Set();
   for (const m of mirrors || []) {
@@ -310,7 +428,7 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   // `_comp_<id>_cx` / `_comp_<id>_cy` to track each parent's CURRENT solved
   // position. HFSS doesn't know about those synthetics — we expand them to
   // each parent's full parametric chain expression (which IS valid HFSS).
-  const parametricPosForExport = computeParametricPositions(solved, snaps);
+  const parametricPosForExport = computeParametricPositions(solved, snaps, paramValues);
   const compsById = Object.fromEntries(components.map(c => [c.id, c]));
   const resolveSynthetics = (expr) => {
     if (typeof expr !== 'string') return expr;
@@ -1287,45 +1405,102 @@ except Exception as e:
       // rotate → translate) onto the WG's start point and local axes
       // to land each CS at the clone's actual world position and
       // orientation.
+      //
+      // PARAMETRIC PATH: when the chain is repeat-only (or repeat +
+      // displace) with no rotation / mirror / duplicate_mirror, we
+      // can express each clone's origin parametrically as a sum of
+      // index-weighted (dx, dy) offsets from the base. That lets
+      // HFSS-side sweeps of the repeat's offset variable (e.g.
+      // `-cap_d - cap_gap - 2*cap_W` for wg1) move the CS in
+      // lockstep with the clone WG. For chains involving rotation
+      // or mirroring, fall through to the numeric path — those
+      // would require cos/sin/reflection terms that complicate the
+      // emission for marginal gain on field-sampling CSes.
       if (c.transforms && c.transforms.some(t => t && t.enabled !== false)) {
-        const insts = expandTransforms([c], paramValues);
-        for (const inst of insts) {
-          if (inst.idx === 0) continue; // base already emitted
-          const sx = inst.scaleX ?? 1;
-          const sy = inst.scaleY ?? 1;
-          const rotDeg = inst.rotation || 0;
-          const rotRad = rotDeg * Math.PI / 180;
-          const ca = Math.cos(rotRad), sa = Math.sin(rotRad);
-          // Local start offset (pre-scale-rotate):
-          //   axis='x': (-w/2, 0)   — left midpoint
-          //   axis='y': (0, -h/2)   — bottom midpoint
-          const lsx = (axis === 'x') ? -inst.w / 2 : 0;
-          const lsy = (axis === 'y') ? -inst.h / 2 : 0;
-          // Apply scale (local), then rotation, then translate to (inst.cx, inst.cy).
-          const ssx = lsx * sx;
-          const ssy = lsy * sy;
-          const startX = inst.cx + ssx * ca - ssy * sa;
-          const startY = inst.cy + ssx * sa + ssy * ca;
-          // Local axis directions:
-          //   axis='x': WG dir = (1, 0); cross = (0, 1)
-          //   axis='y': WG dir = (0, 1); cross = (-1, 0)
-          const xLocal = (axis === 'x') ? [1, 0] : [0, 1];
-          const yLocal = (axis === 'x') ? [0, 1] : [-1, 0];
-          // Apply scale, then rotation, to the unit axis vectors.
-          const applyScaleRot = (v) => {
-            const xs = v[0] * sx, ys = v[1] * sy;
-            return [xs * ca - ys * sa, xs * sa + ys * ca, 0];
-          };
-          const xAxisWorld = applyScaleRot(xLocal);
-          const yAxisWorld = applyScaleRot(yLocal);
-          relativeCsDefs.push({
-            name: `${baseCsName}_${inst.idx}`,
-            originX: `${startX.toFixed(4)}um`,
-            originY: `${startY.toFixed(4)}um`,
-            originZ: `${slabTopZ.toFixed(4)}um`,
-            xAxis: xAxisWorld.map(v => v.toFixed(6)),
-            yAxis: yAxisWorld.map(v => v.toFixed(6)),
-          });
+        const enabledTs = c.transforms.filter(t => t && t.enabled !== false);
+        const onlySimple = enabledTs.every(t => t.kind === 'repeat' || t.kind === 'displace');
+
+        if (onlySimple) {
+          // Mirror expandTransforms's iteration order so each
+          // emitted `..._<k>` lines up with HFSS's k'th clone. The
+          // stream starts as a single base item; each `repeat`
+          // multiplies it by (n+1), each `displace` shifts every
+          // item by the same offset.
+          let stream = [{ dxExpr: '0um', dyExpr: '0um' }];
+          for (const t of enabledTs) {
+            const dxStr = String(t.dx ?? '0');
+            const dyStr = String(t.dy ?? '0');
+            if (t.kind === 'displace') {
+              stream = stream.map(item => ({
+                dxExpr: `(${item.dxExpr}) + (${dxStr})`,
+                dyExpr: `(${item.dyExpr}) + (${dyStr})`,
+              }));
+            } else { // repeat
+              const n = Math.max(0, Math.floor(evalExpr(t.n ?? '0', paramValues) || 0));
+              if (n < 1) continue;
+              const includeOriginal = t.includeOriginal !== false;
+              const next = [];
+              for (const item of stream) {
+                if (includeOriginal) next.push(item);
+                for (let k = 1; k <= n; k++) {
+                  next.push({
+                    dxExpr: `(${item.dxExpr}) + ${k} * (${dxStr})`,
+                    dyExpr: `(${item.dyExpr}) + ${k} * (${dyStr})`,
+                  });
+                }
+              }
+              stream = next;
+            }
+          }
+          // Base axes (no rotation in this path) — emit one CS per
+          // non-base instance with parametric origin offset.
+          for (let idx = 1; idx < stream.length; idx++) {
+            const off = stream[idx];
+            relativeCsDefs.push({
+              name: `${baseCsName}_${idx}`,
+              originX: `(${baseCsOriginXExpr}) + (${off.dxExpr})`,
+              originY: `(${baseCsOriginYExpr}) + (${off.dyExpr})`,
+              originZ: baseCsOriginZExpr,
+              xAxis: baseXAxis,
+              yAxis: baseYAxis,
+            });
+          }
+        } else {
+          // Rotation / mirror / duplicate_mirror present — bake
+          // numerically via expandTransforms. The CS origin won't
+          // track parameter sweeps for those clones; re-export
+          // after sweeping if you need the CS to follow.
+          const insts = expandTransforms([c], paramValues);
+          for (const inst of insts) {
+            if (inst.idx === 0) continue;
+            const sx = inst.scaleX ?? 1;
+            const sy = inst.scaleY ?? 1;
+            const rotDeg = inst.rotation || 0;
+            const rotRad = rotDeg * Math.PI / 180;
+            const ca = Math.cos(rotRad), sa = Math.sin(rotRad);
+            const lsx = (axis === 'x') ? -inst.w / 2 : 0;
+            const lsy = (axis === 'y') ? -inst.h / 2 : 0;
+            const ssx = lsx * sx;
+            const ssy = lsy * sy;
+            const startX = inst.cx + ssx * ca - ssy * sa;
+            const startY = inst.cy + ssx * sa + ssy * ca;
+            const xLocal = (axis === 'x') ? [1, 0] : [0, 1];
+            const yLocal = (axis === 'x') ? [0, 1] : [-1, 0];
+            const applyScaleRot = (v) => {
+              const xs = v[0] * sx, ys = v[1] * sy;
+              return [xs * ca - ys * sa, xs * sa + ys * ca, 0];
+            };
+            const xAxisWorld = applyScaleRot(xLocal);
+            const yAxisWorld = applyScaleRot(yLocal);
+            relativeCsDefs.push({
+              name: `${baseCsName}_${inst.idx}`,
+              originX: `${startX.toFixed(4)}um`,
+              originY: `${startY.toFixed(4)}um`,
+              originZ: `${slabTopZ.toFixed(4)}um`,
+              xAxis: xAxisWorld.map(v => v.toFixed(6)),
+              yAxis: yAxisWorld.map(v => v.toFixed(6)),
+            });
+          }
         }
       }
     } else if (c.layer === 'port') {
