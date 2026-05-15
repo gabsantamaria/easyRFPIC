@@ -2080,12 +2080,47 @@ oDesktop.AddMessage("", "", 0, "Geometry appended to active design.")
     code += `
 # ===== Per-waveguide relative coordinate systems =====
 # Each CS sits at one end of the rib, centered on the ridge cross-
-# section just above the slab. X local = along WG axis, Y local =
-# in-plane perpendicular, Z local = chip out-of-plane. Skipped if a CS
-# with the same name already exists (re-run protection).
+# section just above the slab — useful as the start point for a
+# non-model E-field sample line through the optical mode.
+#
+# CreateRelativeCS interprets OriginX/Y/Z in whatever CS is CURRENTLY
+# the WCS at call time. We force WCS=Global before each call so the
+# origin always lands in global coordinates regardless of whatever
+# the user (or a prior script) left active.
+#
+# Re-run handling: when a CS with the same name already exists we use
+# EditRelativeCS (when available) / ChangeProperty to UPDATE its
+# origin and axes, instead of skipping. That way a stale CS from a
+# previous buggy run gets corrected without the cascade-delete risk
+# of a delete-then-recreate sequence.
+def _set_wcs_global():
+    try:
+        oEditor.SetWCS(
+            ["NAME:SetWCS Parameter",
+             "Working Coordinate System:=", "Global",
+             "RegionDepCSOk:=", False])
+    except:
+        pass
+
+def _update_relative_cs(name, ox, oy, oz, xax, yax):
+    # Try the dedicated EditRelativeCS API first; fall back to
+    # ChangeProperty if it's not available on this HFSS release.
+    try:
+        oEditor.EditRelativeCS(
+            ["NAME:RelativeCSParameters",
+             "Mode:=", "Axis/Position",
+             "OriginX:=", ox, "OriginY:=", oy, "OriginZ:=", oz,
+             "XAxisXvec:=", xax[0], "XAxisYvec:=", xax[1], "XAxisZvec:=", xax[2],
+             "YAxisXvec:=", yax[0], "YAxisYvec:=", yax[1], "YAxisZvec:=", yax[2]],
+            ["NAME:Attributes", "Name:=", name])
+        return True
+    except:
+        pass
+    return False
 `;
     for (const cs of relativeCsDefs) {
       code += `try:
+    _set_wcs_global()
     if not _relative_cs_exists("${cs.name}"):
         oEditor.CreateRelativeCS(
             ["NAME:RelativeCSParameters",
@@ -2100,9 +2135,17 @@ oDesktop.AddMessage("", "", 0, "Geometry appended to active design.")
              "YAxisYvec:=", "${cs.yAxis[1]}",
              "YAxisZvec:=", "${cs.yAxis[2]}"],
             ["NAME:Attributes", "Name:=", "${cs.name}"])
+    else:
+        # Stale CS from a prior run — refresh its origin/axes in place
+        # so the script's geometry parameters and the CS stay
+        # consistent without delete-cascading any dependent parts.
+        _update_relative_cs("${cs.name}",
+            "${cs.originX}", "${cs.originY}", "${cs.originZ}",
+            ["${cs.xAxis[0]}", "${cs.xAxis[1]}", "${cs.xAxis[2]}"],
+            ["${cs.yAxis[0]}", "${cs.yAxis[1]}", "${cs.yAxis[2]}"])
 except Exception as e:
     try:
-        oDesktop.AddMessage("", "", 1, "Failed to create relative CS ${cs.name}: " + str(e))
+        oDesktop.AddMessage("", "", 1, "Failed to create/update relative CS ${cs.name}: " + str(e))
     except:
         pass
 `;
