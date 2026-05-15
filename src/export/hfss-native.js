@@ -650,6 +650,22 @@ def safe_create_polyline(poly_params, attributes, name):
         except:
             pass
 
+# Force Working CS = Global before any geometry is created. CreateRelativeCS
+# and various interactive operations can leave a non-Global CS active, and
+# any new oEditor.CreateBox / CreatePolyline call binds the part's
+# PartCoordinateSystem to the WCS — even when an explicit "Global" is given
+# in the Attributes block (HFSS quirk). Setting WCS to Global up front
+# guarantees every part this script creates is in the global frame, so
+# downstream operations (especially deleting/recreating relative CSes at
+# the end) don't cascade-delete unrelated geometry.
+try:
+    oEditor.SetWCS(
+        ["NAME:SetWCS Parameter",
+         "Working Coordinate System:=", "Global",
+         "RegionDepCSOk:=", False])
+except:
+    pass
+
 # ===== Layer stack: substrates =====
 `;
   // Substrate layers (Z < 0)
@@ -2083,16 +2099,17 @@ oDesktop.AddMessage("", "", 0, "Geometry appended to active design.")
 # section just above the slab — useful as the start point for a
 # non-model E-field sample line through the optical mode.
 #
-# CreateRelativeCS interprets OriginX/Y/Z in whatever CS is CURRENTLY
-# the WCS at call time. We force WCS=Global before each call so the
-# origin always lands in global coordinates regardless of whatever
-# the user (or a prior script) left active.
-#
-# Re-run handling: when a CS with the same name already exists we use
-# EditRelativeCS (when available) / ChangeProperty to UPDATE its
-# origin and axes, instead of skipping. That way a stale CS from a
-# previous buggy run gets corrected without the cascade-delete risk
-# of a delete-then-recreate sequence.
+# Two safety nets so re-runs land at the right place:
+#   (1) Force WCS = Global so CreateRelativeCS interprets the origin
+#       in global coordinates.
+#   (2) Delete any pre-existing CS with the same name FIRST, then
+#       create fresh. This is safe because the SetWCS=Global emitted
+#       at script start ensures every part HAS been bound to Global,
+#       not to wg<id>_cs, so deleting that CS doesn't cascade-delete
+#       any geometry. (Without the start-of-script SetWCS, HFSS would
+#       implicitly bind new parts to whatever WCS was active —
+#       potentially a stale wg<id>_cs left over from a prior run —
+#       and deleting it would wipe the slab+rib too.)
 def _set_wcs_global():
     try:
         oEditor.SetWCS(
@@ -2102,50 +2119,33 @@ def _set_wcs_global():
     except:
         pass
 
-def _update_relative_cs(name, ox, oy, oz, xax, yax):
-    # Try the dedicated EditRelativeCS API first; fall back to
-    # ChangeProperty if it's not available on this HFSS release.
+def _force_delete_rel_cs(name):
     try:
-        oEditor.EditRelativeCS(
-            ["NAME:RelativeCSParameters",
-             "Mode:=", "Axis/Position",
-             "OriginX:=", ox, "OriginY:=", oy, "OriginZ:=", oz,
-             "XAxisXvec:=", xax[0], "XAxisYvec:=", xax[1], "XAxisZvec:=", xax[2],
-             "YAxisXvec:=", yax[0], "YAxisYvec:=", yax[1], "YAxisZvec:=", yax[2]],
-            ["NAME:Attributes", "Name:=", name])
-        return True
+        if name in list(oEditor.GetCoordinateSystems()):
+            oEditor.Delete(["NAME:Selections", "Selections:=", name])
     except:
         pass
-    return False
 `;
     for (const cs of relativeCsDefs) {
       code += `try:
     _set_wcs_global()
-    if not _relative_cs_exists("${cs.name}"):
-        oEditor.CreateRelativeCS(
-            ["NAME:RelativeCSParameters",
-             "Mode:=", "Axis/Position",
-             "OriginX:=", "${cs.originX}",
-             "OriginY:=", "${cs.originY}",
-             "OriginZ:=", "${cs.originZ}",
-             "XAxisXvec:=", "${cs.xAxis[0]}",
-             "XAxisYvec:=", "${cs.xAxis[1]}",
-             "XAxisZvec:=", "${cs.xAxis[2]}",
-             "YAxisXvec:=", "${cs.yAxis[0]}",
-             "YAxisYvec:=", "${cs.yAxis[1]}",
-             "YAxisZvec:=", "${cs.yAxis[2]}"],
-            ["NAME:Attributes", "Name:=", "${cs.name}"])
-    else:
-        # Stale CS from a prior run — refresh its origin/axes in place
-        # so the script's geometry parameters and the CS stay
-        # consistent without delete-cascading any dependent parts.
-        _update_relative_cs("${cs.name}",
-            "${cs.originX}", "${cs.originY}", "${cs.originZ}",
-            ["${cs.xAxis[0]}", "${cs.xAxis[1]}", "${cs.xAxis[2]}"],
-            ["${cs.yAxis[0]}", "${cs.yAxis[1]}", "${cs.yAxis[2]}"])
+    _force_delete_rel_cs("${cs.name}")
+    oEditor.CreateRelativeCS(
+        ["NAME:RelativeCSParameters",
+         "Mode:=", "Axis/Position",
+         "OriginX:=", "${cs.originX}",
+         "OriginY:=", "${cs.originY}",
+         "OriginZ:=", "${cs.originZ}",
+         "XAxisXvec:=", "${cs.xAxis[0]}",
+         "XAxisYvec:=", "${cs.xAxis[1]}",
+         "XAxisZvec:=", "${cs.xAxis[2]}",
+         "YAxisXvec:=", "${cs.yAxis[0]}",
+         "YAxisYvec:=", "${cs.yAxis[1]}",
+         "YAxisZvec:=", "${cs.yAxis[2]}"],
+        ["NAME:Attributes", "Name:=", "${cs.name}"])
 except Exception as e:
     try:
-        oDesktop.AddMessage("", "", 1, "Failed to create/update relative CS ${cs.name}: " + str(e))
+        oDesktop.AddMessage("", "", 1, "Failed to create relative CS ${cs.name}: " + str(e))
     except:
         pass
 `;
