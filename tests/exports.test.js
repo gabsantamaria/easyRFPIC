@@ -59,23 +59,25 @@ describe('generateHfssNative', () => {
 
   it('tags boolean-parent numeric w/h with "um" in snap-chain offsets', () => {
     // When a primitive is snapped to a BOOLEAN parent, the parent's w/h
-    // is a number written by resolveBooleanBboxes (e.g. 3). Embedding
-    // that bare number in the offset expression as just `3` causes HFSS
-    // to interpret it in the design's base unit (meters) rather than
-    // µm, throwing the child off by millions of µm. Every w/h reference
-    // in the emitted chain expression must carry "um".
+    // is a number written by resolveBooleanBboxes (e.g. 8). Embedding
+    // that bare number in the offset expression as just `(8)` causes
+    // HFSS to interpret it in the design's base unit (meters) rather
+    // than µm, throwing the child off by millions of µm. The boolean's
+    // numeric w/h MUST be emitted as `(8um)` inside the snap-chain
+    // offset.
     const s = {
       params: { feed_w: { expr: '15' } },
       components: [
-        // Two rects unioned into a boolean — its solved w/h ends up
-        // numeric, which is the failure mode this test guards.
+        // Two rects unioned into a boolean — its solved w ends up
+        // numeric (= operand AABB width), which is the failure mode
+        // this test guards.
         { id: 'a', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: '3', h: '3', cutouts: [], consumedBy: 'b' },
         { id: 'c', kind: 'rect', layer: 'electrode', cx: 5, cy: 0, w: '3', h: '3', cutouts: [], consumedBy: 'b' },
         {
           id: 'b', kind: 'boolean', op: 'union', operandIds: ['a', 'c'],
           layer: 'electrode', cx: 2.5, cy: 0, w: '0', h: '0', cutouts: [],
         },
-        // child rect snapped to b.W
+        // Child rect snapped to b.W → its parametric chain references b.w/2.
         { id: 'child', kind: 'rect', layer: 'electrode', cx: -10, cy: 0, w: 'feed_w', h: '1', cutouts: [] },
       ],
       snaps: [
@@ -86,20 +88,25 @@ describe('generateHfssNative', () => {
     };
     const { values: pv } = resolveParams(s.params);
     const out = generateHfssNative(s, pv);
-    // The emitted offset for the child's XStart must reference the
-    // boolean's width with a "um" suffix. We do NOT allow a bare `(3)`
-    // or `(8)` etc. inside the parametric chain — they'd be dimensionless.
-    const childCreate = out.match(/safe_create_(?:rectangle|box)[\s\S]+?Name:=", "child"/);
-    expect(childCreate).toBeTruthy();
-    // Pattern: every numeric w/h reference inside the X/Y start expression
-    // for `child` must be followed by 'um'. Verify by scanning the line.
-    const xStartMatch = childCreate[0].match(/XStart:=", "([^"]+)"/);
+    // Locate the safe_create_rectangle / box block whose Attributes
+    // name the child component. Scan backward from that name to the
+    // preceding safe_create_… opener so we don't accidentally pull
+    // some earlier component's XStart.
+    const nameIdx = out.indexOf('"Name:=", "child"');
+    expect(nameIdx).toBeGreaterThan(0);
+    const blockStart = out.lastIndexOf('safe_create_', nameIdx);
+    expect(blockStart).toBeGreaterThan(0);
+    const block = out.slice(blockStart, nameIdx);
+    const xStartMatch = block.match(/XStart:=", "([^"]+)"/);
     expect(xStartMatch).toBeTruthy();
     const xStart = xStartMatch[1];
-    // No bare /num/2 — every numeric divisor of /2 in this chain came
-    // from a w/h reference and must be unit-bearing.
-    expect(xStart).not.toMatch(/\(\d+\)\s*\/\s*2/);  // e.g. (3)/2 forbidden
-    expect(xStart).toMatch(/um\)\s*\/\s*2/);          // e.g. (3um)/2 OK
+    // The chain must contain a unit-bearing width reference for the
+    // boolean (b's solved w = 8). Acceptable forms are `(8um)/2` or
+    // `(8)um/2`. A bare `(8)/2` would be dimensionless and is the bug.
+    expect(xStart).toMatch(/\(8(?:um)?\)\s*(?:um\s*)?\/\s*2/);
+    // And specifically no bare-numeric `(8)/2` (no `um` anywhere
+    // adjacent) is allowed.
+    expect(xStart).not.toMatch(/\(8\)\s*\/\s*2/);
   });
 
   it('emits conductor sheets + near-PEC AssignImpedance when conductor thickness is 0', () => {
