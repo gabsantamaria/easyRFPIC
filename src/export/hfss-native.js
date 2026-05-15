@@ -1126,20 +1126,82 @@ except Exception as e:
       // (ports, electrodes, booleans). We collect the per-waveguide CS
       // definitions here and emit them as a single block at the end of
       // the script — see "Relative coordinate systems" block below.
-      const csName = `${id}_cs`;
-      const csOriginXExpr = (axis === 'x') ? `(${cxExprUm}) - (${wExprUm})/2` : cxExprUm;
-      const csOriginYExpr = (axis === 'y') ? `(${cyExprUm}) - (${hExprUm})/2` : cyExprUm;
-      const csOriginZExpr = `${(wgZ + safeSlabH).toFixed(4)}um`;
-      const csXAxis = axis === 'x' ? [1, 0, 0] : [0, 1, 0];
-      const csYAxis = axis === 'x' ? [0, 1, 0] : [-1, 0, 0];
+      //
+      // One CS PER VISIBLE INSTANCE: if the waveguide has repeat /
+      // duplicate_mirror / displace / rotate transforms, every rendered
+      // copy gets its own CS at the corresponding transformed position
+      // and orientation. Naming follows HFSS's clone convention so the
+      // CSes line up 1:1 with the visible WG copies in the modeler:
+      //   - idx=0 → `<wg_id>_cs` (the base)
+      //   - idx=k → `<wg_id>_cs_<k>` (clones)
+      const baseCsName = `${id}_cs`;
+      const slabTopZ = wgZ + safeSlabH;
+      // Base (idx=0) keeps the PARAMETRIC origin expressions so HFSS
+      // sweeps over snap-chain variables move the base CS too. Clones
+      // bake in NUMERIC offsets — their position depends on the
+      // transform chain's parametric dx/dy, but for E-field sampling
+      // a fixed clone CS is normally what you want; if a clone CS
+      // needs to follow a swept parameter, the user can re-export
+      // after changing the parameter.
+      const baseCsOriginXExpr = (axis === 'x') ? `(${cxExprUm}) - (${wExprUm})/2` : cxExprUm;
+      const baseCsOriginYExpr = (axis === 'y') ? `(${cyExprUm}) - (${hExprUm})/2` : cyExprUm;
+      const baseCsOriginZExpr = `${slabTopZ.toFixed(4)}um`;
+      const baseXAxis = axis === 'x' ? [1, 0, 0] : [0, 1, 0];
+      const baseYAxis = axis === 'x' ? [0, 1, 0] : [-1, 0, 0];
       relativeCsDefs.push({
-        name: csName,
-        originX: csOriginXExpr,
-        originY: csOriginYExpr,
-        originZ: csOriginZExpr,
-        xAxis: csXAxis,
-        yAxis: csYAxis,
+        name: baseCsName,
+        originX: baseCsOriginXExpr,
+        originY: baseCsOriginYExpr,
+        originZ: baseCsOriginZExpr,
+        xAxis: baseXAxis,
+        yAxis: baseYAxis,
       });
+      // Now expand the WG's transform chain and emit one CS per
+      // non-base instance. We compose the instance's (scale →
+      // rotate → translate) onto the WG's start point and local axes
+      // to land each CS at the clone's actual world position and
+      // orientation.
+      if (c.transforms && c.transforms.some(t => t && t.enabled !== false)) {
+        const insts = expandTransforms([c], paramValues);
+        for (const inst of insts) {
+          if (inst.idx === 0) continue; // base already emitted
+          const sx = inst.scaleX ?? 1;
+          const sy = inst.scaleY ?? 1;
+          const rotDeg = inst.rotation || 0;
+          const rotRad = rotDeg * Math.PI / 180;
+          const ca = Math.cos(rotRad), sa = Math.sin(rotRad);
+          // Local start offset (pre-scale-rotate):
+          //   axis='x': (-w/2, 0)   — left midpoint
+          //   axis='y': (0, -h/2)   — bottom midpoint
+          const lsx = (axis === 'x') ? -inst.w / 2 : 0;
+          const lsy = (axis === 'y') ? -inst.h / 2 : 0;
+          // Apply scale (local), then rotation, then translate to (inst.cx, inst.cy).
+          const ssx = lsx * sx;
+          const ssy = lsy * sy;
+          const startX = inst.cx + ssx * ca - ssy * sa;
+          const startY = inst.cy + ssx * sa + ssy * ca;
+          // Local axis directions:
+          //   axis='x': WG dir = (1, 0); cross = (0, 1)
+          //   axis='y': WG dir = (0, 1); cross = (-1, 0)
+          const xLocal = (axis === 'x') ? [1, 0] : [0, 1];
+          const yLocal = (axis === 'x') ? [0, 1] : [-1, 0];
+          // Apply scale, then rotation, to the unit axis vectors.
+          const applyScaleRot = (v) => {
+            const xs = v[0] * sx, ys = v[1] * sy;
+            return [xs * ca - ys * sa, xs * sa + ys * ca, 0];
+          };
+          const xAxisWorld = applyScaleRot(xLocal);
+          const yAxisWorld = applyScaleRot(yLocal);
+          relativeCsDefs.push({
+            name: `${baseCsName}_${inst.idx}`,
+            originX: `${startX.toFixed(4)}um`,
+            originY: `${startY.toFixed(4)}um`,
+            originZ: `${slabTopZ.toFixed(4)}um`,
+            xAxis: xAxisWorld.map(v => v.toFixed(6)),
+            yAxis: yAxisWorld.map(v => v.toFixed(6)),
+          });
+        }
+      }
     } else if (c.layer === 'port') {
       // Port-layer rects are emitted as 2-D sheet rectangles (axis-aligned
       // to the Z plane). HFSS uses 2-D sheets as the geometry for lumped
