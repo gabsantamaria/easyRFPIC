@@ -335,30 +335,107 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       const d = Math.sqrt(dx * dx + dy * dy);
       if (d <= worldThresh && (!best || d < best.d)) best = { x, y, label, d };
     };
-    for (const c of solved) {
-      const w = evalExpr(c.w, paramValues);
-      const h = evalExpr(c.h, paramValues);
-      if (!Number.isFinite(w) || !Number.isFinite(h)) continue;
+    // Iterate transform-expanded instances rather than the base solved
+    // list. This makes the ruler snap to EVERY rendered shape — the
+    // parent at idx=0 AND every child copy produced by a `repeat` /
+    // `duplicate_mirror`. For booleans the per-instance cx/cy/w/h
+    // describes the cluster's AABB at that copy's position, so the
+    // user can snap to corners / edges of each repeated cell, not just
+    // the base one. Iterating `solved` (the previous behavior) only saw
+    // the base position and silently ignored child cells.
+    for (const inst of transformInstances) {
+      const w = inst.w;
+      const h = inst.h;
+      if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) continue;
+      const cx = inst.cx, cy = inst.cy;
+      const tag = inst.idx > 0 ? `${inst.compId}#${inst.idx}` : inst.compId;
       // 9 fixed anchors
       for (const a of ANCHORS) {
         const lp = anchorLocal(a, w, h);
-        consider(c.cx + lp.x, c.cy + lp.y, `${c.id} ${a}`);
+        consider(cx + lp.x, cy + lp.y, `${tag} ${a}`);
       }
       // Nearest point on each edge (parametric snap)
-      const x0 = c.cx - w / 2, x1 = c.cx + w / 2;
-      const y0 = c.cy - h / 2, y1 = c.cy + h / 2;
+      const x0 = cx - w / 2, x1 = cx + w / 2;
+      const y0 = cy - h / 2, y1 = cy + h / 2;
       // Top edge: y = y1, x in [x0, x1]
       if (wp.x >= x0 - worldThresh && wp.x <= x1 + worldThresh) {
-        const cx = Math.max(x0, Math.min(x1, wp.x));
-        consider(cx, y1, `${c.id} top`);
-        consider(cx, y0, `${c.id} bot`);
+        const xProj = Math.max(x0, Math.min(x1, wp.x));
+        consider(xProj, y1, `${tag} top`);
+        consider(xProj, y0, `${tag} bot`);
       }
       // Left/right edges
       if (wp.y >= y0 - worldThresh && wp.y <= y1 + worldThresh) {
-        const cy = Math.max(y0, Math.min(y1, wp.y));
-        consider(x0, cy, `${c.id} left`);
-        consider(x1, cy, `${c.id} right`);
+        const yProj = Math.max(y0, Math.min(y1, wp.y));
+        consider(x0, yProj, `${tag} left`);
+        consider(x1, yProj, `${tag} right`);
       }
+    }
+    // For BOOLEAN INSTANCES at idx > 0 (repeats / mirror copies of a
+    // unioned cluster like the meander), also walk the cluster's
+    // operands and emit anchor points at each operand's TRANSFORMED
+    // position — same translate/rotate/mirror composition the canvas
+    // uses to render the child cell. Without this, snapping inside a
+    // repeated cell only finds the outer AABB; with it, you can hover
+    // any rail/frame/connector edge in any cell. The math mirrors
+    // `buildBoolInstanceOverrides` in the boolean renderer below.
+    for (const inst of transformInstances) {
+      if (inst.kind !== 'boolean' || inst.idx === 0) continue;
+      const b = solved.find(c => c.id === inst.compId);
+      if (!b) continue;
+      const dx = inst.cx - b.cx;
+      const dy = inst.cy - b.cy;
+      const rot = inst.rotation || 0;
+      const bSx = inst.scaleX ?? 1;
+      const bSy = inst.scaleY ?? 1;
+      if (!dx && !dy && !rot && bSx === 1 && bSy === 1) continue;
+      const rad = rot * Math.PI / 180;
+      const ca = Math.cos(rad), sa = Math.sin(rad);
+      const visitOp = (cid) => {
+        const op = solved.find(c => c.id === cid);
+        if (!op) return;
+        if (op.kind === 'boolean') {
+          for (const childId of (op.operandIds || [])) visitOp(childId);
+          return;
+        }
+        // Look up the operand's base instance for its w/h (already
+        // numeric in transformInstances) and base cx/cy.
+        const baseInst = transformInstances.find(ii => ii.compId === op.id && ii.idx === 0);
+        if (!baseInst) return;
+        const opW = baseInst.w, opH = baseInst.h;
+        if (!Number.isFinite(opW) || !Number.isFinite(opH) || opW <= 0 || opH <= 0) return;
+        // Compose translate → mirror → rotate, same as buildBoolInstanceOverrides
+        let tx = baseInst.cx + dx;
+        let ty = baseInst.cy + dy;
+        if (bSx === -1) tx = 2 * inst.cx - tx;
+        if (bSy === -1) ty = 2 * inst.cy - ty;
+        const rxC = tx - inst.cx;
+        const ryC = ty - inst.cy;
+        const newCx = rot ? inst.cx + rxC * ca - ryC * sa : tx;
+        const newCy = rot ? inst.cy + rxC * sa + ryC * ca : ty;
+        const tagOp = `${op.id}#${inst.idx}`;
+        // For rotated booleans the operand's axis-aligned anchors don't
+        // perfectly match the visible (rotated) shape; treating them as
+        // axis-aligned at (newCx, newCy) is an approximation that's
+        // correct for rot=0 (the vast majority of meander / lattice use
+        // cases). Rotated-cluster snap fidelity can be tightened later.
+        for (const a of ANCHORS) {
+          const lp = anchorLocal(a, opW, opH);
+          consider(newCx + lp.x, newCy + lp.y, `${tagOp} ${a}`);
+        }
+        const ox0 = newCx - opW / 2, ox1 = newCx + opW / 2;
+        const oy0 = newCy - opH / 2, oy1 = newCy + opH / 2;
+        if (wp.x >= ox0 - worldThresh && wp.x <= ox1 + worldThresh) {
+          const xProj = Math.max(ox0, Math.min(ox1, wp.x));
+          consider(xProj, oy1, `${tagOp} top`);
+          consider(xProj, oy0, `${tagOp} bot`);
+        }
+        if (wp.y >= oy0 - worldThresh && wp.y <= oy1 + worldThresh) {
+          const yProj = Math.max(oy0, Math.min(oy1, wp.y));
+          consider(ox0, yProj, `${tagOp} left`);
+          consider(ox1, yProj, `${tagOp} right`);
+        }
+      };
+      for (const opid of (b.operandIds || [])) visitOp(opid);
     }
     return best;
   };
