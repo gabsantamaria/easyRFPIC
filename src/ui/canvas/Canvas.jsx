@@ -2712,6 +2712,19 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // Estimate character width for label-fits-on-line check.
         const charW = fontSize * 0.6;
 
+        // Collision-avoidance for label pills. Many dimensioned features
+        // share the same outward direction (e.g. a column of width dims
+        // along the bottom of a meander), and their default-centered
+        // labels would stack on top of each other. We track each placed
+        // label's AABB and, for every new dim, scan a few candidate
+        // positions along the dim line — and a couple of extra rows of
+        // perpendicular offset — looking for the first slot that doesn't
+        // overlap any prior label. When the label sits off-center, we
+        // draw a tiny leader line from the dim-line center to the label
+        // so the visual association is preserved.
+        const placedLabels = [];
+        const aabbOverlap = (a, b) =>
+          !(a.maxX < b.minX || b.maxX < a.minX || a.maxY < b.minY || b.maxY < a.minY);
         return (
           <g pointerEvents="none">
             {dims.map((d, i) => {
@@ -2752,9 +2765,64 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
               if (!showName) return null;
               const text = showValue ? `${nameLabel} = ${valueText}` : nameLabel;
               const textW = text.length * charW;
-              // Label centered along dim line.
-              const mx = (dimP1.x + dimP2.x) / 2;
-              const my = (dimP1.y + dimP2.y) / 2;
+              // Label pill size
+              const labelW = textW + 2 * labelPadX;
+              const labelH = fontSize + 2 * labelPadY;
+              // Center of the dim line — natural starting position.
+              const midX = (dimP1.x + dimP2.x) / 2;
+              const midY = (dimP1.y + dimP2.y) / 2;
+              // Candidate positions, in order of preference:
+              //   row 0 = on the dim line itself; row N = pushed N*step
+              //   farther out along the outward normal (away from geometry).
+              //   t = position along the dim line, 0=p1 endpoint, 1=p2 endpoint.
+              // We try the center first, then offsets toward each end, then
+              // step out and repeat. A small padding gap is added between
+              // labels so they don't visually kiss.
+              const outwardStep = labelH * 1.5;
+              const gap = labelH * 0.15;
+              const tValues = [0.5, 0.35, 0.65, 0.25, 0.75, 0.15, 0.85];
+              const outRows = [0, 1, 2, 3];
+              let chosenMx = midX, chosenMy = midY, chosenOut = 0, foundSlot = false;
+              for (const outRow of outRows) {
+                for (const t of tValues) {
+                  const baseX = dimP1.x + (dimP2.x - dimP1.x) * t;
+                  const baseY = dimP1.y + (dimP2.y - dimP1.y) * t;
+                  const candCx = baseX + d.outwardN.x * outwardStep * outRow;
+                  const candCy = baseY + d.outwardN.y * outwardStep * outRow;
+                  const rect = {
+                    minX: candCx - labelW / 2 - gap,
+                    minY: candCy - labelH / 2 - gap,
+                    maxX: candCx + labelW / 2 + gap,
+                    maxY: candCy + labelH / 2 + gap,
+                  };
+                  if (!placedLabels.some(p => aabbOverlap(rect, p))) {
+                    chosenMx = candCx;
+                    chosenMy = candCy;
+                    chosenOut = outRow;
+                    placedLabels.push(rect);
+                    foundSlot = true;
+                    break;
+                  }
+                }
+                if (foundSlot) break;
+              }
+              if (!foundSlot) {
+                // No clean slot — accept the centered position regardless
+                // (better than dropping the dimension entirely). Still
+                // record its AABB so subsequent labels know about it.
+                placedLabels.push({
+                  minX: midX - labelW / 2,
+                  minY: midY - labelH / 2,
+                  maxX: midX + labelW / 2,
+                  maxY: midY + labelH / 2,
+                });
+              }
+              const mx = chosenMx;
+              const my = chosenMy;
+              // If we pushed the label off-axis, draw a thin leader line
+              // from the dim-line center to the label's edge so the user
+              // can still tell which dim the label belongs to.
+              const needsLeader = chosenOut > 0;
               return (
                 <g key={`dim_${i}_${d.kind}`}>
                   {/* Extension lines */}
@@ -2765,6 +2833,15 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   {/* Arrowheads (point outward from line center) */}
                   <polyline points={arrowAt(dimP1, -1)} fill="none" stroke="#a78bfa" strokeWidth={dimStroke} strokeLinecap="round" strokeLinejoin="round" />
                   <polyline points={arrowAt(dimP2,  1)} fill="none" stroke="#a78bfa" strokeWidth={dimStroke} strokeLinecap="round" strokeLinejoin="round" />
+                  {/* Leader line from dim center to displaced label */}
+                  {needsLeader && (
+                    <line
+                      x1={midX} y1={-midY}
+                      x2={mx} y2={-my}
+                      stroke="#a78bfa" strokeWidth={extStroke}
+                      opacity={0.55} strokeDasharray={`${screen(2.5)},${screen(1.8)}`}
+                    />
+                  )}
                   {/* Label pill */}
                   <rect
                     x={mx - textW / 2 - labelPadX}
