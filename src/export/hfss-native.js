@@ -1670,7 +1670,33 @@ except Exception as e:
     for (const m of members) { gx += m.cx; gy += m.cy; }
     return { x: gx / members.length, y: gy / members.length };
   };
-  const emitTransformChainHfss = (transforms, partIds, startCx, startCy, baseW, baseH, componentGroup, startCxExpr, startCyExpr) => {
+  // Parametric counterpart to `anchorLocal(name, w, h)` — for use in
+  // the rotate branch's pivot computation, where the part's base
+  // dimensions are KNOWN parametric expressions (e.g. `'cps_feed_w'`,
+  // or the parametric union bbox from `dimExprForComp`). Lets us emit
+  // pivot coordinates that stay tied to the underlying variables when
+  // they're swept in HFSS, instead of baking the numeric anchor offset
+  // computed at export time. Mirrors `anchorOffsetExpr` inside
+  // computeParametricPositions but lives in this scope so the
+  // transform-chain emitter can reach it.
+  const anchorOffsetParam = (anchorName, wExpr, hExpr) => {
+    const a = parseAnchor(anchorName);
+    let xOff = '0', yOff = '0';
+    if (a.kind === 'edge') {
+      if (a.side === 'T')      { xOff = `(${a.t} - 0.5) * (${wExpr})`; yOff = `(${hExpr})/2`; }
+      else if (a.side === 'B') { xOff = `(${a.t} - 0.5) * (${wExpr})`; yOff = `-(${hExpr})/2`; }
+      else if (a.side === 'L') { xOff = `-(${wExpr})/2`; yOff = `(${a.t} - 0.5) * (${hExpr})`; }
+      else if (a.side === 'R') { xOff = `(${wExpr})/2`;  yOff = `(${a.t} - 0.5) * (${hExpr})`; }
+    } else {
+      const n = a.name;
+      if (n.includes('W')) xOff = `-(${wExpr})/2`;
+      else if (n.includes('E')) xOff = `(${wExpr})/2`;
+      if (n.includes('S')) yOff = `-(${hExpr})/2`;
+      else if (n.includes('N')) yOff = `(${hExpr})/2`;
+    }
+    return { xOff, yOff };
+  };
+  const emitTransformChainHfss = (transforms, partIds, startCx, startCy, baseW, baseH, componentGroup, startCxExpr, startCyExpr, baseWExpr, baseHExpr) => {
     if (!transforms || transforms.length === 0) return [...partIds];
     let curCx = startCx, curCy = startCy, curRotation = 0;
     // Parametric centroid expressions: track curCx/curCy as HFSS-side
@@ -1760,27 +1786,68 @@ except Exception as e:
         } else {
           // Pivot = 'C' (current center), 'group' (shared centroid of the
           // component's group), or a named anchor on the part's outline.
+          //
+          // PARAMETRIC PIVOT EMISSION: we compute pivotX/pivotY both as
+          // numerics (for the centroid update bookkeeping) AND as
+          // HFSS-side expressions (for the actual translate-rotate-
+          // translate emission and the parametric curCxExpr update).
+          // Baking pivots numerically — as the older code did — meant
+          // sweeping the underlying parameters (e.g. the part's base w/h,
+          // or any variable feeding curCxExpr) left the rotated copy in
+          // the wrong place because the un-translate step pasted the
+          // part at the OLD pivot. Tracking everything through to the
+          // expressions makes the rotation re-evaluate end-to-end.
           let pivotX = curCx, pivotY = curCy;
+          let pivotXExpr = curCxExpr, pivotYExpr = curCyExpr;
           if (pivot === 'group') {
             const gc = groupCentroid(componentGroup);
-            if (gc) { pivotX = gc.x; pivotY = gc.y; }
-            // No group ⇒ fall back to part center (already initialized).
+            if (gc) {
+              pivotX = gc.x; pivotY = gc.y;
+              // groupCentroid currently averages solved numerics; we
+              // don't have parametric chains for group members yet, so
+              // fall back to a baked numeric expression. The rotation
+              // itself is still emitted with a parametric angle.
+              pivotXExpr = `${pivotX.toFixed(4)}um`;
+              pivotYExpr = `${pivotY.toFixed(4)}um`;
+            }
           } else if (pivot !== 'C') {
-            // Resolve local anchor offset on the part's BASE w/h, then
-            // rotate by curRotation (the part's accumulated rotation so far).
+            // Anchor offset on the part's BASE w/h, then rotate by
+            // curRotation (accumulated rotation so far, numeric).
             const localOff = anchorLocal(pivot, baseW, baseH);
             const rad = curRotation * Math.PI / 180;
             const ca = Math.cos(rad), sa = Math.sin(rad);
             pivotX = curCx + (localOff.x * ca - localOff.y * sa);
             pivotY = curCy + (localOff.x * sa + localOff.y * ca);
+            // Parametric version of the same: use parametric baseWExpr/
+            // baseHExpr (when provided) to build the local anchor
+            // offset, rotate by the numeric curRotation cos/sin (they
+            // come from accumulated angles so far — themselves baked
+            // if any prior rotate had a numeric angle, parametric only
+            // if every prior rotate was parametric AND we tracked
+            // curRotationExpr separately, which we don't yet).
+            if (baseWExpr && baseHExpr) {
+              const off = anchorOffsetParam(pivot, baseWExpr, baseHExpr);
+              const caStr = ca.toFixed(6);
+              const saStr = sa.toFixed(6);
+              pivotXExpr = `(${curCxExpr}) + ${caStr} * (${off.xOff}) - ${saStr} * (${off.yOff})`;
+              pivotYExpr = `(${curCyExpr}) + ${saStr} * (${off.xOff}) + ${caStr} * (${off.yOff})`;
+            } else {
+              pivotXExpr = `${pivotX.toFixed(4)}um`;
+              pivotYExpr = `${pivotY.toFixed(4)}um`;
+            }
           }
-          // Translate-rotate-translate.
+          // Negate the pivot for the pre-rotate translate. Wrapping in
+          // parens keeps HFSS's parser from binding `-` to whatever
+          // identifier sits at the front of pivotXExpr.
+          const negPxExpr = `-(${pivotXExpr})`;
+          const negPyExpr = `-(${pivotYExpr})`;
+          // Translate-rotate-translate, emitted parametrically.
           code += `try:
     oEditor.Move(
         ["NAME:Selections", "Selections:=", "${selStr}", "NewPartsModelFlag:=", "Model"],
         ["NAME:TranslateParameters",
-         "TranslateVectorX:=", "${(-pivotX).toFixed(4)}um",
-         "TranslateVectorY:=", "${(-pivotY).toFixed(4)}um",
+         "TranslateVectorX:=", "${negPxExpr}",
+         "TranslateVectorY:=", "${negPyExpr}",
          "TranslateVectorZ:=", "0um"])
     oEditor.Rotate(
         ["NAME:Selections", "Selections:=", "${selStr}", "NewPartsModelFlag:=", "Model"],
@@ -1788,8 +1855,8 @@ except Exception as e:
     oEditor.Move(
         ["NAME:Selections", "Selections:=", "${selStr}", "NewPartsModelFlag:=", "Model"],
         ["NAME:TranslateParameters",
-         "TranslateVectorX:=", "${pivotX.toFixed(4)}um",
-         "TranslateVectorY:=", "${pivotY.toFixed(4)}um",
+         "TranslateVectorX:=", "${pivotXExpr}",
+         "TranslateVectorY:=", "${pivotYExpr}",
          "TranslateVectorZ:=", "0um"])
 except Exception as e:
     oDesktop.AddMessage("", "", 1, "Rotate(${pivot}) failed for ${selStr}: " + str(e))
@@ -1800,17 +1867,13 @@ except Exception as e:
           const dyp = curCy - pivotY;
           curCx = pivotX + dxp * ca - dyp * sa;
           curCy = pivotY + dxp * sa + dyp * ca;
-          // For pivot='C' the centroid is invariant under rotation, so
-          // the parametric expression is unchanged. For pivot='group'
-          // or a named anchor we fall back to baking the numeric pivot
-          // (it's already numeric in the emission above), and the new
-          // centroid expression is computed from the parametric one
-          // around that numeric pivot.
+          // Centroid parametric update. For pivot='C' the centroid is
+          // invariant — the centroid IS the pivot, so it stays put.
+          // For pivot='group' or a named anchor, rotate the (cur −
+          // pivot) offset around the parametric pivot expressions.
           if (pivot !== 'C') {
-            const pxStr = `${pivotX.toFixed(4)}um`;
-            const pyStr = `${pivotY.toFixed(4)}um`;
-            const newCxExpr = `(${pxStr}) + ((${curCxExpr}) - (${pxStr})) * cos(${angleExpr}) - ((${curCyExpr}) - (${pyStr})) * sin(${angleExpr})`;
-            const newCyExpr = `(${pyStr}) + ((${curCxExpr}) - (${pxStr})) * sin(${angleExpr}) + ((${curCyExpr}) - (${pyStr})) * cos(${angleExpr})`;
+            const newCxExpr = `(${pivotXExpr}) + ((${curCxExpr}) - (${pivotXExpr})) * cos(${angleExpr}) - ((${curCyExpr}) - (${pivotYExpr})) * sin(${angleExpr})`;
+            const newCyExpr = `(${pivotYExpr}) + ((${curCxExpr}) - (${pivotXExpr})) * sin(${angleExpr}) + ((${curCyExpr}) - (${pivotYExpr})) * cos(${angleExpr})`;
             curCxExpr = newCxExpr;
             curCyExpr = newCyExpr;
           }
@@ -1989,6 +2052,8 @@ except Exception as e:
       c.transforms, partIds, c.cx, c.cy, baseW || 0, baseH || 0, c.group,
       ppForChain ? ppForChain.cxExpr : undefined,
       ppForChain ? ppForChain.cyExpr : undefined,
+      ppForChain ? ppForChain.wExpr : undefined,
+      ppForChain ? ppForChain.hExpr : undefined,
     );
     // If this part is a zero-thickness conductor sheet, every clone the
     // transform chain creates also needs the impedance boundary. Extend
@@ -2086,6 +2151,8 @@ except Exception as e:
         b.transforms || [], [safeBoolId], solvedB.cx, solvedB.cy, bW || 0, bH || 0, b.group,
         ppForBool ? ppForBool.cxExpr : undefined,
         ppForBool ? ppForBool.cyExpr : undefined,
+        ppForBool ? ppForBool.wExpr : undefined,
+        ppForBool ? ppForBool.hExpr : undefined,
       );
       // If the boolean result is a zero-thickness conductor sheet (any
       // operand sat on a zero-thickness conductor layer ⇒ Unite/Subtract
