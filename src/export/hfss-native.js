@@ -41,20 +41,33 @@ function computeParametricPositions(components, snaps) {
   const byId = Object.fromEntries(components.map(c => [c.id, c]));
   // Helper: produce an expression for the X/Y offset of an anchor on a comp
   // whose width-expression is wExpr and height-expression is hExpr.
+  //
+  // CRITICAL UNIT HANDLING: parent components walked through the snap
+  // chain can be BOOLEANS whose w/h is a numeric AABB value written by
+  // resolveBooleanBboxes (e.g. `3` for a 3-µm-wide cluster). A bare
+  // number embedded in an HFSS expression is interpreted in the
+  // design's base length unit (meters in most configurations) — NOT µm
+  // — and that poisons any arithmetic with unit-bearing terms
+  // downstream, throwing the snapped child off by millions of µm. Tag
+  // numeric w/h with "um" here so every term in the emitted offset
+  // expression carries its unit explicitly.
+  const dimExprStr = (v) => (typeof v === 'number' ? `${v}um` : String(v ?? '0'));
   const anchorOffsetExpr = (anchorName, wExpr, hExpr) => {
+    const wExprS = dimExprStr(wExpr);
+    const hExprS = dimExprStr(hExpr);
     const a = parseAnchor(anchorName);
     let xOff = '0', yOff = '0';
     if (a.kind === 'edge') {
-      if (a.side === 'T') { xOff = `(${a.t} - 0.5) * (${wExpr})`; yOff = `(${hExpr})/2`; }
-      else if (a.side === 'B') { xOff = `(${a.t} - 0.5) * (${wExpr})`; yOff = `-(${hExpr})/2`; }
-      else if (a.side === 'L') { xOff = `-(${wExpr})/2`; yOff = `(${a.t} - 0.5) * (${hExpr})`; }
-      else if (a.side === 'R') { xOff = `(${wExpr})/2`;  yOff = `(${a.t} - 0.5) * (${hExpr})`; }
+      if (a.side === 'T') { xOff = `(${a.t} - 0.5) * (${wExprS})`; yOff = `(${hExprS})/2`; }
+      else if (a.side === 'B') { xOff = `(${a.t} - 0.5) * (${wExprS})`; yOff = `-(${hExprS})/2`; }
+      else if (a.side === 'L') { xOff = `-(${wExprS})/2`; yOff = `(${a.t} - 0.5) * (${hExprS})`; }
+      else if (a.side === 'R') { xOff = `(${wExprS})/2`;  yOff = `(${a.t} - 0.5) * (${hExprS})`; }
     } else {
       const n = a.name;
-      if (n.includes('W')) xOff = `-(${wExpr})/2`;
-      else if (n.includes('E')) xOff = `(${wExpr})/2`;
-      if (n.includes('S')) yOff = `-(${hExpr})/2`;
-      else if (n.includes('N')) yOff = `(${hExpr})/2`;
+      if (n.includes('W')) xOff = `-(${wExprS})/2`;
+      else if (n.includes('E')) xOff = `(${wExprS})/2`;
+      if (n.includes('S')) yOff = `-(${hExprS})/2`;
+      else if (n.includes('N')) yOff = `(${hExprS})/2`;
     }
     return { xOff, yOff };
   };

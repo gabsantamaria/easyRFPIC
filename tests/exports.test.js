@@ -57,6 +57,51 @@ describe('generateHfssNative', () => {
     )).not.toThrow();
   });
 
+  it('tags boolean-parent numeric w/h with "um" in snap-chain offsets', () => {
+    // When a primitive is snapped to a BOOLEAN parent, the parent's w/h
+    // is a number written by resolveBooleanBboxes (e.g. 3). Embedding
+    // that bare number in the offset expression as just `3` causes HFSS
+    // to interpret it in the design's base unit (meters) rather than
+    // µm, throwing the child off by millions of µm. Every w/h reference
+    // in the emitted chain expression must carry "um".
+    const s = {
+      params: { feed_w: { expr: '15' } },
+      components: [
+        // Two rects unioned into a boolean — its solved w/h ends up
+        // numeric, which is the failure mode this test guards.
+        { id: 'a', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: '3', h: '3', cutouts: [], consumedBy: 'b' },
+        { id: 'c', kind: 'rect', layer: 'electrode', cx: 5, cy: 0, w: '3', h: '3', cutouts: [], consumedBy: 'b' },
+        {
+          id: 'b', kind: 'boolean', op: 'union', operandIds: ['a', 'c'],
+          layer: 'electrode', cx: 2.5, cy: 0, w: '0', h: '0', cutouts: [],
+        },
+        // child rect snapped to b.W
+        { id: 'child', kind: 'rect', layer: 'electrode', cx: -10, cy: 0, w: 'feed_w', h: '1', cutouts: [] },
+      ],
+      snaps: [
+        { id: 's1', from: { compId: 'b', anchor: 'W' }, to: { compId: 'child', anchor: 'E' }, dx: '0', dy: '0' },
+      ],
+      mirrors: [], groups: [], booleans: [],
+      stack: scene.stack, stackName: scene.stackName, simSetup: scene.simSetup,
+    };
+    const { values: pv } = resolveParams(s.params);
+    const out = generateHfssNative(s, pv);
+    // The emitted offset for the child's XStart must reference the
+    // boolean's width with a "um" suffix. We do NOT allow a bare `(3)`
+    // or `(8)` etc. inside the parametric chain — they'd be dimensionless.
+    const childCreate = out.match(/safe_create_(?:rectangle|box)[\s\S]+?Name:=", "child"/);
+    expect(childCreate).toBeTruthy();
+    // Pattern: every numeric w/h reference inside the X/Y start expression
+    // for `child` must be followed by 'um'. Verify by scanning the line.
+    const xStartMatch = childCreate[0].match(/XStart:=", "([^"]+)"/);
+    expect(xStartMatch).toBeTruthy();
+    const xStart = xStartMatch[1];
+    // No bare /num/2 — every numeric divisor of /2 in this chain came
+    // from a w/h reference and must be unit-bearing.
+    expect(xStart).not.toMatch(/\(\d+\)\s*\/\s*2/);  // e.g. (3)/2 forbidden
+    expect(xStart).toMatch(/um\)\s*\/\s*2/);          // e.g. (3um)/2 OK
+  });
+
   it('emits conductor sheets + near-PEC AssignImpedance when conductor thickness is 0', () => {
     // When h_cond = 0, every electrode should be a 2-D rectangle sheet
     // rather than a 3-D box, and a single AssignImpedance boundary
