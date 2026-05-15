@@ -154,6 +154,47 @@ function computeParametricPositions(components, snaps) {
     }
     const snap = incomingSnap.get(compId);
     if (!snap) {
+      // ── CLUSTER-OPERAND PASS-THROUGH ────────────────────────────────
+      // If this component has no incoming snap of its OWN, but it's an
+      // operand consumed by a boolean cluster that DOES have a parametric
+      // chain (via the boolean's incoming snap to some other primitive),
+      // propagate the cluster shift down to the operand. The solver
+      // applies snap-clustering to the entire union: when wg1.NW snaps
+      // to meander_h.SW, every meander_h operand shifts in lockstep, so
+      // the operand's parametric position should follow the boolean's
+      // parametric position by the same offset.
+      //
+      // Without this, meander_h_rail_L (the cluster root) gets emitted
+      // at its hardcoded solved cy. When the user changes cap_gap in
+      // HFSS, every other piece chained through wg1 (cond14, cond14_copy,
+      // cond20, diff1, port2_hole, …) moves by Δcap_gap/2 — but the
+      // meander cluster stays put, drifting apart from the rest.
+      //
+      // The numeric offset (op.cx_solved - boolean.cx_solved) is the
+      // cluster-shift-invariant centroid-relative offset; the boolean's
+      // parametric chain absorbs every parameter the snap depended on.
+      if (c.consumedBy) {
+        const boolComp = byId[c.consumedBy];
+        if (boolComp && incomingSnap.has(boolComp.id)) {
+          const boolPos = resolve(boolComp.id);
+          const opCx = Number.isFinite(c.cx) ? c.cx : 0;
+          const opCy = Number.isFinite(c.cy) ? c.cy : 0;
+          const bCx  = Number.isFinite(boolComp.cx) ? boolComp.cx : 0;
+          const bCy  = Number.isFinite(boolComp.cy) ? boolComp.cy : 0;
+          const dx = opCx - bCx;
+          const dy = opCy - bCy;
+          const dims = dimExprForComp(c);
+          const result = {
+            cxExpr: `(${boolPos.cxExpr}) + (${dx}um)`,
+            cyExpr: `(${boolPos.cyExpr}) + (${dy}um)`,
+            wExpr: dims.wExpr,
+            hExpr: dims.hExpr,
+          };
+          positions[compId] = result;
+          visiting.delete(compId);
+          return result;
+        }
+      }
       // Free component: position is its raw cx/cy literal. Append "um" so that
       // when this leaf is composed into a chain expression with parameters
       // (which are unit-bearing), HFSS evaluates the whole chain in length units.
@@ -179,14 +220,24 @@ function computeParametricPositions(components, snaps) {
     // raw parent.w / parent.h, which for booleans is the numeric AABB
     // that resolveBooleanBboxes wrote in. Same reason as the boolean
     // pass-through above: we want anchor offsets to track parameters.
+    //
+    // For the TARGET side (`c`), we similarly resolve dims through
+    // `dimExprForComp` so that when `c` is a boolean the anchor offset
+    // uses its real (parametric or numeric-fallback) bbox h/w rather
+    // than the literal `'0'`/`'0'` stored on boolean components. Without
+    // this, a snap to `boolean.SW` would treat SW as the boolean's
+    // center (because `c.h='0'` ⇒ -h/2=0), producing a centroid offset
+    // of zero in the snap chain. That bug bit the meander_h centroid
+    // tracking — it placed meander_h.cy = wg1.NW.y + dy instead of
+    // wg1.NW.y + dy + h_meander/2.
+    const cDims = dimExprForComp(c);
     const fromOff = anchorOffsetExpr(snap.from.anchor, parentPos.wExpr, parentPos.hExpr);
-    const toOff   = anchorOffsetExpr(snap.to.anchor,   c.w,             c.h);
+    const toOff   = anchorOffsetExpr(snap.to.anchor,   cDims.wExpr,     cDims.hExpr);
     // Solver: toComp.cx = fromAnchorWorld.x + dx - toAnchor.local.x
     //                  = (parent.cx + fromOff.x) + dx - toOff.x
     const cxExpr = `(${parentPos.cxExpr}) + (${fromOff.xOff}) + (${snap.dx}) - (${toOff.xOff})`;
     const cyExpr = `(${parentPos.cyExpr}) + (${fromOff.yOff}) + (${snap.dy}) - (${toOff.yOff})`;
-    const dims = dimExprForComp(c);
-    const result = { cxExpr, cyExpr, wExpr: dims.wExpr, hExpr: dims.hExpr };
+    const result = { cxExpr, cyExpr, wExpr: cDims.wExpr, hExpr: cDims.hExpr };
     positions[compId] = result;
     visiting.delete(compId);
     return result;
@@ -1444,9 +1495,18 @@ except Exception as e:
     for (const m of members) { gx += m.cx; gy += m.cy; }
     return { x: gx / members.length, y: gy / members.length };
   };
-  const emitTransformChainHfss = (transforms, partIds, startCx, startCy, baseW, baseH, componentGroup) => {
+  const emitTransformChainHfss = (transforms, partIds, startCx, startCy, baseW, baseH, componentGroup, startCxExpr, startCyExpr) => {
     if (!transforms || transforms.length === 0) return [...partIds];
     let curCx = startCx, curCy = startCy, curRotation = 0;
+    // Parametric centroid expressions: track curCx/curCy as HFSS-side
+    // expressions so that Mirror / DuplicateMirror base points can be
+    // emitted in a form that responds to variable sweeps. Without this,
+    // the BaseY of a `duplicate_mirror` would be frozen at the solved
+    // numeric (e.g. 52.2500um for meander_h), and changing a parameter
+    // like cap_gap in HFSS would leave the mirror plane behind — visible
+    // as a 2*delta misalignment of every mirrored child.
+    let curCxExpr = startCxExpr ?? `${(startCx || 0).toFixed(4)}um`;
+    let curCyExpr = startCyExpr ?? `${(startCy || 0).toFixed(4)}um`;
     // Active selection list. Starts as the caller's partIds, but grows
     // every time a `repeat` or `duplicate_mirror` transform fires so that
     // any subsequent displace / rotate / etc. operates on the full
@@ -1490,6 +1550,8 @@ except Exception as e:
     oDesktop.AddMessage("", "", 1, "Move failed for ${selStr}: " + str(e))
 `;
         curCx += dxNum; curCy += dyNum;
+        curCxExpr = `(${curCxExpr}) + (${dxExpr})`;
+        curCyExpr = `(${curCyExpr}) + (${dyExpr})`;
       } else if (t.kind === 'rotate') {
         const angleNum = evalExpr(t.angle ?? '0', paramValues);
         if (!Number.isFinite(angleNum)) continue;
@@ -1510,6 +1572,15 @@ except Exception as e:
           const nx = curCx * ca - curCy * sa;
           const ny = curCx * sa + curCy * ca;
           curCx = nx; curCy = ny;
+          // Parametric centroid after world-origin rotation. HFSS
+          // accepts cos()/sin() with degree arguments, so we can keep
+          // the dependency on variables that fed the pre-rotation
+          // centroid. (Falls back gracefully if `angleExpr` is just a
+          // baked-in numeric like '45.0000deg'.)
+          const newCxExpr = `(${curCxExpr}) * cos(${angleExpr}) - (${curCyExpr}) * sin(${angleExpr})`;
+          const newCyExpr = `(${curCxExpr}) * sin(${angleExpr}) + (${curCyExpr}) * cos(${angleExpr})`;
+          curCxExpr = newCxExpr;
+          curCyExpr = newCyExpr;
           curRotation += angleNum;
         } else {
           // Pivot = 'C' (current center), 'group' (shared centroid of the
@@ -1554,6 +1625,20 @@ except Exception as e:
           const dyp = curCy - pivotY;
           curCx = pivotX + dxp * ca - dyp * sa;
           curCy = pivotY + dxp * sa + dyp * ca;
+          // For pivot='C' the centroid is invariant under rotation, so
+          // the parametric expression is unchanged. For pivot='group'
+          // or a named anchor we fall back to baking the numeric pivot
+          // (it's already numeric in the emission above), and the new
+          // centroid expression is computed from the parametric one
+          // around that numeric pivot.
+          if (pivot !== 'C') {
+            const pxStr = `${pivotX.toFixed(4)}um`;
+            const pyStr = `${pivotY.toFixed(4)}um`;
+            const newCxExpr = `(${pxStr}) + ((${curCxExpr}) - (${pxStr})) * cos(${angleExpr}) - ((${curCyExpr}) - (${pyStr})) * sin(${angleExpr})`;
+            const newCyExpr = `(${pyStr}) + ((${curCxExpr}) - (${pxStr})) * sin(${angleExpr}) + ((${curCyExpr}) - (${pyStr})) * cos(${angleExpr})`;
+            curCxExpr = newCxExpr;
+            curCyExpr = newCyExpr;
+          }
           curRotation += angleNum;
         }
       } else if (t.kind === 'repeat') {
@@ -1606,22 +1691,28 @@ except Exception as e:
         // original part's location, matching the canvas semantics.
         curCx += nNum * dxNum / 2;
         curCy += nNum * dyNum / 2;
+        // Parametric centroid: midpoint of an evenly-spaced (n+1)-stream
+        // sits at the original + n/2 * (dx, dy). HFSS evaluates the
+        // expression as-is, so multiplication by the integer literal
+        // `nNum/2` is fine even when `dxExpr` carries variables.
+        curCxExpr = `(${curCxExpr}) + ${(nNum / 2)} * (${dxExpr})`;
+        curCyExpr = `(${curCyExpr}) + ${(nNum / 2)} * (${dyExpr})`;
       } else if (t.kind === 'mirror') {
         // oEditor.Mirror flips the selection across a plane defined by a
         // base point + normal vector. axis='x' ⇒ normal=(1,0,0) (mirror
         // line is vertical, parallel to Y); axis='y' ⇒ normal=(0,1,0).
         const axis = t.axis === 'y' ? 'y' : 'x';
         const pivot = t.pivot === 'origin' ? 'origin' : 'C';
-        const baseX = pivot === 'origin' ? 0 : curCx;
-        const baseY = pivot === 'origin' ? 0 : curCy;
+        const baseXExpr = pivot === 'origin' ? '0um' : curCxExpr;
+        const baseYExpr = pivot === 'origin' ? '0um' : curCyExpr;
         const nx = axis === 'x' ? 1 : 0;
         const ny = axis === 'y' ? 1 : 0;
         code += `try:
     oEditor.Mirror(
         ["NAME:Selections", "Selections:=", "${selStr}", "NewPartsModelFlag:=", "Model"],
         ["NAME:MirrorParameters",
-         "MirrorBaseX:=", "${baseX.toFixed(4)}um",
-         "MirrorBaseY:=", "${baseY.toFixed(4)}um",
+         "MirrorBaseX:=", "${baseXExpr}",
+         "MirrorBaseY:=", "${baseYExpr}",
          "MirrorBaseZ:=", "0um",
          "MirrorNormalX:=", "${nx}",
          "MirrorNormalY:=", "${ny}",
@@ -1632,8 +1723,8 @@ except Exception as e:
         // Centroid invariance: mirror about own center keeps the centroid;
         // mirror about origin negates the coordinate along the axis.
         if (pivot === 'origin') {
-          if (axis === 'x') curCx = -curCx;
-          else curCy = -curCy;
+          if (axis === 'x') { curCx = -curCx; curCxExpr = `-(${curCxExpr})`; }
+          else              { curCy = -curCy; curCyExpr = `-(${curCyExpr})`; }
         }
         curRotation = -curRotation;
       } else if (t.kind === 'duplicate_mirror') {
@@ -1648,12 +1739,18 @@ except Exception as e:
           ? ascii(t.offset)
           : `${offsetNum.toFixed(4)}um`;
         // Mirror plane base point: current centroid + offset along axis.
+        // Use the PARAMETRIC centroid expression so HFSS-side variable
+        // sweeps (e.g. cap_gap, slab_gap) move the mirror plane in
+        // lockstep with the rest of the geometry that depends on them.
+        // Baking the numeric centroid here was the source of the
+        // meander_h `52.2500um` bug — the plane stayed put while every
+        // dependent piece shifted, producing 2*delta misalignment.
         const baseXExpr = axis === 'x'
-          ? `${curCx.toFixed(4)}um + (${offsetExpr})`
-          : `${curCx.toFixed(4)}um`;
+          ? `(${curCxExpr}) + (${offsetExpr})`
+          : `(${curCxExpr})`;
         const baseYExpr = axis === 'y'
-          ? `${curCy.toFixed(4)}um + (${offsetExpr})`
-          : `${curCy.toFixed(4)}um`;
+          ? `(${curCyExpr}) + (${offsetExpr})`
+          : `(${curCyExpr})`;
         const nx = axis === 'x' ? 1 : 0;
         const ny = axis === 'y' ? 1 : 0;
         code += `try:
@@ -1685,8 +1782,8 @@ except Exception as e:
         // Advance tracked centroid to the cluster centroid (midpoint of
         // source and its mirror). For axis='x' offset, the cluster's new
         // centroid is shifted by `offset` along x.
-        if (axis === 'x') curCx += offsetNum;
-        else curCy += offsetNum;
+        if (axis === 'x') { curCx += offsetNum; curCxExpr = `(${curCxExpr}) + (${offsetExpr})`; }
+        else              { curCy += offsetNum; curCyExpr = `(${curCyExpr}) + (${offsetExpr})`; }
       }
     }
     // Return the final selection so callers can track clone names — e.g.
@@ -1712,7 +1809,12 @@ except Exception as e:
     const baseW = typeof c.w === 'number' ? c.w : evalExpr(c.w, paramValues);
     const baseH = typeof c.h === 'number' ? c.h : evalExpr(c.h, paramValues);
     code += `\n# ===== Transforms for ${c.id} =====\n`;
-    const finalPartIds = emitTransformChainHfss(c.transforms, partIds, c.cx, c.cy, baseW || 0, baseH || 0, c.group);
+    const ppForChain = parametricPosForExport[c.id];
+    const finalPartIds = emitTransformChainHfss(
+      c.transforms, partIds, c.cx, c.cy, baseW || 0, baseH || 0, c.group,
+      ppForChain ? ppForChain.cxExpr : undefined,
+      ppForChain ? ppForChain.cyExpr : undefined,
+    );
     // If this part is a zero-thickness conductor sheet, every clone the
     // transform chain creates also needs the impedance boundary. Extend
     // the sheet list with the new names so the boundary block at the end
@@ -1804,7 +1906,12 @@ except Exception as e:
       const solvedB = solved.find(sc => sc.id === b.id) || b;
       const bW = typeof solvedB.w === 'number' ? solvedB.w : evalExpr(solvedB.w, paramValues);
       const bH = typeof solvedB.h === 'number' ? solvedB.h : evalExpr(solvedB.h, paramValues);
-      const finalBoolIds = emitTransformChainHfss(b.transforms || [], [safeBoolId], solvedB.cx, solvedB.cy, bW || 0, bH || 0, b.group);
+      const ppForBool = parametricPosForExport[b.id];
+      const finalBoolIds = emitTransformChainHfss(
+        b.transforms || [], [safeBoolId], solvedB.cx, solvedB.cy, bW || 0, bH || 0, b.group,
+        ppForBool ? ppForBool.cxExpr : undefined,
+        ppForBool ? ppForBool.cyExpr : undefined,
+      );
       // If the boolean result is a zero-thickness conductor sheet (any
       // operand sat on a zero-thickness conductor layer ⇒ Unite/Subtract
       // produces a sheet), every clone the transform chain creates also
