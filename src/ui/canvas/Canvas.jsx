@@ -1611,6 +1611,63 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     port:      { fill: '#b91c1c', stroke: '#7f1d1d', opacity: 0.45 },
   };
 
+  // Stack-layer lookup so per-component fills can read the BOUND layer's
+  // color instead of the static role-based fallback above. Multiple
+  // conductor layers in the same coplanar group (e.g. two metal layers
+  // routed at different process steps) each define their own color in
+  // the layer-stack editor — and we want the canvas to honor that, not
+  // collapse every conductor to the default gold.
+  const layerById = useMemo(() => {
+    const map = {};
+    for (const l of (scene.stack || [])) map[l.id] = l;
+    return map;
+  }, [scene.stack]);
+  // Compute a darker companion of a hex color for the stroke. Falls
+  // back to the role's default stroke when the input isn't a clean
+  // 6-digit hex.
+  const darkenHex = (hex) => {
+    if (typeof hex !== 'string') return null;
+    const m = hex.match(/^#?([0-9a-fA-F]{6})$/);
+    if (!m) return null;
+    const n = parseInt(m[1], 16);
+    const r = Math.floor(((n >> 16) & 0xff) * 0.45);
+    const g = Math.floor(((n >> 8) & 0xff) * 0.45);
+    const b = Math.floor((n & 0xff) * 0.45);
+    return `#${[r,g,b].map(v => v.toString(16).padStart(2, '0')).join('')}`;
+  };
+  // Resolve a component's display style: prefer the bound layer's
+  // explicit color, then fall back to the role-based default. Booleans
+  // recurse to the first non-boolean operand so a union/punch inherits
+  // its operand's layer color (the boolean's `layer` field is already
+  // set to operand[0]'s, but `conductorLayerId` isn't always copied).
+  const compById_style = useMemo(() => Object.fromEntries(scene.components.map(c => [c.id, c])), [scene.components]);
+  const resolveBoundLayer = (c, visited = new Set()) => {
+    if (!c || visited.has(c.id)) return null;
+    visited.add(c.id);
+    if (c.kind === 'boolean') {
+      for (const opid of (c.operandIds || [])) {
+        const r = resolveBoundLayer(compById_style[opid], visited);
+        if (r) return r;
+      }
+      return null;
+    }
+    if (c.layer === 'electrode' && c.conductorLayerId && layerById[c.conductorLayerId]) {
+      return layerById[c.conductorLayerId];
+    }
+    if (c.layer === 'waveguide') {
+      return (scene.stack || []).find(l => l.role === 'waveguide') || null;
+    }
+    return null;
+  };
+  const styleForComponent = (c) => {
+    const base = layerStyle[c?.layer] || layerStyle.waveguide;
+    const bound = resolveBoundLayer(c);
+    if (bound && bound.color) {
+      return { ...base, fill: bound.color, stroke: darkenHex(bound.color) || base.stroke };
+    }
+    return base;
+  };
+
   // Sized-relative handle radius and stroke unit. Both scale with the
   // viewport so that overlays (arrows, handles, halos) keep their on-screen
   // proportions constant regardless of zoom level. Without this, the SVG's
@@ -2087,10 +2144,12 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // matching geometry (single Unite, then DuplicateAlongLine, then
         // Rotate on the whole cluster).
         return booleanClusters.booleanComps.flatMap((b) => {
-          // Determine the display fill color from the boolean's own layer
-          // (which inherits from operand[0] at creation time).
-          const layer = b.layer || 'waveguide';
-          const style = layerStyle[layer] || layerStyle.waveguide;
+          // Determine the display fill color. Try the bound conductor
+          // layer's color first (resolved recursively from operand[0]
+          // so a union of layer-X rects renders in layer-X's color);
+          // fall back to the role-based default when no specific layer
+          // is bound.
+          const style = styleForComponent(b);
           const fill = style.fill;
           const fillOpacity = style.opacity;
           const accent = b.op === 'union' ? '#10b981'
@@ -2246,7 +2305,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         return ordered.map(c => {
           const w = evalExpr(c.w, paramValues);
           const h = evalExpr(c.h, paramValues);
-          const style = layerStyle[c.layer] || layerStyle.waveguide;
+          const style = styleForComponent(c);
           const isSelected = selectedIds.has(c.id);
           const isPrimary = c.id === selectedId;
           const isParent = relatedIds.parents.has(c.id);
@@ -3164,14 +3223,24 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         const maxY = Math.max(p1.y, p2.y);
         const w = maxX - minX;
         const h = maxY - minY;
-        // Pick fill colour from the addMode layer to give visual context.
+        // Pick fill colour from the addMode bound layer first (so a
+        // conductor with a custom color in the stack editor previews
+        // in that color, not the default gold), then fall back to the
+        // role-based default.
         const layer = addMode.layer || addMode.kind || 'waveguide';
-        const previewFill = layer === 'waveguide' ? '#3ec27a'
+        const previewBound = layer === 'electrode' && addMode.conductorLayerId
+          ? layerById[addMode.conductorLayerId]
+          : (layer === 'waveguide'
+              ? (scene.stack || []).find(l => l.role === 'waveguide')
+              : null);
+        const defaultFill = layer === 'waveguide' ? '#3ec27a'
           : layer === 'port' ? '#b91c1c'
           : '#f4a72e';
-        const previewStroke = layer === 'waveguide' ? '#1a5e36'
+        const defaultStroke = layer === 'waveguide' ? '#1a5e36'
           : layer === 'port' ? '#7f1d1d'
           : '#7a4d00';
+        const previewFill = (previewBound?.color) || defaultFill;
+        const previewStroke = (previewBound?.color && darkenHex(previewBound.color)) || defaultStroke;
         const shape = addMode.shape || 'rect';
         // Probe for dimension matches (mirrors the heuristic in commitDragAdd
         // so the preview matches what will actually be created).
