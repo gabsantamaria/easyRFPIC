@@ -5003,6 +5003,42 @@ export default function App() {
                     <option value="port">port</option>
                   </select>
                 </div>
+                {/* Conductor-layer binding. Visible for both electrode
+                    and port components when the stack defines at least
+                    one conductor layer. For electrodes it picks the
+                    conductor whose thickness / Z the part lives on; for
+                    ports it picks the conductor whose mid-Z the sheet
+                    sits at (= where the lumped-port assignment sits
+                    too). Without this the user had no way to change a
+                    component's metal level after creation — the
+                    binding was set in `commitDragAdd` and silently
+                    defaulted to the first conductor. */}
+                {(selected.layer === 'electrode' || selected.layer === 'port') && (() => {
+                  const conductorLayers = (scene.stack || []).filter(l => l.role === 'conductor');
+                  if (conductorLayers.length === 0) return null;
+                  const labelText = selected.layer === 'port'
+                    ? 'Conductor layer (port Z)'
+                    : 'Conductor layer';
+                  const helpText = selected.layer === 'port'
+                    ? 'Port sheet lives at this conductor\'s mid-thickness (Z = z_bottom + thickness / 2). Pick a different layer to move the port to that metal level.'
+                    : 'The component is built on this conductor\'s Z (zBottom → zBottom + thickness). Pick a different metal to move the part between levels of a multi-metal stack.';
+                  return (
+                    <div>
+                      <label className="text-[10px] uppercase tracking-wider text-slate-500">{labelText}</label>
+                      <select
+                        value={selected.conductorLayerId || conductorLayers[0]?.id || ''}
+                        onChange={(e) => updateComp(selected.id, { conductorLayerId: e.target.value })}
+                        className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-slate-100 outline-none focus:border-cyan-400"
+                        title={helpText}
+                      >
+                        {conductorLayers.map(l => (
+                          <option key={l.id} value={l.id}>{l.name || l.id}</option>
+                        ))}
+                      </select>
+                      <p className="text-[9px] text-slate-500 mt-1 leading-snug">{helpText}</p>
+                    </div>
+                  );
+                })()}
                 {selected.kind === 'boolean' ? (
                   // Derived boolean component: no editable w/h (geometry is
                   // determined by operands + boolean op). Show op + operands
@@ -5143,34 +5179,11 @@ export default function App() {
                     : det.direction === 'NS'
                     ? `South ↔ North  (${det.from} ↔ ${det.to})`
                     : null;
-                  // List of conductor layers — the port can live at any
-                  // of these (its mid-Z). Sweeping the conductor binding
-                  // moves the port sheet (and the lumped-port assignment
-                  // along with it) up/down the stack.
-                  const conductorLayers = (scene.stack || []).filter(l => l.role === 'conductor');
+                  // (Conductor-layer binding moved up next to the Layer
+                  // dropdown so it's discoverable for electrodes and
+                  // ports alike; see the per-component section above.)
                   return (
                     <div className="border-t border-slate-700 pt-3 space-y-2">
-                      {conductorLayers.length > 0 && (
-                        <div>
-                          <label className="text-[10px] uppercase tracking-wider text-slate-500">Conductor layer (port Z)</label>
-                          <select
-                            value={selected.conductorLayerId || conductorLayers[0]?.id || ''}
-                            onChange={(e) => updateComp(selected.id, { conductorLayerId: e.target.value })}
-                            className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-slate-100 outline-none focus:border-cyan-400"
-                            title="The port sheet sits at mid-Z of this conductor layer. Lumped-port assignment uses the same Z, so the integration line passes through the right metal level."
-                          >
-                            {conductorLayers.map(l => (
-                              <option key={l.id} value={l.id}>{l.name || l.id}</option>
-                            ))}
-                          </select>
-                          <p className="text-[9px] text-slate-500 mt-1 leading-snug">
-                            Port sheet lives at this conductor's mid-thickness
-                            (Z = z<sub>bottom</sub> + thickness / 2). Pick a
-                            different layer to move the port to that metal
-                            level.
-                          </p>
-                        </div>
-                      )}
                       <div className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-slate-400">
                         <Radio size={11} /> Lumped port
                       </div>
