@@ -885,9 +885,21 @@ export default function App() {
     const conductorLayer = conductorLayerId
       ? (scene.stack || []).find(l => l.id === conductorLayerId)
       : null;
+    // Guard against layer ids that start with a digit (or are otherwise
+    // not valid identifier prefixes): the layer id seeds the component
+    // id and the auto-generated `<id>_w` / `<id>_h` params, all of
+    // which must be valid identifier strings for the expression parser
+    // and HFSS to consume. Strip the `l_` prefix the schema uses by
+    // convention, then sanitize any leading non-identifier char to `el`.
+    const sanitizeIdPrefix = (p) => {
+      const stripped = String(p || '').replace(/^l_/, '');
+      return /^[A-Za-z_]/.test(stripped) && /^[A-Za-z_][A-Za-z0-9_]*$/.test(stripped)
+        ? stripped
+        : 'el';
+    };
     const layerPrefix = layerKind === 'waveguide' ? 'wg'
       : layerKind === 'port' ? 'port'
-      : (conductorLayer ? conductorLayer.id.replace(/^l_/, '') : 'el');
+      : (conductorLayer ? sanitizeIdPrefix(conductorLayer.id) : 'el');
     // Shape-flavored id prefix so users can tell circles from rects from
     // polygons at a glance in the SHAPES tree.
     const shapePrefix = shapeKind === 'circle' ? 'circ'
@@ -4832,18 +4844,126 @@ export default function App() {
                 <div>
                   <label className="text-[10px] uppercase tracking-wider text-slate-500">ID</label>
                   <DeferredTextInput value={selected.id} onCommit={(newId) => {
-                    if (!newId || scene.components.some(c => c.id === newId && c.id !== selected.id)) return;
-                    updateScene(prev => ({
-                      ...prev,
-                      components: prev.components.map(c => c.id === selected.id ? { ...c, id: newId } : c),
-                      snaps: prev.snaps.map(s => ({
+                    if (!newId || newId === selected.id) return;
+                    // Reject IDs that aren't valid identifiers — they
+                    // can't appear in expressions, can't be HFSS part
+                    // names, and would create dead `<id>_w` / `<id>_h`
+                    // params that the unused-param scanner flags as
+                    // orphans. Same regex used everywhere else (param
+                    // names, HFSS variable validation).
+                    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(newId)) return;
+                    if (scene.components.some(c => c.id === newId && c.id !== selected.id)) return;
+                    const oldId = selected.id;
+                    // Geometry-knob param suffixes the drag-add path
+                    // creates per-component. Renaming the component
+                    // renames any of these that exist so they don't
+                    // become orphan parameters (and so editing them
+                    // from the inspector still finds them under the
+                    // new name).
+                    const SUFFIXES = ['_w', '_h', '_r', '_rx', '_ry', '_n'];
+                    const renameMap = {}; // oldParam -> newParam
+                    for (const s of SUFFIXES) {
+                      const oldP = `${oldId}${s}`;
+                      const newP = `${newId}${s}`;
+                      if (scene.params[oldP] && !scene.params[newP]) {
+                        renameMap[oldP] = newP;
+                      }
+                    }
+                    // Word-boundary replacer: rewrites every oldParam
+                    // occurrence in an expression string to its new
+                    // name. Synthetic `_comp_<id>_<axis>` references
+                    // also need updating since walks down them assume
+                    // the component-id substring matches.
+                    const renameInExpr = (e) => {
+                      if (typeof e !== 'string') return e;
+                      let out = e;
+                      for (const [from, to] of Object.entries(renameMap)) {
+                        out = out.replace(new RegExp(`\\b${from}\\b`, 'g'), to);
+                      }
+                      // Replace _comp_<oldId>_<axis> synthetics. Use
+                      // boundary to avoid clobbering substrings of a
+                      // different component's id that ends with oldId.
+                      out = out.replace(
+                        new RegExp(`\\b_comp_${oldId}_(cx|cy|w|h)\\b`, 'g'),
+                        `_comp_${newId}_$1`
+                      );
+                      return out;
+                    };
+                    updateScene(prev => {
+                      // Renamed params
+                      const newParams = {};
+                      for (const [k, v] of Object.entries(prev.params)) {
+                        const newKey = renameMap[k] || k;
+                        newParams[newKey] = { ...v, expr: renameInExpr(v.expr) };
+                      }
+                      // Update components: id + expression-bearing fields
+                      const newComps = prev.components.map(c => {
+                        const next = { ...c };
+                        if (c.id === oldId) next.id = newId;
+                        if (c.consumedBy === oldId) next.consumedBy = newId;
+                        if (Array.isArray(c.operandIds)) {
+                          next.operandIds = c.operandIds.map(opId => opId === oldId ? newId : opId);
+                        }
+                        for (const f of ['w', 'h', 'r', 'rx', 'ry', 'n', 'R', 'L_straight', 'p', 'wgWidth']) {
+                          if (typeof c[f] === 'string') next[f] = renameInExpr(c[f]);
+                        }
+                        if (Array.isArray(c.cutouts)) {
+                          next.cutouts = c.cutouts.map(co => ({
+                            ...co,
+                            dx: renameInExpr(co.dx),
+                            dy: renameInExpr(co.dy),
+                            w: renameInExpr(co.w),
+                            h: renameInExpr(co.h),
+                          }));
+                        }
+                        if (Array.isArray(c.transforms)) {
+                          next.transforms = c.transforms.map(t => ({
+                            ...t,
+                            ...(t.dx != null ? { dx: renameInExpr(t.dx) } : {}),
+                            ...(t.dy != null ? { dy: renameInExpr(t.dy) } : {}),
+                            ...(t.angle != null ? { angle: renameInExpr(t.angle) } : {}),
+                            ...(t.n != null ? { n: renameInExpr(t.n) } : {}),
+                            ...(t.offset != null ? { offset: renameInExpr(t.offset) } : {}),
+                          }));
+                        }
+                        return next;
+                      });
+                      // Update snaps
+                      const newSnaps = prev.snaps.map(s => ({
                         ...s,
-                        from: s.from.compId === selected.id ? { ...s.from, compId: newId } : s.from,
-                        to: s.to.compId === selected.id ? { ...s.to, compId: newId } : s.to,
-                      })),
-                    }));
+                        from: s.from.compId === oldId ? { ...s.from, compId: newId } : s.from,
+                        to:   s.to.compId   === oldId ? { ...s.to,   compId: newId } : s.to,
+                        dx: renameInExpr(s.dx),
+                        dy: renameInExpr(s.dy),
+                      }));
+                      // Update groups (memberIds + aliases that map to oldId)
+                      const newGroups = (prev.groups || []).map(g => ({
+                        ...g,
+                        memberIds: (g.memberIds || []).map(mid => mid === oldId ? newId : mid),
+                        aliases: g.aliases ? Object.fromEntries(
+                          Object.entries(g.aliases).map(([k, v]) => [k, v === oldId ? newId : v])
+                        ) : g.aliases,
+                      }));
+                      // Update mirrors (members reference compIds)
+                      const newMirrors = (prev.mirrors || []).map(m => ({
+                        ...m,
+                        members: (m.members || []).map(mem => ({
+                          ...mem,
+                          srcId:    mem.srcId    === oldId ? newId : mem.srcId,
+                          mirrorId: mem.mirrorId === oldId ? newId : mem.mirrorId,
+                        })),
+                      }));
+                      return {
+                        ...prev,
+                        params: newParams,
+                        components: newComps,
+                        snaps: newSnaps,
+                        groups: newGroups,
+                        mirrors: newMirrors,
+                      };
+                    });
                     const newSet = new Set(selectedIds);
-                    newSet.delete(selected.id);
+                    newSet.delete(oldId);
                     newSet.add(newId);
                     setSelection({ ids: newSet, primary: newId });
                   }} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-cyan-300 outline-none focus:border-cyan-400" />
