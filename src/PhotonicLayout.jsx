@@ -3491,16 +3491,31 @@ export default function App() {
               const conductors = (scene.stack || []).filter(l => l.role === 'conductor');
               // Build layer dropdown options. Each conductor layer becomes
               // its own entry so the user picks WHICH conductor explicitly.
+              // Ports also bind to a specific conductor layer — the port
+              // sheet is created at that conductor's mid-Z and the lumped
+              // port assignment uses that Z too. When multiple conductors
+              // exist, we expose one "Port @ <name>" entry per conductor
+              // so the user can place ports on different metal levels.
+              const portOptions = conductors.length <= 1
+                ? [{ value: 'port', label: 'Port', conductorLayerId: conductors[0]?.id || null }]
+                : conductors.map(l => ({
+                    value: `port:${l.id}`,
+                    label: `Port @ ${l.name || l.id}`,
+                    conductorLayerId: l.id,
+                  }));
               const layerOptions = [
                 { value: 'waveguide', label: 'Waveguide', conductorLayerId: null },
                 ...conductors.map(l => ({ value: `electrode:${l.id}`, label: l.name || l.id, conductorLayerId: l.id })),
-                { value: 'port', label: 'Port', conductorLayerId: null },
+                ...portOptions,
               ];
               // Selected layer dropdown value. We encode the conductor's id
               // in the value string so distinct conductor layers are
-              // distinguishable in a flat <select>.
+              // distinguishable in a flat <select>. Ports use the same
+              // `port:<id>` encoding when multiple conductors exist.
               const dropdownValue = activeLayer === 'electrode' && activeConductorLayerId
                 ? `electrode:${activeConductorLayerId}`
+                : activeLayer === 'port' && activeConductorLayerId && conductors.length > 1
+                ? `port:${activeConductorLayerId}`
                 : activeLayer;
               const layerBg = activeLayer === 'waveguide' ? '#3ec27a'
                 : activeLayer === 'port' ? '#b91c1c'
@@ -3511,6 +3526,15 @@ export default function App() {
                 if (v.startsWith('electrode:')) {
                   setActiveLayer('electrode');
                   setActiveConductorLayerId(v.slice('electrode:'.length));
+                } else if (v.startsWith('port:')) {
+                  setActiveLayer('port');
+                  setActiveConductorLayerId(v.slice('port:'.length));
+                } else if (v === 'port') {
+                  setActiveLayer('port');
+                  // Single-conductor or no-conductor case: bind to the
+                  // first conductor if one exists, else leave null
+                  // (HFSS export falls back to h_wg in that case).
+                  setActiveConductorLayerId(conductors[0]?.id || null);
                 } else {
                   setActiveLayer(v);
                   setActiveConductorLayerId(null);
@@ -3521,11 +3545,14 @@ export default function App() {
                 setAddMode(null);
               };
               // Each shape button toggles addMode. Active state = the
-              // current addMode targets the same (layer, shape) tuple.
+              // current addMode targets the same (layer, shape) tuple
+              // — and, when the layer binds to a conductor (electrode or
+              // port-on-a-specific-metal), the same conductorLayerId.
+              const layerBindsConductor = (l) => l === 'electrode' || l === 'port';
               const isShapeActive = (shape) => addMode
                 && (addMode.layer === activeLayer)
                 && (addMode.shape === shape)
-                && (activeLayer !== 'electrode' || addMode.conductorLayerId === activeConductorLayerId);
+                && (!layerBindsConductor(activeLayer) || addMode.conductorLayerId === activeConductorLayerId);
               const toggleShape = (shape) => {
                 if (isShapeActive(shape)) {
                   setAddMode(null);
@@ -3534,7 +3561,7 @@ export default function App() {
                     layer: activeLayer,
                     shape,
                     ...(shape === 'polygon' ? { n: polygonSides } : {}),
-                    ...(activeLayer === 'electrode' && activeConductorLayerId
+                    ...(layerBindsConductor(activeLayer) && activeConductorLayerId
                       ? { conductorLayerId: activeConductorLayerId }
                       : {}),
                   });
@@ -5116,8 +5143,34 @@ export default function App() {
                     : det.direction === 'NS'
                     ? `South ↔ North  (${det.from} ↔ ${det.to})`
                     : null;
+                  // List of conductor layers — the port can live at any
+                  // of these (its mid-Z). Sweeping the conductor binding
+                  // moves the port sheet (and the lumped-port assignment
+                  // along with it) up/down the stack.
+                  const conductorLayers = (scene.stack || []).filter(l => l.role === 'conductor');
                   return (
                     <div className="border-t border-slate-700 pt-3 space-y-2">
+                      {conductorLayers.length > 0 && (
+                        <div>
+                          <label className="text-[10px] uppercase tracking-wider text-slate-500">Conductor layer (port Z)</label>
+                          <select
+                            value={selected.conductorLayerId || conductorLayers[0]?.id || ''}
+                            onChange={(e) => updateComp(selected.id, { conductorLayerId: e.target.value })}
+                            className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-slate-100 outline-none focus:border-cyan-400"
+                            title="The port sheet sits at mid-Z of this conductor layer. Lumped-port assignment uses the same Z, so the integration line passes through the right metal level."
+                          >
+                            {conductorLayers.map(l => (
+                              <option key={l.id} value={l.id}>{l.name || l.id}</option>
+                            ))}
+                          </select>
+                          <p className="text-[9px] text-slate-500 mt-1 leading-snug">
+                            Port sheet lives at this conductor's mid-thickness
+                            (Z = z<sub>bottom</sub> + thickness / 2). Pick a
+                            different layer to move the port to that metal
+                            level.
+                          </p>
+                        </div>
+                      )}
                       <div className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-slate-400">
                         <Radio size={11} /> Lumped port
                       </div>
