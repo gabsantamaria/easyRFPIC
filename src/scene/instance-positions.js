@@ -78,8 +78,10 @@ export function resolveInstanceAnchorNumeric(compId, anchor, instanceIdx, byId, 
 
 // Build the parametric expression for an instance's centroid OFFSET
 // from its base centroid. Returns { dxExpr, dyExpr } or null if the
-// transform chain contains operations we can't express parametrically
-// (mirror, rotate, duplicate_mirror — those keep numeric positions).
+// transform chain contains operations we genuinely can't express
+// parametrically (currently: rotate with pivot='group' or a named-
+// anchor pivot, since both depend on group-centroid math or
+// post-rotation pivot positions).
 //
 // The instanceIdx is the FLAT index used by expandTransforms (it
 // decomposes into a tuple under nested repeats). We re-walk the chain
@@ -87,7 +89,11 @@ export function resolveInstanceAnchorNumeric(compId, anchor, instanceIdx, byId, 
 // target idx in the resulting stream.
 //
 // `exprWithUm` is passed in by the caller (HFSS export's helper).
-export function instanceChainOffsetExpr(comp, instanceIdx, paramValues, exprWithUm) {
+// `baseCxExpr` / `baseCyExpr` are required for transforms that
+// reference the component's own absolute position (mirror about
+// origin, rotate about origin). For the simple case (repeat /
+// displace / duplicate_mirror only), they're unused.
+export function instanceChainOffsetExpr(comp, instanceIdx, paramValues, exprWithUm, baseCxExpr = '0um', baseCyExpr = '0um') {
   if (!comp || instanceIdx === 0) return { dxExpr: '0um', dyExpr: '0um' };
   const transforms = (comp.transforms || []).filter(t => t && t.enabled !== false);
   // Stream of { dxExpr, dyExpr } — each entry is one instance's offset
@@ -118,12 +124,71 @@ export function instanceChainOffsetExpr(comp, instanceIdx, paramValues, exprWith
         }
       }
       stream = next;
-    } else {
-      // mirror / rotate / duplicate_mirror: parametric chain bails out
-      // for now. Caller falls back to numeric instance position from
-      // transformInstances (handled in the HFSS polyline emission).
-      return null;
+    } else if (t.kind === 'duplicate_mirror') {
+      // Adds one mirrored copy per existing instance at +2*offset along
+      // the axis. Offsets of existing instances unchanged; new ones
+      // pick up ±2*offsetExpr along the mirror axis.
+      const axis = t.axis === 'y' ? 'y' : 'x';
+      const offsetExpr = exprWithUm(t.offset ?? '0');
+      const includeOriginal = t.includeOriginal !== false;
+      const next = [];
+      for (const item of stream) {
+        if (includeOriginal) next.push(item);
+        next.push({
+          dxExpr: axis === 'x' ? `(${item.dxExpr}) + 2 * (${offsetExpr})` : item.dxExpr,
+          dyExpr: axis === 'y' ? `(${item.dyExpr}) + 2 * (${offsetExpr})` : item.dyExpr,
+        });
+      }
+      stream = next;
+    } else if (t.kind === 'mirror') {
+      // Mirror EACH instance about the chosen pivot.
+      //   - pivot='C': mirrored about the instance's OWN center. From
+      //     the offset-from-base viewpoint, the position is unchanged
+      //     (the center doesn't move). Orientation flips, but we
+      //     don't track that for position-only chain offsets.
+      //   - pivot='origin': mirrored about the world axis. New
+      //     absolute pos = -(base + old_offset) for axis='x'. New
+      //     offset = (new_abs - base) = -2*base - old_offset.
+      const axis = t.axis === 'y' ? 'y' : 'x';
+      const pivot = t.pivot === 'origin' ? 'origin' : 'C';
+      if (pivot === 'origin') {
+        stream = stream.map(item => ({
+          dxExpr: axis === 'x' ? `-2 * (${baseCxExpr}) - (${item.dxExpr})` : item.dxExpr,
+          dyExpr: axis === 'y' ? `-2 * (${baseCyExpr}) - (${item.dyExpr})` : item.dyExpr,
+        }));
+      }
+      // pivot='C': no change to offsets.
+    } else if (t.kind === 'rotate') {
+      // Rotate each instance about the chosen pivot.
+      //   - pivot='C': instance center is invariant; offsets unchanged
+      //     in our chain. (Orientation changes, but we don't track it
+      //     for chain offsets.)
+      //   - pivot='origin': rotates the ABSOLUTE position around
+      //     (0, 0). New offset = R*(base + old_offset) - base.
+      //   - pivot='group' or named-anchor: bail out (return null);
+      //     would require group-centroid or post-rotation pivot math
+      //     that depends on solved positions of other components.
+      const pivot = t.pivot || 'C';
+      if (pivot === 'C') continue;
+      if (pivot === 'origin') {
+        const angleExpr = (typeof t.angle === 'string' && /[A-Za-z_]/.test(t.angle))
+          ? t.angle
+          : `${(t.angle ?? 0)}deg`;
+        stream = stream.map(item => ({
+          // R*(base + old) - base, expanded so HFSS evaluates with
+          // cos/sin in degrees (HFSS expression syntax supports both).
+          dxExpr: `((${baseCxExpr}) + (${item.dxExpr})) * cos(${angleExpr}) - ((${baseCyExpr}) + (${item.dyExpr})) * sin(${angleExpr}) - (${baseCxExpr})`,
+          dyExpr: `((${baseCxExpr}) + (${item.dxExpr})) * sin(${angleExpr}) + ((${baseCyExpr}) + (${item.dyExpr})) * cos(${angleExpr}) - (${baseCyExpr})`,
+        }));
+      } else {
+        // 'group' or a named-anchor pivot: not currently expressible
+        // parametrically without much more machinery. Caller falls
+        // back to numeric instance position.
+        return null;
+      }
     }
+    // Unknown kinds: silently ignore (matches expandTransforms's
+    // defensive behavior).
   }
   if (instanceIdx < 0 || instanceIdx >= stream.length) return null;
   return stream[instanceIdx];

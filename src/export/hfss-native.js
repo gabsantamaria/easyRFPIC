@@ -1170,12 +1170,22 @@ except:
             const tgtComp = solved.find(sc => sc.id === v.compId);
             const instanceIdx = v.instanceIdx || 0;
             // Resolve chain owner: comp itself if it has transforms,
-            // else its parent boolean (if applicable).
+            // else its parent boolean (if applicable). Pass owner's
+            // parametric base position so the chain walker can handle
+            // mirror-about-origin / rotate-about-origin (both need the
+            // component's own absolute base coordinates to express the
+            // reflected / rotated offsets parametrically).
             const owner = chainOwnerForInstance(tgtComp, byIdSolved);
             const ownerInstanceIdx = (instanceIdx > 0 && owner) ? instanceIdx : 0;
             let chainOffset = null;
             if (ownerInstanceIdx > 0) {
-              chainOffset = instanceChainOffsetExpr(owner, ownerInstanceIdx, paramValues, exprWithUm);
+              const ownerPp = parametricPos[owner.id];
+              const ownerBaseCxExpr = ownerPp ? ownerPp.cxExpr : `${(owner.cx ?? 0).toFixed(4)}um`;
+              const ownerBaseCyExpr = ownerPp ? ownerPp.cyExpr : `${(owner.cy ?? 0).toFixed(4)}um`;
+              chainOffset = instanceChainOffsetExpr(
+                owner, ownerInstanceIdx, paramValues, exprWithUm,
+                ownerBaseCxExpr, ownerBaseCyExpr,
+              );
             }
             if (tgtPp && tgtPp.cxExpr && tgtPp.cyExpr) {
               const off = anchorOffsetParam(v.anchor, tgtPp.wExpr || '0', tgtPp.hExpr || '0');
