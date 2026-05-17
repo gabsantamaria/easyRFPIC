@@ -1,16 +1,28 @@
-# Deploy to GitHub Pages on every push to `main`. The app is a pure
-# static Vite build — no server, no secrets, no per-user backend. Each
+# Deploy to GitHub Pages on tagged releases. The app is a pure static
+# Vite build — no server, no secrets, no per-user backend. Each
 # visitor's data lives in their own browser via the localStorage shim
 # in src/storage/window-storage-shim.js, so sharing the deployed URL
 # automatically gives every user their own private workspace.
 #
-# After the first run: open Settings → Pages and confirm Source = "GitHub
-# Actions". Subsequent pushes auto-deploy.
+# Release workflow:
+#   1. Develop normally — push commits to `main` as often as you want.
+#      NOTHING DEPLOYS on a regular push, so users keep seeing the
+#      last stable version.
+#   2. When you're ready to ship, create + push a version tag:
+#         git tag v0.1.0
+#         git push origin v0.1.0
+#      The workflow builds & publishes whatever's at that commit.
+#
+# Or trigger a manual deploy from the Actions tab via "Run workflow"
+# (workflow_dispatch) to ship the current state of any branch.
+#
+# After the first run: open Settings → Pages and confirm Source =
+# "GitHub Actions". Subsequent tag pushes auto-deploy.
 name: Deploy to GitHub Pages
 
 on:
   push:
-    branches: [main]
+    tags: ['v*']
   workflow_dispatch:
 
 # Allow GITHUB_TOKEN to write to Pages, and let the workflow request an
