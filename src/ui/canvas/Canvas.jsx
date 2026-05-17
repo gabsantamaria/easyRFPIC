@@ -515,40 +515,110 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
 
   const findAnchorSnap = (wp, worldThresh, excludeCompId = null) => {
     let best = null;
-    const consider = (x, y, compId, anchor) => {
+    // Each consider() records the candidate AND the instance index it
+    // came from. `instanceIdx === 0` = base component (parametric snap
+    // bindings are safe to install); `instanceIdx > 0` = a child copy
+    // produced by a transform (visual snap only — the scene model
+    // can't currently express "bind to instance N" parametrically, so
+    // the caller should treat it as a free position).
+    const consider = (x, y, compId, anchor, instanceIdx = 0) => {
       const dx = wp.x - x, dy = wp.y - y;
       const d = Math.sqrt(dx * dx + dy * dy);
       if (d <= worldThresh && (!best || d < best.d)) {
-        best = { x, y, compId, anchor, d };
+        best = { x, y, compId, anchor, instanceIdx, d };
       }
     };
-    for (const c of solved) {
-      if (excludeCompId && c.id === excludeCompId) continue;
-      const w = evalExpr(c.w, paramValues);
-      const h = evalExpr(c.h, paramValues);
+    // Iterate transform-expanded INSTANCES instead of just solved
+    // (which only carries the base position). This mirrors what the
+    // ruler does — every rendered copy of a shape exposes its 9 fixed
+    // anchors + parametric edge points, so the polyline-draw cursor
+    // hover-snaps to repeats / duplicate_mirror copies of any shape,
+    // not just the base.
+    for (const inst of transformInstances) {
+      if (excludeCompId && inst.compId === excludeCompId) continue;
+      const w = inst.w, h = inst.h;
       if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) continue;
-      // 9 fixed anchors — these win over parametric edge points (they're more
-      // semantically meaningful so we slightly prefer them via early order).
+      const cx = inst.cx, cy = inst.cy;
+      // 9 fixed anchors — preferred over parametric edge points.
       for (const a of ANCHORS) {
         const lp = anchorLocal(a, w, h);
-        consider(c.cx + lp.x, c.cy + lp.y, c.id, a);
+        consider(cx + lp.x, cy + lp.y, inst.compId, a, inst.idx);
       }
-      // Parametric edge anchors. Project the cursor onto each edge and use a
-      // T:t / B:t / L:t / R:t form. This gives a precise t in [0,1].
-      const x0 = c.cx - w / 2, x1 = c.cx + w / 2;
-      const y0 = c.cy - h / 2, y1 = c.cy + h / 2;
+      // Parametric edge anchors. Project cursor onto each edge and tag
+      // with T:t / B:t / L:t / R:t where t ∈ [0, 1] runs along the edge.
+      const x0 = cx - w / 2, x1 = cx + w / 2;
+      const y0 = cy - h / 2, y1 = cy + h / 2;
       if (wp.x >= x0 - worldThresh && wp.x <= x1 + worldThresh) {
         const projX = Math.max(x0, Math.min(x1, wp.x));
-        const tX = (projX - x0) / (x1 - x0); // 0 at left, 1 at right
-        consider(projX, y1, c.id, `T:${tX.toFixed(4)}`);
-        consider(projX, y0, c.id, `B:${tX.toFixed(4)}`);
+        const tX = (projX - x0) / (x1 - x0);
+        consider(projX, y1, inst.compId, `T:${tX.toFixed(4)}`, inst.idx);
+        consider(projX, y0, inst.compId, `B:${tX.toFixed(4)}`, inst.idx);
       }
       if (wp.y >= y0 - worldThresh && wp.y <= y1 + worldThresh) {
         const projY = Math.max(y0, Math.min(y1, wp.y));
-        const tY = (projY - y0) / (y1 - y0); // 0 at bottom, 1 at top
-        consider(x0, projY, c.id, `L:${tY.toFixed(4)}`);
-        consider(x1, projY, c.id, `R:${tY.toFixed(4)}`);
+        const tY = (projY - y0) / (y1 - y0);
+        consider(x0, projY, inst.compId, `L:${tY.toFixed(4)}`, inst.idx);
+        consider(x1, projY, inst.compId, `R:${tY.toFixed(4)}`, inst.idx);
       }
+    }
+    // For boolean instances at idx > 0, also walk the cluster's
+    // operands and expose anchor points at each operand's TRANSFORMED
+    // position — same translate/rotate/mirror composition the canvas
+    // uses to render the child cell. Lets the user hover-snap any
+    // rail / frame / connector edge in a repeated meander cell, not
+    // just the outer AABB. (Mirrors the matching block in findRulerSnap.)
+    for (const inst of transformInstances) {
+      if (inst.kind !== 'boolean' || inst.idx === 0) continue;
+      if (excludeCompId && inst.compId === excludeCompId) continue;
+      const b = solved.find(c => c.id === inst.compId);
+      if (!b) continue;
+      const dx = inst.cx - b.cx;
+      const dy = inst.cy - b.cy;
+      const rot = inst.rotation || 0;
+      const bSx = inst.scaleX ?? 1;
+      const bSy = inst.scaleY ?? 1;
+      if (!dx && !dy && !rot && bSx === 1 && bSy === 1) continue;
+      const rad = rot * Math.PI / 180;
+      const ca = Math.cos(rad), sa = Math.sin(rad);
+      const visitOp = (cid) => {
+        const op = solved.find(c => c.id === cid);
+        if (!op) return;
+        if (op.kind === 'boolean') {
+          for (const childId of (op.operandIds || [])) visitOp(childId);
+          return;
+        }
+        const baseInst = transformInstances.find(ii => ii.compId === op.id && ii.idx === 0);
+        if (!baseInst) return;
+        const opW = baseInst.w, opH = baseInst.h;
+        if (!Number.isFinite(opW) || !Number.isFinite(opH) || opW <= 0 || opH <= 0) return;
+        let tx = baseInst.cx + dx;
+        let ty = baseInst.cy + dy;
+        if (bSx === -1) tx = 2 * inst.cx - tx;
+        if (bSy === -1) ty = 2 * inst.cy - ty;
+        const rxC = tx - inst.cx;
+        const ryC = ty - inst.cy;
+        const newCx = rot ? inst.cx + rxC * ca - ryC * sa : tx;
+        const newCy = rot ? inst.cy + rxC * sa + ryC * ca : ty;
+        for (const a of ANCHORS) {
+          const lp = anchorLocal(a, opW, opH);
+          consider(newCx + lp.x, newCy + lp.y, op.id, a, inst.idx);
+        }
+        const ox0 = newCx - opW / 2, ox1 = newCx + opW / 2;
+        const oy0 = newCy - opH / 2, oy1 = newCy + opH / 2;
+        if (wp.x >= ox0 - worldThresh && wp.x <= ox1 + worldThresh) {
+          const xProj = Math.max(ox0, Math.min(ox1, wp.x));
+          const tX = (xProj - ox0) / (ox1 - ox0);
+          consider(xProj, oy1, op.id, `T:${tX.toFixed(4)}`, inst.idx);
+          consider(xProj, oy0, op.id, `B:${tX.toFixed(4)}`, inst.idx);
+        }
+        if (wp.y >= oy0 - worldThresh && wp.y <= oy1 + worldThresh) {
+          const yProj = Math.max(oy0, Math.min(oy1, wp.y));
+          const tY = (yProj - oy0) / (oy1 - oy0);
+          consider(ox0, yProj, op.id, `L:${tY.toFixed(4)}`, inst.idx);
+          consider(ox1, yProj, op.id, `R:${tY.toFixed(4)}`, inst.idx);
+        }
+      };
+      for (const opid of (b.operandIds || [])) visitOp(opid);
     }
     return best;
   };
@@ -614,10 +684,19 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     // the polyline as-is (caught via dblclick handler below). Anchor snaps
     // are honored — a vertex landing on an existing anchor stores the
     // snap binding so the vertex parametrically tracks the target.
+    //
+    // Hover-snap works for EVERY rendered instance (base + repeats /
+    // duplicate_mirror copies / boolean operand cells). Clicking on a
+    // base-instance anchor installs a parametric `kind: 'snap'`
+    // vertex; clicking on a NON-BASE instance snaps visually only —
+    // the vertex becomes a `rel` step at the snapped position. (The
+    // scene model can't currently encode "bind to instance N"; that's
+    // a future enhancement.)
     if (addMode && addMode.shape === 'polyline') {
       const wp = screenToWorld(e.clientX, e.clientY);
       const worldThresh = viewport.w * 0.012;
       const snap = findAnchorSnap(wp, worldThresh);
+      const isBaseInst = !snap || (snap.instanceIdx ?? 0) === 0;
       // Axis-aligned guideline: if the cursor isn't snapped to an anchor
       // AND we have previous vertices, check if x or y aligns with any of
       // them within tolerance; snap the cursor to that axis.
@@ -636,7 +715,14 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         if (Math.abs(ddx) > Math.abs(ddy)) vy = last.y;
         else                                vx = last.x;
       }
-      const newVertex = { x: vx, y: vy, snap: snap ? { compId: snap.compId, anchor: snap.anchor } : null };
+      const newVertex = {
+        x: vx, y: vy,
+        // Only install the parametric snap binding for BASE instances —
+        // a snap to instance N visually lands on the right anchor but
+        // can't be expressed parametrically yet, so we record numeric
+        // position only.
+        snap: (snap && isBaseInst) ? { compId: snap.compId, anchor: snap.anchor } : null,
+      };
       if (!polylineDraft) {
         setPolylineDraft({ vertices: [newVertex], cursorPos: { x: vx, y: vy }, cursorSnap: snap || null });
       } else {
@@ -661,13 +747,18 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
 
     // Add tool: drag to size the new component. Anchor snaps are honored so
     // that landing on an existing component's corner/edge installs a position
-    // snap rather than a free coordinate.
+    // snap rather than a free coordinate. Snapping to a NON-BASE instance
+    // (repeats / mirrors) snaps the cursor visually but does NOT install a
+    // parametric binding — pretending to bind to instance N would actually
+    // bind to the BASE component and place the new shape at the wrong
+    // position.
     if (addMode) {
       const wp = screenToWorld(e.clientX, e.clientY);
       const worldThresh = viewport.w * 0.012;
       const snap = findAnchorSnap(wp, worldThresh);
+      const isBaseInst = !snap || (snap.instanceIdx ?? 0) === 0;
       const p1 = snap ? { x: snap.x, y: snap.y } : { x: wp.x, y: wp.y };
-      setAddDrag({ p1, p2: p1, snapStart: snap || null, snapEnd: null });
+      setAddDrag({ p1, p2: p1, snapStart: (snap && isBaseInst) ? snap : null, snapEnd: null });
       e.stopPropagation();
       e.preventDefault();
       return;
@@ -904,8 +995,12 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       else setRulerSnapPoint({ x: wp.x, y: wp.y, label: null });
     }
     // Polyline draft: track cursor for the preview segment + axis-guide
-    // detection. We compute the snap target every move so the halo
-    // follows hover the way ruler mode does.
+    // detection. The cursor visually snaps to anchors on EVERY rendered
+    // instance (base + repeats / duplicate_mirror copies / boolean-cluster
+    // operand cells). The halo follows the hover the way ruler mode does;
+    // the cursorSnap state is used by the canvas overlay to decide whether
+    // to draw the halo (we keep it for any instance), but a parametric
+    // binding only gets installed at click time for base-instance snaps.
     if (addMode && addMode.shape === 'polyline' && polylineDraft) {
       const wp = screenToWorld(e.clientX, e.clientY);
       const worldThresh = viewport.w * 0.012;
@@ -932,26 +1027,43 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       });
       return;
     }
-    // Polyline pre-draw hover: show snap halo before the first click.
+    // Polyline pre-draw hover: show snap halo before the first click,
+    // for any instance (base or transform copy).
     if (addMode && addMode.shape === 'polyline' && !polylineDraft) {
       const wp = screenToWorld(e.clientX, e.clientY);
       const worldThresh = viewport.w * 0.012;
       const snap = findAnchorSnap(wp, worldThresh);
       setAddHoverSnap(snap || { x: wp.x, y: wp.y, compId: null, anchor: null });
     }
-    // Add-drag: update p2 and re-evaluate snapEnd
+    // Add-drag: update p2 and re-evaluate snapEnd. Filter to base
+    // instances for the parametric snap-binding side, but use ANY
+    // instance's anchor position for the visual p2 (so the rect's
+    // corner visually lands on the instance the user is hovering).
     if (addMode && addDrag) {
       const wp = screenToWorld(e.clientX, e.clientY);
       const worldThresh = viewport.w * 0.012;
       const snap = findAnchorSnap(wp, worldThresh);
+      const isBaseInst = !snap || (snap.instanceIdx ?? 0) === 0;
       const p2 = snap ? { x: snap.x, y: snap.y } : { x: wp.x, y: wp.y };
-      setAddDrag({ ...addDrag, p2, snapEnd: snap || null });
+      setAddDrag({ ...addDrag, p2, snapEnd: (snap && isBaseInst) ? snap : null });
     } else if (addMode && !addDrag) {
-      // Pre-drag hover: show what point we'd snap to if the user clicked now.
+      // Pre-drag hover: show what point we'd snap to if the user clicked
+      // now. Visual halo shows for any instance, parametric-binding hint
+      // (compId/anchor in the hover record) only for base instances.
       const wp = screenToWorld(e.clientX, e.clientY);
       const worldThresh = viewport.w * 0.012;
       const snap = findAnchorSnap(wp, worldThresh);
-      setAddHoverSnap(snap || { x: wp.x, y: wp.y, compId: null, anchor: null });
+      const isBaseInst = !snap || (snap.instanceIdx ?? 0) === 0;
+      if (snap) {
+        setAddHoverSnap({
+          x: snap.x, y: snap.y,
+          compId: isBaseInst ? snap.compId : null,
+          anchor: isBaseInst ? snap.anchor : null,
+          instanceIdx: snap.instanceIdx ?? 0,
+        });
+      } else {
+        setAddHoverSnap({ x: wp.x, y: wp.y, compId: null, anchor: null });
+      }
     } else if (!addMode && addHoverSnap) {
       setAddHoverSnap(null);
     }
@@ -3275,15 +3387,26 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       })()}
 
       {/* Add-mode pre-drag hover indicator: show the snap target before
-          the drag starts so the user can see what they'd grab if they click. */}
-      {addMode && !addDrag && addHoverSnap && addHoverSnap.compId && (
-        <g pointerEvents="none">
-          <circle cx={addHoverSnap.x} cy={-addHoverSnap.y} r={hr * 0.6}
-            fill="#fbbf24" stroke="#f59e0b" strokeWidth={sw * 0.6} />
-          <circle cx={addHoverSnap.x} cy={-addHoverSnap.y} r={hr * 1.2}
-            fill="none" stroke="#f59e0b" strokeWidth={sw * 0.5} opacity={0.6} />
-        </g>
-      )}
+          the drag starts so the user can see what they'd grab if they
+          click. Base-instance snaps (would install a parametric binding)
+          render amber; non-base instances (repeats / mirrors / boolean
+          cluster cells) render cyan with a dashed outer ring — same
+          color convention as the in-draw polyline halo. */}
+      {addMode && !addDrag && addHoverSnap && (addHoverSnap.compId || addHoverSnap.instanceIdx > 0) && (() => {
+        const isBase = !!addHoverSnap.compId;
+        const innerFill = isBase ? '#fbbf24' : '#67e8f9';
+        const stroke = isBase ? '#f59e0b' : '#06b6d4';
+        const innerStroke = isBase ? '#f59e0b' : '#0891b2';
+        return (
+          <g pointerEvents="none">
+            <circle cx={addHoverSnap.x} cy={-addHoverSnap.y} r={hr * 0.6}
+              fill={innerFill} stroke={innerStroke} strokeWidth={sw * 0.6} />
+            <circle cx={addHoverSnap.x} cy={-addHoverSnap.y} r={hr * 1.2}
+              fill="none" stroke={stroke} strokeWidth={sw * 0.5} opacity={0.6}
+              strokeDasharray={isBase ? undefined : `${sw * 1.5},${sw * 1.5}`} />
+          </g>
+        );
+      })()}
 
       {/* Polyline drawing overlay: placed vertices as dots, the live
           preview segment from last vertex → cursor, plus axis-aligned
@@ -3352,14 +3475,32 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                 />
               );
             })()}
-            {/* Snap halo on cursor (anchor-style) when hovering a target */}
-            {polylineDraft.cursorSnap && cur && (
-              <g>
-                <circle cx={cur.x} cy={-cur.y} r={screen(14)} fill="none" stroke="#f59e0b" strokeWidth={screen(0.5)} opacity={0.3} />
-                <circle cx={cur.x} cy={-cur.y} r={screen(9)} fill="none" stroke="#f59e0b" strokeWidth={screen(0.9)} opacity={0.7} />
-                <circle cx={cur.x} cy={-cur.y} r={screen(3.5)} fill="#fbbf24" stroke="#f59e0b" strokeWidth={screen(0.6)} />
-              </g>
-            )}
+            {/* Snap halo on cursor (anchor-style) when hovering a target.
+                Base-instance snaps install a parametric binding on click
+                → amber halo. NON-base-instance snaps (repeats / mirrors /
+                boolean operand cells) snap the cursor visually only —
+                cyan halo with a dashed outer ring signals "no parametric
+                tie to that specific instance, just a free position." */}
+            {polylineDraft.cursorSnap && cur && (() => {
+              const isBase = (polylineDraft.cursorSnap.instanceIdx ?? 0) === 0;
+              if (isBase) {
+                return (
+                  <g>
+                    <circle cx={cur.x} cy={-cur.y} r={screen(14)} fill="none" stroke="#f59e0b" strokeWidth={screen(0.5)} opacity={0.3} />
+                    <circle cx={cur.x} cy={-cur.y} r={screen(9)} fill="none" stroke="#f59e0b" strokeWidth={screen(0.9)} opacity={0.7} />
+                    <circle cx={cur.x} cy={-cur.y} r={screen(3.5)} fill="#fbbf24" stroke="#f59e0b" strokeWidth={screen(0.6)} />
+                  </g>
+                );
+              }
+              return (
+                <g>
+                  <circle cx={cur.x} cy={-cur.y} r={screen(14)} fill="none" stroke="#06b6d4" strokeWidth={screen(0.5)} opacity={0.3} />
+                  <circle cx={cur.x} cy={-cur.y} r={screen(9)} fill="none" stroke="#06b6d4" strokeWidth={screen(0.9)} opacity={0.7}
+                    strokeDasharray={`${screen(2)},${screen(2)}`} />
+                  <circle cx={cur.x} cy={-cur.y} r={screen(3.5)} fill="#67e8f9" stroke="#0891b2" strokeWidth={screen(0.6)} />
+                </g>
+              );
+            })()}
           </g>
         );
       })()}
