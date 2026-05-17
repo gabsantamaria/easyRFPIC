@@ -19,6 +19,22 @@ import {
   getStoredWorkspace, setStoredWorkspace, discoverWorkspaces,
 } from './storage/workspace.js';
 import { makeVersion, sortedVersions, findVersionById } from './storage/versions.js';
+
+// When a loaded payload's currentVersionId is missing / unknown (legacy
+// payloads pre-versions, or designs where the pointer was cleared by a
+// delete-version), fall back to the LATEST snapshot as the implicit
+// default. New/empty designs (no versions yet) get null.
+const resolveCurrentVersionId = (savedCurId, versions) => {
+  const list = Array.isArray(versions) ? versions : [];
+  // If we have an explicit pointer AND it still resolves to a real
+  // version in this design, trust it.
+  if (typeof savedCurId === 'string' && list.some(v => v && v.id === savedCurId)) {
+    return savedCurId;
+  }
+  // Otherwise pick the most-recently-saved snapshot if any.
+  const sorted = sortedVersions(list);
+  return sorted.length > 0 ? sorted[0].id : null;
+};
 import {
   listLibraryItems, listArchivedLibraryItems,
   loadLibraryItem, loadArchivedLibraryItem,
@@ -342,7 +358,7 @@ export default function App() {
           setHistory(d.history || []);
           setFuture(d.future || []);
           setVersions(Array.isArray(d.versions) ? d.versions : []);
-          setCurrentVersionId(typeof d.currentVersionId === 'string' ? d.currentVersionId : null);
+          setCurrentVersionId(resolveCurrentVersionId(d.currentVersionId, d.versions));
           setDesignName(activeName);
           setSaveStatus('saved');
           return;
@@ -653,7 +669,7 @@ export default function App() {
     setHistory(d.history || []);
     setFuture(d.future || []);
     setVersions(Array.isArray(d.versions) ? d.versions : []);
-    setCurrentVersionId(typeof d.currentVersionId === 'string' ? d.currentVersionId : null);
+    setCurrentVersionId(resolveCurrentVersionId(d.currentVersionId, d.versions));
     setSelection({ ids: new Set(), primary: null });
     setDesignName(name);
     await setActiveDesignName(workspace, name);
@@ -713,14 +729,17 @@ export default function App() {
     });
     if (!ok) return;
     const nextVersions = (d.versions || []).filter(v => v.id !== versionId);
-    // If the deleted version was the one we were "based on", clear
-    // the pointer — the working state no longer corresponds to any
-    // recorded snapshot.
-    const nextCurrent = d.currentVersionId === versionId ? null : d.currentVersionId;
+    // If the deleted version was the one we were "based on", fall
+    // through to the new latest snapshot (or null if nothing's left)
+    // via resolveCurrentVersionId — keeping the default-to-latest
+    // behavior consistent with how loads pick the highlight.
+    const nextCurrent = d.currentVersionId === versionId
+      ? resolveCurrentVersionId(null, nextVersions)
+      : d.currentVersionId;
     await saveDesign(workspace, name, { ...d, versions: nextVersions, currentVersionId: nextCurrent });
     if (name === designName) {
       setVersions(nextVersions);
-      if (d.currentVersionId === versionId) setCurrentVersionId(null);
+      if (d.currentVersionId === versionId) setCurrentVersionId(nextCurrent);
     }
     setVersionsByDesign(prev => {
       const next = { ...prev };
@@ -775,7 +794,7 @@ export default function App() {
       ...prev,
       [name]: {
         versions: sortedVersions(d.versions),
-        currentVersionId: typeof d.currentVersionId === 'string' ? d.currentVersionId : null,
+        currentVersionId: resolveCurrentVersionId(d.currentVersionId, d.versions),
       },
     }));
   }, [workspace, designName, versionsByDesign]);
