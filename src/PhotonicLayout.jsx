@@ -157,9 +157,16 @@ export default function App() {
   // demand when the user expands their row in the list (see
   // `versionsByDesign` cache below).
   const [versions, setVersions] = useState([]);
-  // Cache of versions for OTHER (non-active) designs in the workspace.
-  // Populated lazily when the user expands a design row. Keyed by
-  // design name; value is the sorted versions array.
+  // The version id the user is currently "based on": the latest
+  // snapshot they loaded into the working state OR took. Persists
+  // with the design so a re-open lands on the same version, not on
+  // an ambiguous "tip of versions" guess. Null = the user hasn't
+  // tied the working state to any specific snapshot yet (fresh
+  // design, or pre-versions legacy load).
+  const [currentVersionId, setCurrentVersionId] = useState(null);
+  // Cache of versions + current-version-id for OTHER (non-active)
+  // designs in the workspace. Populated lazily when the user expands
+  // a design row. Keyed by design name; values: { versions, currentVersionId }.
   const [versionsByDesign, setVersionsByDesign] = useState({});
   // Which design rows in the SAVED DESIGNS list are currently expanded
   // to show their per-version sub-list. Pure UI state.
@@ -335,12 +342,14 @@ export default function App() {
           setHistory(d.history || []);
           setFuture(d.future || []);
           setVersions(Array.isArray(d.versions) ? d.versions : []);
+          setCurrentVersionId(typeof d.currentVersionId === 'string' ? d.currentVersionId : null);
           setDesignName(activeName);
           setSaveStatus('saved');
           return;
         }
       }
       setVersions([]);
+      setCurrentVersionId(null);
       // No active design saved in this workspace — start fresh
       setScene(normalizeScene(makeDefaultScene()));
       setHistory([]);
@@ -494,7 +503,7 @@ export default function App() {
   // until the user takes a first snapshot.
   const handleSave = useCallback(async () => {
     setSaveStatus('saving');
-    const ok = await saveDesign(workspace, designName, { scene, history, future, updatedAt: Date.now(), versions });
+    const ok = await saveDesign(workspace, designName, { scene, history, future, updatedAt: Date.now(), versions, currentVersionId });
     if (ok) {
       await setActiveDesignName(workspace, designName);
       await refreshSavedList();
@@ -504,7 +513,7 @@ export default function App() {
       setSaveStatus('unsaved');
       await alertDialog('Save failed.', 'Error');
     }
-  }, [workspace, designName, scene, history, future, versions, refreshSavedList, alertDialog, mirrorWorkspaceToFileIfLinked]);
+  }, [workspace, designName, scene, history, future, versions, currentVersionId, refreshSavedList, alertDialog, mirrorWorkspaceToFileIfLinked]);
 
   // Snapshot the current scene into the design's version history. The
   // user is prompted for a short description (commit message). Each
@@ -524,9 +533,13 @@ export default function App() {
     setSaveStatus('saving');
     const newVersion = makeVersion(scene, description, versions);
     const nextVersions = [newVersion, ...versions];
-    const ok = await saveDesign(workspace, designName, { scene, history, future, updatedAt: Date.now(), versions: nextVersions });
+    // Taking a snapshot ties the working state to the newly-created
+    // version — that's the version the user is now "on", and a
+    // subsequent re-open should land back on it.
+    const ok = await saveDesign(workspace, designName, { scene, history, future, updatedAt: Date.now(), versions: nextVersions, currentVersionId: newVersion.id });
     if (ok) {
       setVersions(nextVersions);
+      setCurrentVersionId(newVersion.id);
       await setActiveDesignName(workspace, designName);
       await refreshSavedList();
       setSaveStatus('saved');
@@ -547,8 +560,9 @@ export default function App() {
     }
     setSaveStatus('saving');
     // Save As starts a new design name; carry the existing versions
-    // forward so the user doesn't lose history they explicitly kept.
-    const ok = await saveDesign(workspace, trimmed, { scene, history, future, updatedAt: Date.now(), versions });
+    // forward (and the current-version pointer) so the user doesn't
+    // lose context they explicitly kept.
+    const ok = await saveDesign(workspace, trimmed, { scene, history, future, updatedAt: Date.now(), versions, currentVersionId });
     if (ok) {
       setDesignName(trimmed);
       await setActiveDesignName(workspace, trimmed);
@@ -559,7 +573,7 @@ export default function App() {
       setSaveStatus('unsaved');
       await alertDialog('Save As failed.', 'Error');
     }
-  }, [workspace, designName, scene, history, future, versions, savedList, refreshSavedList, promptDialog, confirmDialog, alertDialog, mirrorWorkspaceToFileIfLinked]);
+  }, [workspace, designName, scene, history, future, versions, currentVersionId, savedList, refreshSavedList, promptDialog, confirmDialog, alertDialog, mirrorWorkspaceToFileIfLinked]);
 
 
   const handleNew = useCallback(async () => {
@@ -574,6 +588,7 @@ export default function App() {
     setHistory([]);
     setFuture([]);
     setVersions([]);
+    setCurrentVersionId(null);
     setSelection({ ids: new Set(), primary: null });
     setDesignName(name.trim());
     await setActiveDesignName(workspace, name.trim());
@@ -602,7 +617,7 @@ export default function App() {
           if (!proposed || !proposed.trim()) return;
           nameToSave = proposed.trim();
         }
-        const payload = { scene, history, future, savedAt: Date.now(), versions };
+        const payload = { scene, history, future, savedAt: Date.now(), versions, currentVersionId };
         const ok = await saveDesign(workspace, nameToSave, payload);
         if (!ok) {
           await alertDialog('Failed to save current design. Aborting.', 'Save error');
@@ -620,11 +635,12 @@ export default function App() {
     setHistory([]);
     setFuture([]);
     setVersions([]);
+    setCurrentVersionId(null);
     setSelection({ ids: new Set(), primary: null });
     setDesignName(name.trim());
     await setActiveDesignName(workspace, name.trim());
     setSaveStatus('unsaved');
-  }, [workspace, saveStatus, designName, scene, history, future, versions, setSelection, alertDialog, confirmDialog, promptDialog]);
+  }, [workspace, saveStatus, designName, scene, history, future, versions, currentVersionId, setSelection, alertDialog, confirmDialog, promptDialog]);
 
   const handleLoad = useCallback(async (name) => {
     if (saveStatus === 'unsaved') {
@@ -637,6 +653,7 @@ export default function App() {
     setHistory(d.history || []);
     setFuture(d.future || []);
     setVersions(Array.isArray(d.versions) ? d.versions : []);
+    setCurrentVersionId(typeof d.currentVersionId === 'string' ? d.currentVersionId : null);
     setSelection({ ids: new Set(), primary: null });
     setDesignName(name);
     await setActiveDesignName(workspace, name);
@@ -661,6 +678,7 @@ export default function App() {
     setHistory([]);
     setFuture([]);
     setVersions(Array.isArray(d.versions) ? d.versions : []);
+    setCurrentVersionId(v.id);
     setSelection({ ids: new Set(), primary: null });
     setDesignName(name);
     await setActiveDesignName(workspace, name);
@@ -695,11 +713,18 @@ export default function App() {
     });
     if (!ok) return;
     const nextVersions = (d.versions || []).filter(v => v.id !== versionId);
-    await saveDesign(workspace, name, { ...d, versions: nextVersions });
-    if (name === designName) setVersions(nextVersions);
+    // If the deleted version was the one we were "based on", clear
+    // the pointer — the working state no longer corresponds to any
+    // recorded snapshot.
+    const nextCurrent = d.currentVersionId === versionId ? null : d.currentVersionId;
+    await saveDesign(workspace, name, { ...d, versions: nextVersions, currentVersionId: nextCurrent });
+    if (name === designName) {
+      setVersions(nextVersions);
+      if (d.currentVersionId === versionId) setCurrentVersionId(null);
+    }
     setVersionsByDesign(prev => {
       const next = { ...prev };
-      if (next[name]) next[name] = sortedVersions(nextVersions);
+      if (next[name]) next[name] = { versions: sortedVersions(nextVersions), currentVersionId: nextCurrent };
       return next;
     });
     mirrorWorkspaceToFileIfLinked();
@@ -728,22 +753,31 @@ export default function App() {
     if (name === designName) setVersions(nextVersions);
     setVersionsByDesign(prev => {
       const next = { ...prev };
-      if (next[name]) next[name] = sortedVersions(nextVersions);
+      if (next[name]) {
+        next[name] = { versions: sortedVersions(nextVersions), currentVersionId: next[name].currentVersionId };
+      }
       return next;
     });
     mirrorWorkspaceToFileIfLinked();
   }, [workspace, designName, promptDialog, mirrorWorkspaceToFileIfLinked]);
 
-  // Lazily load (and cache) the versions array for any design in
-  // the workspace. Used when the user expands a non-active design's
-  // row in the SAVED DESIGNS list — we don't want to eagerly fetch
-  // every design's blob on the first list render.
+  // Lazily load (and cache) the versions array + current-version
+  // pointer for any design in the workspace. Used when the user
+  // expands a non-active design's row in the SAVED DESIGNS list —
+  // we don't want to eagerly fetch every design's blob on the first
+  // list render.
   const loadVersionsForDesign = useCallback(async (name) => {
-    if (name === designName) return; // already in `versions`
+    if (name === designName) return; // already in `versions` / `currentVersionId`
     if (versionsByDesign[name]) return; // cached
     const d = await loadDesign(workspace, name);
     if (!d) return;
-    setVersionsByDesign(prev => ({ ...prev, [name]: sortedVersions(d.versions) }));
+    setVersionsByDesign(prev => ({
+      ...prev,
+      [name]: {
+        versions: sortedVersions(d.versions),
+        currentVersionId: typeof d.currentVersionId === 'string' ? d.currentVersionId : null,
+      },
+    }));
   }, [workspace, designName, versionsByDesign]);
 
   // Toggle a design row's expanded state in the SAVED DESIGNS list,
@@ -911,10 +945,10 @@ export default function App() {
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     autosaveTimerRef.current = setTimeout(async () => {
       setSaveStatus('saving');
-      // Preserve versions[] through autosave too — otherwise the
-      // first autosave after a snapshot would silently drop the
-      // version history.
-      const ok = await saveDesign(workspace, designName, { scene, history, future, updatedAt: Date.now(), versions });
+      // Preserve versions[] and currentVersionId through autosave
+      // too — otherwise the first autosave after a snapshot would
+      // silently drop history / the current-version pointer.
+      const ok = await saveDesign(workspace, designName, { scene, history, future, updatedAt: Date.now(), versions, currentVersionId });
       if (ok) {
         setSaveStatus('saved');
         setLastAutoSavedAt(Date.now());
@@ -928,7 +962,7 @@ export default function App() {
     return () => {
       if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     };
-  }, [workspace, scene, history, future, versions, designName, savedList, saveStatus, mirrorWorkspaceToFileIfLinked]);
+  }, [workspace, scene, history, future, versions, currentVersionId, designName, savedList, saveStatus, mirrorWorkspaceToFileIfLinked]);
 
   // Tick to update "saved Xs ago" label every 5s
   const [tickNow, setTickNow] = useState(Date.now());
@@ -4250,10 +4284,23 @@ export default function App() {
             {savedList.map(name => {
               const isCurrent = name === designName;
               const isExpanded = expandedDesigns.has(name);
-              // For the active design pull versions from React state
-              // (kept in sync with edits/snapshots); for others read
-              // the lazy-loaded cache.
-              const vlist = isCurrent ? sortedVersions(versions) : (versionsByDesign[name] || []);
+              // For the active design pull versions + current-version
+              // pointer from React state (kept in sync with edits and
+              // snapshots); for others read the lazy-loaded cache.
+              const cached = versionsByDesign[name];
+              const vlist = isCurrent
+                ? sortedVersions(versions)
+                : (cached ? cached.versions : []);
+              const activeCurId = isCurrent ? currentVersionId : (cached ? cached.currentVersionId : null);
+              // Find the "current" version entry so we can render
+              // its short id / vN chip in the row header.
+              const activeVer = activeCurId
+                ? vlist.find(v => v.id === activeCurId)
+                : null;
+              // Drift indicator: only meaningful for the ACTIVE
+              // design (we know live save status). Other rows just
+              // show the version chip without a "modified" tag.
+              const isModified = isCurrent && saveStatus === 'unsaved' && activeCurId;
               return (
                 <div key={name} className={`border-b border-slate-800 ${isCurrent ? 'bg-slate-800/40' : ''}`}>
                   <div className={`flex items-center gap-1 px-3 py-1.5 hover:bg-slate-800/60`}>
@@ -4262,13 +4309,30 @@ export default function App() {
                       className="text-slate-500 hover:text-slate-200 w-3 flex-shrink-0"
                       title={isExpanded ? 'Collapse versions' : 'Show versions'}
                     >{isExpanded ? '▾' : '▸'}</button>
-                    <button onClick={() => { handleLoad(name); setShowDesigns(false); }} className="flex-1 text-left text-xs font-mono text-slate-200 hover:text-cyan-300 truncate">
-                      {isCurrent && <span className="text-emerald-400 mr-1">●</span>}
-                      {name}
+                    <button onClick={() => { handleLoad(name); setShowDesigns(false); }} className="flex-1 text-left text-xs font-mono text-slate-200 hover:text-cyan-300 truncate flex items-center gap-1 min-w-0">
+                      {isCurrent && <span className="text-emerald-400 flex-shrink-0">●</span>}
+                      <span className="truncate">{name}</span>
+                      {activeVer && (
+                        <span
+                          className={`flex-shrink-0 inline-flex items-center gap-1 px-1 py-px rounded text-[9px] font-mono ${
+                            isModified
+                              ? 'bg-amber-900/40 text-amber-300 border border-amber-700'
+                              : 'bg-cyan-900/40 text-cyan-300 border border-cyan-800'
+                          }`}
+                          title={
+                            `On v${activeVer.versionNumber} (${activeVer.id})${
+                              activeVer.description ? `: ${activeVer.description}` : ''
+                            }${isModified ? ' · modified since this snapshot' : ''}`
+                          }
+                        >
+                          @v{activeVer.versionNumber}
+                          {isModified && <span className="opacity-80">*</span>}
+                        </span>
+                      )}
                     </button>
                     {vlist.length > 0 && (
                       <span className="text-[9px] text-slate-500 mr-1" title={`${vlist.length} snapshot${vlist.length === 1 ? '' : 's'}`}>
-                        v{vlist.length}
+                        ({vlist.length})
                       </span>
                     )}
                     <button
@@ -4300,18 +4364,40 @@ export default function App() {
                           const dateLabel = sameDay
                             ? dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
                             : dt.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                          // Highlight the version the working state is
+                          // currently "based on" so the user can see at
+                          // a glance which snapshot they'd diff against.
+                          // For the active design that drift may be live
+                          // (saveStatus === 'unsaved' tags it modified).
+                          const isCurVer = v.id === activeCurId;
                           return (
-                            <div key={v.id} className="flex items-start gap-1 py-1 hover:bg-slate-800/50 rounded px-1 group">
+                            <div
+                              key={v.id}
+                              className={`flex items-start gap-1 py-1 rounded px-1 group ${
+                                isCurVer
+                                  ? 'bg-cyan-900/30 border-l-2 border-cyan-400 -ml-px'
+                                  : 'hover:bg-slate-800/50'
+                              }`}
+                            >
                               <button
                                 onClick={() => { handleLoadVersion(name, v.id); setShowDesigns(false); }}
                                 className="flex-1 text-left min-w-0"
-                                title={`Load version ${v.versionNumber} (${v.id}) into the working state.`}
+                                title={`Load version ${v.versionNumber} (${v.id}) into the working state.${isCurVer ? ' (Currently based on this version.)' : ''}`}
                               >
                                 <div className="flex items-center gap-1.5 text-[10px] font-mono">
-                                  <span className="text-cyan-400">v{v.versionNumber}</span>
+                                  {isCurVer && (
+                                    <span
+                                      className="text-cyan-300 font-bold"
+                                      title={isModified ? 'Currently on this version (modified since)' : 'Currently on this version'}
+                                    >●</span>
+                                  )}
+                                  <span className={isCurVer ? 'text-cyan-300 font-bold' : 'text-cyan-400'}>v{v.versionNumber}</span>
                                   <span className="text-slate-500">{v.id.slice(0, 7)}</span>
                                   <span className="text-slate-500">·</span>
                                   <span className="text-slate-500">{dateLabel}</span>
+                                  {isCurVer && isModified && (
+                                    <span className="text-amber-400 ml-1" title="Working state differs from this snapshot">· modified</span>
+                                  )}
                                 </div>
                                 {v.description ? (
                                   <div className="text-[10px] text-slate-300 truncate mt-0.5">{v.description}</div>
