@@ -19,6 +19,7 @@ import { expandTransforms } from '../scene/transforms.js';
 import { detectPortIntegrationLine } from '../scene/lumpedPort.js';
 import { shapeInstanceToRing } from '../geometry/rings.js';
 import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/racetrack.js';
+import { instanceChainOffsetExpr, chainOwnerForInstance } from '../scene/instance-positions.js';
 
 // ----------------------------------------------------------------------
 // PARAMETRIC POSITION EXPRESSIONS (for HFSS export)
@@ -379,6 +380,12 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   const appendToActive = !!options.appendToActive;
   const { params, components, mirrors, snaps, stack } = scene;
   const solved = applyMirrors(solveLayout(components, snaps, paramValues), mirrors);
+  // Pre-compute the full flat list of transform-expanded instances so
+  // polyline emission can resolve `kind: 'snap', instanceIdx > 0`
+  // vertices against the specific transform replica the user clicked
+  // (e.g. the 7th cell of a 16-way repeated meander).
+  const transformInstancesAll = expandTransforms(solved, paramValues);
+  const byIdSolved = Object.fromEntries(solved.map(c => [c.id, c]));
 
   // Parametric position expressions: each component's cx/cy as an expression
   // string referencing snap-chain parameters. Used so that changing parameters
@@ -1143,18 +1150,70 @@ except:
             // anchorOffsetParam for the local-to-anchor offset. If the
             // target isn't in parametricPos (missing / cyclic), fall
             // back to the solved numeric position.
+            //
+            // For instanceIdx > 0 (vertex bound to a transform-
+            // replicated copy or a boolean-operand cell), we ALSO
+            // add the chain offset from base to instance N. Two
+            // sub-cases:
+            //   (a) The target component has its own transforms —
+            //       offset is along its own chain.
+            //   (b) The target is consumed by a boolean whose chain
+            //       drives the cluster's instances — offset is along
+            //       the boolean's chain, applied to the operand's
+            //       base position.
+            // When the chain contains mirror / rotate / duplicate_mirror
+            // (instanceChainOffsetExpr returns null), we fall back to
+            // the NUMERIC instance position from transformInstances —
+            // visually correct, but the vertex won't track HFSS-side
+            // sweeps for that particular instance.
             const tgtPp = parametricPos[v.compId];
             const tgtComp = solved.find(sc => sc.id === v.compId);
+            const instanceIdx = v.instanceIdx || 0;
+            // Resolve chain owner: comp itself if it has transforms,
+            // else its parent boolean (if applicable).
+            const owner = chainOwnerForInstance(tgtComp, byIdSolved);
+            const ownerInstanceIdx = (instanceIdx > 0 && owner) ? instanceIdx : 0;
+            let chainOffset = null;
+            if (ownerInstanceIdx > 0) {
+              chainOffset = instanceChainOffsetExpr(owner, ownerInstanceIdx, paramValues, exprWithUm);
+            }
             if (tgtPp && tgtPp.cxExpr && tgtPp.cyExpr) {
               const off = anchorOffsetParam(v.anchor, tgtPp.wExpr || '0', tgtPp.hExpr || '0');
-              curXExpr = `(${tgtPp.cxExpr}) + (${off.xOff})`;
-              curYExpr = `(${tgtPp.cyExpr}) + (${off.yOff})`;
+              if (chainOffset) {
+                curXExpr = `(${tgtPp.cxExpr}) + (${off.xOff}) + (${chainOffset.dxExpr})`;
+                curYExpr = `(${tgtPp.cyExpr}) + (${off.yOff}) + (${chainOffset.dyExpr})`;
+              } else if (ownerInstanceIdx > 0) {
+                // Chain owner exists but transforms aren't all
+                // parametric-supported (mirror / rotate / duplicate_mirror).
+                // Fall back to the NUMERIC instance position from
+                // transformInstances — visually correct, no parametric
+                // tie to that specific instance.
+                const inst = transformInstancesAll.find(ii => ii.compId === owner.id && ii.idx === ownerInstanceIdx);
+                const opBase = transformInstancesAll.find(ii => ii.compId === v.compId && ii.idx === 0);
+                if (inst && opBase) {
+                  const ddx = inst.cx - (transformInstancesAll.find(ii => ii.compId === owner.id && ii.idx === 0)?.cx ?? 0);
+                  const ddy = inst.cy - (transformInstancesAll.find(ii => ii.compId === owner.id && ii.idx === 0)?.cy ?? 0);
+                  curXExpr = `(${tgtPp.cxExpr}) + (${off.xOff}) + (${ddx.toFixed(4)}um)`;
+                  curYExpr = `(${tgtPp.cyExpr}) + (${off.yOff}) + (${ddy.toFixed(4)}um)`;
+                } else {
+                  curXExpr = `(${tgtPp.cxExpr}) + (${off.xOff})`;
+                  curYExpr = `(${tgtPp.cyExpr}) + (${off.yOff})`;
+                }
+              } else {
+                curXExpr = `(${tgtPp.cxExpr}) + (${off.xOff})`;
+                curYExpr = `(${tgtPp.cyExpr}) + (${off.yOff})`;
+              }
             } else if (tgtComp) {
               const tw = typeof tgtComp.w === 'number' ? tgtComp.w : (evalExpr(tgtComp.w, paramValues) || 0);
               const th = typeof tgtComp.h === 'number' ? tgtComp.h : (evalExpr(tgtComp.h, paramValues) || 0);
               const off = anchorOffsetParam(v.anchor, `${tw}um`, `${th}um`);
-              curXExpr = `(${tgtComp.cx.toFixed(4)}um) + (${off.xOff})`;
-              curYExpr = `(${tgtComp.cy.toFixed(4)}um) + (${off.yOff})`;
+              if (chainOffset) {
+                curXExpr = `(${tgtComp.cx.toFixed(4)}um) + (${off.xOff}) + (${chainOffset.dxExpr})`;
+                curYExpr = `(${tgtComp.cy.toFixed(4)}um) + (${off.yOff}) + (${chainOffset.dyExpr})`;
+              } else {
+                curXExpr = `(${tgtComp.cx.toFixed(4)}um) + (${off.xOff})`;
+                curYExpr = `(${tgtComp.cy.toFixed(4)}um) + (${off.yOff})`;
+              }
             }
             vertExprs.push({ xExpr: curXExpr, yExpr: curYExpr });
           } else {

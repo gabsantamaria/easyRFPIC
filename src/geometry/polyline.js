@@ -28,6 +28,7 @@
 
 import { evalExpr } from '../scene/params.js';
 import { anchorLocal, parseAnchor } from '../scene/anchors.js';
+import { resolveInstanceAnchorNumeric } from '../scene/instance-positions.js';
 
 // Compute the world (x, y) position of a target component's anchor — used to
 // resolve `snap` vertices. Works for primitive shapes (uses bbox w/h). For
@@ -55,7 +56,7 @@ export function anchorWorldNumeric(targetComp, anchorName, paramValues) {
 // For a `rel` vertex, the "previous" reference is:
 //   - For vertex 0: the component's own (cx, cy)
 //   - For vertex i ≥ 1: vertex (i-1)'s resolved world position
-export function resolvePolylineVertices(c, byId, paramValues) {
+export function resolvePolylineVertices(c, byId, paramValues, transformInstances = null) {
   const verts = [];
   const baseCx = Number.isFinite(c.cx) ? c.cx : 0;
   const baseCy = Number.isFinite(c.cy) ? c.cy : 0;
@@ -63,8 +64,25 @@ export function resolvePolylineVertices(c, byId, paramValues) {
   for (let i = 0; i < vertSpecs.length; i++) {
     const v = vertSpecs[i];
     if (v && v.kind === 'snap' && v.compId && v.anchor) {
-      const target = byId[v.compId];
-      const wp = anchorWorldNumeric(target, v.anchor, paramValues);
+      // Two flavors of snap target:
+      //   - instanceIdx absent (or 0): bind to the base component's
+      //     anchor (the standard case before transform-replica snap
+      //     was added).
+      //   - instanceIdx > 0: bind to the Nth instance of either the
+      //     component's own transform chain OR (if the component is
+      //     a boolean operand) its parent boolean's chain. Resolved
+      //     numerically here via `transformInstances`; the HFSS
+      //     export emits the matching parametric expression so the
+      //     vertex follows under HFSS-side sweeps.
+      const idx = v.instanceIdx || 0;
+      let wp = null;
+      if (idx > 0 && transformInstances) {
+        wp = resolveInstanceAnchorNumeric(v.compId, v.anchor, idx, byId, transformInstances, paramValues);
+      }
+      if (!wp) {
+        const target = byId[v.compId];
+        wp = anchorWorldNumeric(target, v.anchor, paramValues);
+      }
       if (wp) verts.push([wp.x, wp.y]);
       else verts.push([NaN, NaN]);
     } else {

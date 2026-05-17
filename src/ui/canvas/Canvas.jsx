@@ -717,11 +717,18 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       }
       const newVertex = {
         x: vx, y: vy,
-        // Only install the parametric snap binding for BASE instances —
-        // a snap to instance N visually lands on the right anchor but
-        // can't be expressed parametrically yet, so we record numeric
-        // position only.
-        snap: (snap && isBaseInst) ? { compId: snap.compId, anchor: snap.anchor } : null,
+        // Snap binding records the target compId + anchor AND the
+        // instanceIdx when > 0. instanceIdx=0 binds to the base
+        // component; instanceIdx>0 binds to a transform-replicated
+        // instance (or, for boolean operand cells, to the operand
+        // viewed under its parent boolean's chain at instance N).
+        // The HFSS export emits matching parametric expressions for
+        // both cases — see instanceChainOffsetExpr.
+        snap: snap ? {
+          compId: snap.compId,
+          anchor: snap.anchor,
+          ...(snap.instanceIdx > 0 ? { instanceIdx: snap.instanceIdx } : {}),
+        } : null,
       };
       if (!polylineDraft) {
         setPolylineDraft({ vertices: [newVertex], cursorPos: { x: vx, y: vy }, cursorSnap: snap || null });
@@ -2679,7 +2686,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   // up live; the instance's cx/cy is the post-transform
                   // bbox center, which we don't use for the path here.
                   const compById_pl = Object.fromEntries(scene.components.map(cc => [cc.id, cc]));
-                  const verts = resolvePolylineVertices(c, compById_pl, paramValues);
+                  const verts = resolvePolylineVertices(c, compById_pl, paramValues, transformInstances);
                   const wgW = Number.isFinite(inst.width) ? inst.width : evalExpr(c.width, paramValues) || 0;
                   if (verts.length >= 2 && wgW > 0) {
                     let d = `M ${verts[0][0]} ${-verts[0][1]}`;

@@ -1170,7 +1170,16 @@ export default function App() {
         newParams[widthParam] = { expr: String(wValForParam), unit: 'µm', desc: `${id} trace width` };
         const polyVerts = (spec.vertices || []).map((v, i) => {
           if (v.snap) {
-            return { kind: 'snap', compId: v.snap.compId, anchor: v.snap.anchor };
+            // Preserve instanceIdx when the user clicked on a non-base
+            // transform replica or boolean-operand cell. The solver +
+            // HFSS export honor instanceIdx > 0 by resolving the
+            // vertex against the target's transform chain.
+            return {
+              kind: 'snap',
+              compId: v.snap.compId,
+              anchor: v.snap.anchor,
+              ...(v.snap.instanceIdx ? { instanceIdx: v.snap.instanceIdx } : {}),
+            };
           }
           if (i === 0) {
             // Vertex 0 unsnapped — sits at the component's (cx, cy)
