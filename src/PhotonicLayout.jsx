@@ -18,6 +18,7 @@ import {
   setActiveDesignName, getActiveDesignName,
   getStoredWorkspace, setStoredWorkspace, discoverWorkspaces,
 } from './storage/workspace.js';
+import { makeVersion, sortedVersions, findVersionById } from './storage/versions.js';
 import {
   listLibraryItems, listArchivedLibraryItems,
   loadLibraryItem, loadArchivedLibraryItem,
@@ -149,6 +150,20 @@ export default function App() {
   const [savedList, setSavedList] = useState([]);
   const [showDesigns, setShowDesigns] = useState(false);
   const [saveStatus, setSaveStatus] = useState(''); // 'saved', 'saving', 'unsaved'
+  // Current design's frozen version history. Lives in React state so
+  // Save / Snapshot can mutate it without re-reading from storage,
+  // and so the SAVED DESIGNS list can render version rows for the
+  // active design directly. Other designs' versions are loaded on
+  // demand when the user expands their row in the list (see
+  // `versionsByDesign` cache below).
+  const [versions, setVersions] = useState([]);
+  // Cache of versions for OTHER (non-active) designs in the workspace.
+  // Populated lazily when the user expands a design row. Keyed by
+  // design name; value is the sorted versions array.
+  const [versionsByDesign, setVersionsByDesign] = useState({});
+  // Which design rows in the SAVED DESIGNS list are currently expanded
+  // to show their per-version sub-list. Pure UI state.
+  const [expandedDesigns, setExpandedDesigns] = useState(new Set());
   const [clipboard, setClipboard] = useState(null); // { components, snaps }
   // Holds a reference to createBoolean (defined later). Keyboard-shortcut
   // effects need the function but are wired up earlier in the component
@@ -313,11 +328,13 @@ export default function App() {
           setScene(normalizeScene(d.scene));
           setHistory(d.history || []);
           setFuture(d.future || []);
+          setVersions(Array.isArray(d.versions) ? d.versions : []);
           setDesignName(activeName);
           setSaveStatus('saved');
           return;
         }
       }
+      setVersions([]);
       // No active design saved in this workspace — start fresh
       setScene(normalizeScene(makeDefaultScene()));
       setHistory([]);
@@ -464,9 +481,14 @@ export default function App() {
   }, [workspace, workspaceHandle]);
 
   // ----- Design management -----
+  // Save the CURRENT working state (scene/history/future + updatedAt)
+  // back to storage under the design's name. Versions are preserved
+  // as-is (Save doesn't touch the version history — only Snapshot
+  // does). Legacy payloads without a versions field stay that way
+  // until the user takes a first snapshot.
   const handleSave = useCallback(async () => {
     setSaveStatus('saving');
-    const ok = await saveDesign(workspace, designName, { scene, history, future, updatedAt: Date.now() });
+    const ok = await saveDesign(workspace, designName, { scene, history, future, updatedAt: Date.now(), versions });
     if (ok) {
       await setActiveDesignName(workspace, designName);
       await refreshSavedList();
@@ -476,7 +498,38 @@ export default function App() {
       setSaveStatus('unsaved');
       await alertDialog('Save failed.', 'Error');
     }
-  }, [workspace, designName, scene, history, future, refreshSavedList, alertDialog, mirrorWorkspaceToFileIfLinked]);
+  }, [workspace, designName, scene, history, future, versions, refreshSavedList, alertDialog, mirrorWorkspaceToFileIfLinked]);
+
+  // Snapshot the current scene into the design's version history. The
+  // user is prompted for a short description (commit message). Each
+  // snapshot gets a fresh 8-char hex id (git-style abbreviated SHA),
+  // a monotonic version number, and a frozen deep-clone of the
+  // current scene. The design's working state and updatedAt are
+  // also saved atomically.
+  const handleSnapshot = useCallback(async () => {
+    const description = await promptDialog(
+      'Snapshot description (optional):',
+      '',
+      'New snapshot',
+    );
+    // promptDialog returns null on Cancel; an empty string is a
+    // legitimate "no description" choice (matches git's `--allow-empty-message`).
+    if (description === null) return;
+    setSaveStatus('saving');
+    const newVersion = makeVersion(scene, description, versions);
+    const nextVersions = [newVersion, ...versions];
+    const ok = await saveDesign(workspace, designName, { scene, history, future, updatedAt: Date.now(), versions: nextVersions });
+    if (ok) {
+      setVersions(nextVersions);
+      await setActiveDesignName(workspace, designName);
+      await refreshSavedList();
+      setSaveStatus('saved');
+      mirrorWorkspaceToFileIfLinked();
+    } else {
+      setSaveStatus('unsaved');
+      await alertDialog('Snapshot failed.', 'Error');
+    }
+  }, [workspace, designName, scene, history, future, versions, promptDialog, refreshSavedList, alertDialog, mirrorWorkspaceToFileIfLinked]);
 
   const handleSaveAs = useCallback(async () => {
     const name = await promptDialog('Save as new design name:', designName + ' copy', 'Save As');
@@ -487,7 +540,9 @@ export default function App() {
       if (!ok) return;
     }
     setSaveStatus('saving');
-    const ok = await saveDesign(workspace, trimmed, { scene, history, future, updatedAt: Date.now() });
+    // Save As starts a new design name; carry the existing versions
+    // forward so the user doesn't lose history they explicitly kept.
+    const ok = await saveDesign(workspace, trimmed, { scene, history, future, updatedAt: Date.now(), versions });
     if (ok) {
       setDesignName(trimmed);
       await setActiveDesignName(workspace, trimmed);
@@ -498,7 +553,7 @@ export default function App() {
       setSaveStatus('unsaved');
       await alertDialog('Save As failed.', 'Error');
     }
-  }, [workspace, designName, scene, history, future, savedList, refreshSavedList, promptDialog, confirmDialog, alertDialog, mirrorWorkspaceToFileIfLinked]);
+  }, [workspace, designName, scene, history, future, versions, savedList, refreshSavedList, promptDialog, confirmDialog, alertDialog, mirrorWorkspaceToFileIfLinked]);
 
 
   const handleNew = useCallback(async () => {
@@ -512,6 +567,7 @@ export default function App() {
     setScene(fresh);
     setHistory([]);
     setFuture([]);
+    setVersions([]);
     setSelection({ ids: new Set(), primary: null });
     setDesignName(name.trim());
     await setActiveDesignName(workspace, name.trim());
@@ -540,7 +596,7 @@ export default function App() {
           if (!proposed || !proposed.trim()) return;
           nameToSave = proposed.trim();
         }
-        const payload = { scene, history, future, savedAt: Date.now() };
+        const payload = { scene, history, future, savedAt: Date.now(), versions };
         const ok = await saveDesign(workspace, nameToSave, payload);
         if (!ok) {
           await alertDialog('Failed to save current design. Aborting.', 'Save error');
@@ -557,11 +613,12 @@ export default function App() {
     setScene(fresh);
     setHistory([]);
     setFuture([]);
+    setVersions([]);
     setSelection({ ids: new Set(), primary: null });
     setDesignName(name.trim());
     await setActiveDesignName(workspace, name.trim());
     setSaveStatus('unsaved');
-  }, [workspace, saveStatus, designName, scene, history, future, setSelection, alertDialog, confirmDialog, promptDialog]);
+  }, [workspace, saveStatus, designName, scene, history, future, versions, setSelection, alertDialog, confirmDialog, promptDialog]);
 
   const handleLoad = useCallback(async (name) => {
     if (saveStatus === 'unsaved') {
@@ -573,11 +630,79 @@ export default function App() {
     setScene(normalizeScene(d.scene));
     setHistory(d.history || []);
     setFuture(d.future || []);
+    setVersions(Array.isArray(d.versions) ? d.versions : []);
     setSelection({ ids: new Set(), primary: null });
     setDesignName(name);
     await setActiveDesignName(workspace, name);
     setSaveStatus('saved');
   }, [workspace, saveStatus, setSelection, confirmDialog, alertDialog]);
+
+  // Load a specific VERSION of a design into the working state. The
+  // working state becomes the version's frozen scene; the user can
+  // then keep editing and Save (overwrites current) or Snapshot
+  // (starts a new chain entry). Marks the design as `unsaved` so
+  // the user is reminded that they've moved off the latest state.
+  const handleLoadVersion = useCallback(async (name, versionId) => {
+    if (saveStatus === 'unsaved') {
+      const ok = await confirmDialog('Discard unsaved changes and load this version?', 'Load version');
+      if (!ok) return;
+    }
+    const d = await loadDesign(workspace, name);
+    if (!d) { await alertDialog('Failed to load design.', 'Error'); return; }
+    const v = findVersionById(d.versions, versionId);
+    if (!v) { await alertDialog('Version not found.', 'Error'); return; }
+    setScene(normalizeScene(v.scene));
+    setHistory([]);
+    setFuture([]);
+    setVersions(Array.isArray(d.versions) ? d.versions : []);
+    setSelection({ ids: new Set(), primary: null });
+    setDesignName(name);
+    await setActiveDesignName(workspace, name);
+    // Mark unsaved so a subsequent Save commits the loaded version
+    // back into the working state (vs. silently overwriting after
+    // an autosave debounce).
+    setSaveStatus('unsaved');
+  }, [workspace, saveStatus, setSelection, confirmDialog, alertDialog]);
+
+  // Delete a single version from a design's history. Confirms first.
+  const handleDeleteVersion = useCallback(async (name, versionId) => {
+    const ok = await confirmDialog('Delete this snapshot? This cannot be undone.', 'Delete version');
+    if (!ok) return;
+    const d = await loadDesign(workspace, name);
+    if (!d) return;
+    const nextVersions = (d.versions || []).filter(v => v.id !== versionId);
+    await saveDesign(workspace, name, { ...d, versions: nextVersions });
+    if (name === designName) setVersions(nextVersions);
+    setVersionsByDesign(prev => {
+      const next = { ...prev };
+      if (next[name]) next[name] = sortedVersions(nextVersions);
+      return next;
+    });
+    mirrorWorkspaceToFileIfLinked();
+  }, [workspace, designName, confirmDialog, mirrorWorkspaceToFileIfLinked]);
+
+  // Lazily load (and cache) the versions array for any design in
+  // the workspace. Used when the user expands a non-active design's
+  // row in the SAVED DESIGNS list — we don't want to eagerly fetch
+  // every design's blob on the first list render.
+  const loadVersionsForDesign = useCallback(async (name) => {
+    if (name === designName) return; // already in `versions`
+    if (versionsByDesign[name]) return; // cached
+    const d = await loadDesign(workspace, name);
+    if (!d) return;
+    setVersionsByDesign(prev => ({ ...prev, [name]: sortedVersions(d.versions) }));
+  }, [workspace, designName, versionsByDesign]);
+
+  // Toggle a design row's expanded state in the SAVED DESIGNS list,
+  // lazy-loading its versions on first open.
+  const toggleDesignExpanded = useCallback((name) => {
+    setExpandedDesigns(prev => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else { next.add(name); loadVersionsForDesign(name); }
+      return next;
+    });
+  }, [loadVersionsForDesign]);
 
   const handleDeleteDesign = useCallback(async (name) => {
     const ok = await confirmDialog(`Delete "${name}"? This cannot be undone.`, 'Delete design');
@@ -733,7 +858,10 @@ export default function App() {
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     autosaveTimerRef.current = setTimeout(async () => {
       setSaveStatus('saving');
-      const ok = await saveDesign(workspace, designName, { scene, history, future, updatedAt: Date.now() });
+      // Preserve versions[] through autosave too — otherwise the
+      // first autosave after a snapshot would silently drop the
+      // version history.
+      const ok = await saveDesign(workspace, designName, { scene, history, future, updatedAt: Date.now(), versions });
       if (ok) {
         setSaveStatus('saved');
         setLastAutoSavedAt(Date.now());
@@ -747,7 +875,7 @@ export default function App() {
     return () => {
       if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     };
-  }, [workspace, scene, history, future, designName, savedList, saveStatus, mirrorWorkspaceToFileIfLinked]);
+  }, [workspace, scene, history, future, versions, designName, savedList, saveStatus, mirrorWorkspaceToFileIfLinked]);
 
   // Tick to update "saved Xs ago" label every 5s
   const [tickNow, setTickNow] = useState(Date.now());
@@ -4051,37 +4179,110 @@ export default function App() {
               className="flex-1 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-cyan-300 outline-none focus:border-cyan-400"
               placeholder="design name"
             />
-            <button onClick={handleSave} className="px-2 py-1 rounded text-xs font-medium" style={{ background: '#22c55e', color: '#0f172a' }}>save</button>
+            <button
+              onClick={handleSave}
+              className="px-2 py-1 rounded text-xs font-medium"
+              style={{ background: '#22c55e', color: '#0f172a' }}
+              title="Save the current state to the active design (Cmd+S). Updates `updatedAt`; doesn't add a version."
+            >save</button>
+            <button
+              onClick={handleSnapshot}
+              className="px-2 py-1 rounded text-xs font-medium"
+              style={{ background: '#06b6d4', color: '#0f172a' }}
+              title="Commit the current state as a new VERSION (snapshot). Prompts for a short description. Each snapshot gets a unique id and version number, like a git commit."
+            >snapshot</button>
           </div>
-          <div className="max-h-80 overflow-y-auto">
+          <div className="max-h-96 overflow-y-auto">
             {savedList.length === 0 && <p className="text-xs text-slate-500 italic px-3 py-3">No saved designs yet.</p>}
             {savedList.map(name => {
               const isCurrent = name === designName;
+              const isExpanded = expandedDesigns.has(name);
+              // For the active design pull versions from React state
+              // (kept in sync with edits/snapshots); for others read
+              // the lazy-loaded cache.
+              const vlist = isCurrent ? sortedVersions(versions) : (versionsByDesign[name] || []);
               return (
-                <div key={name} className={`flex items-center gap-1 px-3 py-1.5 border-b border-slate-800 hover:bg-slate-800/60 ${isCurrent ? 'bg-slate-800/40' : ''}`}>
-                  <button onClick={() => { handleLoad(name); setShowDesigns(false); }} className="flex-1 text-left text-xs font-mono text-slate-200 hover:text-cyan-300 truncate">
-                    {isCurrent && <span className="text-emerald-400 mr-1">●</span>}
-                    {name}
-                  </button>
-                  <button
-                    onClick={async () => {
-                      const newName = await promptDialog('Rename design:', name, 'Rename');
-                      if (newName) handleRenameDesign(name, newName);
-                    }}
-                    className="text-slate-500 hover:text-cyan-400 text-[10px] px-1"
-                    title="Rename"
-                  >
-                    rename
-                  </button>
-                  <button onClick={() => handleDeleteDesign(name)} className="text-slate-500 hover:text-red-400" title="Delete">
-                    <Trash2 size={11} />
-                  </button>
+                <div key={name} className={`border-b border-slate-800 ${isCurrent ? 'bg-slate-800/40' : ''}`}>
+                  <div className={`flex items-center gap-1 px-3 py-1.5 hover:bg-slate-800/60`}>
+                    <button
+                      onClick={() => toggleDesignExpanded(name)}
+                      className="text-slate-500 hover:text-slate-200 w-3 flex-shrink-0"
+                      title={isExpanded ? 'Collapse versions' : 'Show versions'}
+                    >{isExpanded ? '▾' : '▸'}</button>
+                    <button onClick={() => { handleLoad(name); setShowDesigns(false); }} className="flex-1 text-left text-xs font-mono text-slate-200 hover:text-cyan-300 truncate">
+                      {isCurrent && <span className="text-emerald-400 mr-1">●</span>}
+                      {name}
+                    </button>
+                    {vlist.length > 0 && (
+                      <span className="text-[9px] text-slate-500 mr-1" title={`${vlist.length} snapshot${vlist.length === 1 ? '' : 's'}`}>
+                        v{vlist.length}
+                      </span>
+                    )}
+                    <button
+                      onClick={async () => {
+                        const newName = await promptDialog('Rename design:', name, 'Rename');
+                        if (newName) handleRenameDesign(name, newName);
+                      }}
+                      className="text-slate-500 hover:text-cyan-400 text-[10px] px-1"
+                      title="Rename"
+                    >
+                      rename
+                    </button>
+                    <button onClick={() => handleDeleteDesign(name)} className="text-slate-500 hover:text-red-400" title="Delete">
+                      <Trash2 size={11} />
+                    </button>
+                  </div>
+                  {isExpanded && (
+                    <div className="pl-6 pr-2 pb-1.5 border-l-2 border-cyan-900/40 ml-3 mb-1">
+                      {vlist.length === 0 ? (
+                        <p className="text-[10px] text-slate-500 italic py-1">
+                          No snapshots yet — click <span className="font-mono text-cyan-400">snapshot</span> to commit a version.
+                        </p>
+                      ) : (
+                        vlist.map(v => {
+                          // Compact date label: today → time only, else "MMM d HH:mm".
+                          const dt = new Date(v.savedAt || 0);
+                          const now = new Date();
+                          const sameDay = dt.toDateString() === now.toDateString();
+                          const dateLabel = sameDay
+                            ? dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                            : dt.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                          return (
+                            <div key={v.id} className="flex items-start gap-1 py-1 hover:bg-slate-800/50 rounded px-1 group">
+                              <button
+                                onClick={() => { handleLoadVersion(name, v.id); setShowDesigns(false); }}
+                                className="flex-1 text-left min-w-0"
+                                title={`Load version ${v.versionNumber} (${v.id}) into the working state.`}
+                              >
+                                <div className="flex items-center gap-1.5 text-[10px] font-mono">
+                                  <span className="text-cyan-400">v{v.versionNumber}</span>
+                                  <span className="text-slate-500">{v.id.slice(0, 7)}</span>
+                                  <span className="text-slate-500">·</span>
+                                  <span className="text-slate-500">{dateLabel}</span>
+                                </div>
+                                {v.description && (
+                                  <div className="text-[10px] text-slate-300 truncate mt-0.5">{v.description}</div>
+                                )}
+                              </button>
+                              <button
+                                onClick={() => handleDeleteVersion(name, v.id)}
+                                className="text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                                title="Delete this version"
+                              >
+                                <Trash2 size={10} />
+                              </button>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  )}
                 </div>
               );
             })}
           </div>
           <div className="px-3 py-2 border-t border-slate-700 flex items-center gap-2 text-[10px] text-slate-500">
-            <span>Cmd+S = save · Cmd+Shift+S = save as · Cmd+Z / ⇧Z = undo / redo</span>
+            <span>Cmd+S = save · snapshot = commit version · ⇧Cmd+S = save as</span>
           </div>
         </div>
       )}
