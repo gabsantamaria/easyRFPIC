@@ -463,6 +463,29 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   // any error message. Insert spaces around any '-' that sits between
   // two identifier characters before handing the string to HFSS.
   const spaceHyphens = (s) => String(s).replace(/(\w)-(\w)/g, '$1 - $2');
+  // Parametric counterpart to `anchorLocal(name, w, h)` — used wherever
+  // we need an HFSS-side expression for a named anchor's offset from a
+  // part's center given parametric base dimensions (e.g. `'cps_feed_w'`,
+  // or the parametric union bbox from `dimExprForComp`). Defined here
+  // at the top of the function scope so polyline emission, the
+  // transform-chain emitter, and any future caller can all reach it.
+  const anchorOffsetParam = (anchorName, wExpr, hExpr) => {
+    const a = parseAnchor(anchorName);
+    let xOff = '0', yOff = '0';
+    if (a.kind === 'edge') {
+      if (a.side === 'T')      { xOff = `(${a.t} - 0.5) * (${wExpr})`; yOff = `(${hExpr})/2`; }
+      else if (a.side === 'B') { xOff = `(${a.t} - 0.5) * (${wExpr})`; yOff = `-(${hExpr})/2`; }
+      else if (a.side === 'L') { xOff = `-(${wExpr})/2`; yOff = `(${a.t} - 0.5) * (${hExpr})`; }
+      else if (a.side === 'R') { xOff = `(${wExpr})/2`;  yOff = `(${a.t} - 0.5) * (${hExpr})`; }
+    } else {
+      const n = a.name;
+      if (n.includes('W')) xOff = `-(${wExpr})/2`;
+      else if (n.includes('E')) xOff = `(${wExpr})/2`;
+      if (n.includes('S')) yOff = `-(${hExpr})/2`;
+      else if (n.includes('N')) yOff = `(${hExpr})/2`;
+    }
+    return { xOff, yOff };
+  };
   const exprWithUm = (expr) => {
     const s = spaceHyphens(ascii(resolveSynthetics(String(expr ?? '0'))));
     if (/^[\d\s+\-*/.()]+$/.test(s)) {
@@ -1089,6 +1112,153 @@ except:
       const ppShape = parametricPos[c.id];
       const isPortSheet = (c.layer === 'port');
       const isNativeShape = (shapeKind === 'circle' || shapeKind === 'ellipse' || shapeKind === 'polygon');
+
+      // ── POLYLINE TRACE (parametric CreatePolyline + XSection sweep) ──
+      // Polylines emit as a native CreatePolyline call with one
+      // PLPoint per vertex. EVERY coordinate is a parametric HFSS
+      // expression — vertex 0 chains through the polyline's own snap
+      // position (parametricPos), `rel` vertices accumulate dx/dy
+      // expressions from the previous resolved vertex, and `snap`
+      // vertices resolve to a target component's anchor world position
+      // (parametricPos[target] + anchorOffsetParam). XSectionType is
+      // "Rectangle" with Width = trace_width and Height = conductor
+      // thickness for solid traces, or "Line" with Width = trace_width
+      // for zero-thickness sheets. The result is a single HFSS object
+      // whose width, thickness, path, and vertex bindings ALL re-evaluate
+      // under HFSS-side variable sweeps — no hardcoded coordinates.
+      if (shapeKind === 'polyline') {
+        const widthExprUm = exprWithUm(c.width ?? '0');
+        // Build the parametric per-vertex (xExpr, yExpr) chain.
+        const baseCxExpr = ppShape ? exprWithUm(ppShape.cxExpr) : `(${cx.toFixed(4)})um`;
+        const baseCyExpr = ppShape ? exprWithUm(ppShape.cyExpr) : `(${cy.toFixed(4)})um`;
+        let curXExpr = baseCxExpr;
+        let curYExpr = baseCyExpr;
+        const vertExprs = [];
+        const vertSpecs = c.vertices || [];
+        for (let i = 0; i < vertSpecs.length; i++) {
+          const v = vertSpecs[i];
+          if (v && v.kind === 'snap' && v.compId && v.anchor) {
+            // Resolve target's parametric anchor world position. Use
+            // computeParametricPositions output for the chain, plus
+            // anchorOffsetParam for the local-to-anchor offset. If the
+            // target isn't in parametricPos (missing / cyclic), fall
+            // back to the solved numeric position.
+            const tgtPp = parametricPos[v.compId];
+            const tgtComp = solved.find(sc => sc.id === v.compId);
+            if (tgtPp && tgtPp.cxExpr && tgtPp.cyExpr) {
+              const off = anchorOffsetParam(v.anchor, tgtPp.wExpr || '0', tgtPp.hExpr || '0');
+              curXExpr = `(${tgtPp.cxExpr}) + (${off.xOff})`;
+              curYExpr = `(${tgtPp.cyExpr}) + (${off.yOff})`;
+            } else if (tgtComp) {
+              const tw = typeof tgtComp.w === 'number' ? tgtComp.w : (evalExpr(tgtComp.w, paramValues) || 0);
+              const th = typeof tgtComp.h === 'number' ? tgtComp.h : (evalExpr(tgtComp.h, paramValues) || 0);
+              const off = anchorOffsetParam(v.anchor, `${tw}um`, `${th}um`);
+              curXExpr = `(${tgtComp.cx.toFixed(4)}um) + (${off.xOff})`;
+              curYExpr = `(${tgtComp.cy.toFixed(4)}um) + (${off.yOff})`;
+            }
+            vertExprs.push({ xExpr: curXExpr, yExpr: curYExpr });
+          } else {
+            // `rel`: dx/dy expressions added to the previous vertex.
+            const dxExpr = exprWithUm(v?.dx ?? '0');
+            const dyExpr = exprWithUm(v?.dy ?? '0');
+            if (i === 0) {
+              curXExpr = `(${baseCxExpr}) + (${dxExpr})`;
+              curYExpr = `(${baseCyExpr}) + (${dyExpr})`;
+            } else {
+              curXExpr = `(${curXExpr}) + (${dxExpr})`;
+              curYExpr = `(${curYExpr}) + (${dyExpr})`;
+            }
+            vertExprs.push({ xExpr: curXExpr, yExpr: curYExpr });
+          }
+        }
+        if (vertExprs.length < 2) {
+          code += `# ${c.id}: polyline has fewer than 2 vertices — skipped\n`;
+          continue;
+        }
+        // Z policy: solid traces ride the conductor's MID-Z so the
+        // rectangular cross-section straddles ±thickness/2 from the
+        // path; sheets (zero-thickness conductor) lay on the
+        // conductor's zBottom (which equals zTop for zero thickness).
+        const isSheet = (Math.abs(zSize) < 1e-9);
+        const pathZExpr = isSheet
+          ? zBottomExpr
+          : `(${zBottomExpr}) + (${zSizeExpr})/2`;
+        // Build PLPoint and PLSegment records.
+        const ptList = vertExprs.map(v =>
+          `["NAME:PLPoint", "X:=", "${v.xExpr}", "Y:=", "${v.yExpr}", "Z:=", "${pathZExpr}"]`
+        ).join(',\n          ');
+        const segList = vertExprs.slice(0, c.closed ? vertExprs.length : vertExprs.length - 1).map((_, i) =>
+          `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", ${i}, "NoOfPoints:=", 2]`
+        ).join(',\n          ');
+        // XSection: Rectangle for solid traces, Line for sheets, None
+        // for stroke-width-zero (degenerate — emits a 1-D curve).
+        const widthEval = evalExpr(c.width ?? '0', paramValues) || 0;
+        let xsec;
+        if (widthEval <= 0) {
+          xsec = `"XSectionType:=", "None",
+          "XSectionOrient:=", "Auto",
+          "XSectionWidth:=", "0um",
+          "XSectionTopWidth:=", "0um",
+          "XSectionHeight:=", "0um",
+          "XSectionNumSegments:=", "0",
+          "XSectionBendType:=", "Corner"`;
+        } else if (isSheet) {
+          xsec = `"XSectionType:=", "Line",
+          "XSectionOrient:=", "Auto",
+          "XSectionWidth:=", "${widthExprUm}",
+          "XSectionTopWidth:=", "${widthExprUm}",
+          "XSectionHeight:=", "0um",
+          "XSectionNumSegments:=", "0",
+          "XSectionBendType:=", "Corner"`;
+        } else {
+          xsec = `"XSectionType:=", "Rectangle",
+          "XSectionOrient:=", "Auto",
+          "XSectionWidth:=", "${widthExprUm}",
+          "XSectionTopWidth:=", "${widthExprUm}",
+          "XSectionHeight:=", "${zSizeExpr}",
+          "XSectionNumSegments:=", "0",
+          "XSectionBendType:=", "Corner"`;
+        }
+        const colorPl = isPortSheet ? '(255 100 100)' : '(218 165 32)';
+        const transPl = isPortSheet ? '0.5' : '0.0';
+        const solveInside = c.layer === 'waveguide' || isPortSheet ? 'True' : 'False';
+        code += `# ${c.id}: polyline trace (parametric vertices + XSection sweep)\n`;
+        code += `try:
+    _delete_geom_if_exists("${id}")
+    oEditor.CreatePolyline(
+        ["NAME:PolylineParameters",
+         "IsPolylineCovered:=", True,
+         "IsPolylineClosed:=", ${c.closed ? 'True' : 'False'},
+         ["NAME:PolylinePoints",
+          ${ptList}${c.closed ? `,\n          ["NAME:PLPoint", "X:=", "${vertExprs[0].xExpr}", "Y:=", "${vertExprs[0].yExpr}", "Z:=", "${pathZExpr}"]` : ''}],
+         ["NAME:PolylineSegments",
+          ${segList}],
+         ["NAME:PolylineXSection",
+          ${xsec}]],
+        ["NAME:Attributes",
+         "Name:=", "${id}",
+         "Flags:=", "",
+         "Color:=", "${colorPl}",
+         "Transparency:=", ${transPl},
+         "PartCoordinateSystem:=", "Global",
+         "MaterialValue:=", "\\"${ascii(materialName)}\\"",
+         "SolveInside:=", ${solveInside}])
+except Exception as e:
+    try:
+        oDesktop.AddMessage("", "", 1, "Failed to build polyline ${id}: " + str(e))
+    except:
+        pass
+`;
+        if (c.layer === 'electrode') emittedElecNames.push(id);
+        else if (c.layer === 'waveguide') emittedWgNames.push(id);
+        else if (c.layer === 'port') emittedPortNames.push(id);
+        // Zero-thickness sheet polylines need impedance boundary too.
+        if (isSheet && c.layer === 'electrode') {
+          zeroThicknessSheets.push(id);
+        }
+        continue; // skip the tessellated-polyline path below
+      }
+
       if (isNativeShape) {
         const cxShape = ppShape ? exprWithUm(ppShape.cxExpr) : `${cx.toFixed(4)}um`;
         const cyShape = ppShape ? exprWithUm(ppShape.cyExpr) : `${cy.toFixed(4)}um`;
@@ -1876,32 +2046,6 @@ except Exception as e:
     let gx = 0, gy = 0;
     for (const m of members) { gx += m.cx; gy += m.cy; }
     return { x: gx / members.length, y: gy / members.length };
-  };
-  // Parametric counterpart to `anchorLocal(name, w, h)` — for use in
-  // the rotate branch's pivot computation, where the part's base
-  // dimensions are KNOWN parametric expressions (e.g. `'cps_feed_w'`,
-  // or the parametric union bbox from `dimExprForComp`). Lets us emit
-  // pivot coordinates that stay tied to the underlying variables when
-  // they're swept in HFSS, instead of baking the numeric anchor offset
-  // computed at export time. Mirrors `anchorOffsetExpr` inside
-  // computeParametricPositions but lives in this scope so the
-  // transform-chain emitter can reach it.
-  const anchorOffsetParam = (anchorName, wExpr, hExpr) => {
-    const a = parseAnchor(anchorName);
-    let xOff = '0', yOff = '0';
-    if (a.kind === 'edge') {
-      if (a.side === 'T')      { xOff = `(${a.t} - 0.5) * (${wExpr})`; yOff = `(${hExpr})/2`; }
-      else if (a.side === 'B') { xOff = `(${a.t} - 0.5) * (${wExpr})`; yOff = `-(${hExpr})/2`; }
-      else if (a.side === 'L') { xOff = `-(${wExpr})/2`; yOff = `(${a.t} - 0.5) * (${hExpr})`; }
-      else if (a.side === 'R') { xOff = `(${wExpr})/2`;  yOff = `(${a.t} - 0.5) * (${hExpr})`; }
-    } else {
-      const n = a.name;
-      if (n.includes('W')) xOff = `-(${wExpr})/2`;
-      else if (n.includes('E')) xOff = `(${wExpr})/2`;
-      if (n.includes('S')) yOff = `-(${hExpr})/2`;
-      else if (n.includes('N')) yOff = `(${hExpr})/2`;
-    }
-    return { xOff, yOff };
   };
   const emitTransformChainHfss = (transforms, partIds, startCx, startCy, baseW, baseH, componentGroup, startCxExpr, startCyExpr, baseWExpr, baseHExpr) => {
     if (!transforms || transforms.length === 0) return [...partIds];

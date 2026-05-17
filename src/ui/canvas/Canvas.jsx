@@ -19,6 +19,7 @@ import { detectPortIntegrationLine } from '../../scene/lumpedPort.js';
 import { shapeInstanceToRing } from '../../geometry/rings.js';
 import { buildRacetrackCenterline } from '../../geometry/racetrack.js';
 import { ringToSvgPath } from '../../geometry/paths.js';
+import { resolvePolylineVertices } from '../../geometry/polyline.js';
 
 // =========================================================================
 // CANVAS
@@ -152,6 +153,17 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
   // start/end points landed on an existing component anchor.
   const [addDrag, setAddDrag] = useState(null);
   // ^ shape: { p1, p2, snapStart, snapEnd }
+  // Polyline-add draft state. Active when the user enters polyline addMode
+  // (shape='polyline') and starts clicking. Each click appends a vertex,
+  // each mousemove updates `cursorPos` for the preview segment.
+  // Shape:
+  //   {
+  //     vertices: [{ x, y, snap: { compId, anchor } | null }],
+  //     cursorPos: { x, y } | null,
+  //     cursorSnap: { compId, anchor } | null,
+  //     axisGuide:  { axis: 'h'|'v', ref: vertexIdx } | null,
+  //   }
+  const [polylineDraft, setPolylineDraft] = useState(null);
   // Pre-drag hover snap target for addMode (preview before clicking).
   const [addHoverSnap, setAddHoverSnap] = useState(null);
   // ^ shape: { x, y, compId, anchor } | null
@@ -201,13 +213,22 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     if (!addMode) return;
     const handler = (e) => {
       if (e.key === 'Escape') {
-        if (addDrag) setAddDrag(null);
+        if (polylineDraft) setPolylineDraft(null);
+        else if (addDrag) setAddDrag(null);
         else setAddMode(null);
+      } else if (addMode?.shape === 'polyline' && polylineDraft) {
+        // Enter / Return: commit polyline as-is. Need at least 2 vertices.
+        if (e.key === 'Enter' || e.key === 'Return') {
+          if (polylineDraft.vertices.length >= 2) {
+            commitPolylineDraft(polylineDraft.vertices);
+          }
+          setPolylineDraft(null);
+        }
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [addMode, addDrag]);
+  }, [addMode, addDrag, polylineDraft]);
 
   // Push live status string to the bottom status bar (snap/ruler progress).
   // Avoids drawing a label on the canvas where it would obscure anchors and
@@ -446,6 +467,52 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
   // Returns null if nothing within `worldThresh`. Otherwise returns
   // { x, y, compId, anchor } where anchor is one of the 9 fixed names or a
   // parametric edge anchor like "T:0.42".
+  // For polyline drawing: if the cursor's X or Y aligns with any of the
+  // already-placed vertices within `thresh`, snap to that axis. Returns
+  // the snapped point + which vertex it aligns with, or null. Used to
+  // help the user draw orthogonal traces (e.g. RF feedlines) without
+  // squinting at coordinates.
+  const pickAxisGuide = (wp, vertices, thresh) => {
+    let bestH = null, bestV = null;
+    for (const v of vertices) {
+      if (Math.abs(v.x - wp.x) < thresh && (!bestV || Math.abs(v.x - wp.x) < Math.abs(bestV.refX - wp.x))) {
+        bestV = { x: v.x, y: wp.y, refX: v.x, refY: v.y, axis: 'v' };
+      }
+      if (Math.abs(v.y - wp.y) < thresh && (!bestH || Math.abs(v.y - wp.y) < Math.abs(bestH.refY - wp.y))) {
+        bestH = { x: wp.x, y: v.y, refX: v.x, refY: v.y, axis: 'h' };
+      }
+    }
+    // If both H and V align, snap to whichever is CLOSER to the cursor;
+    // gives the user a clear single-axis result instead of clobbering both.
+    if (bestH && bestV) {
+      const dH = Math.abs(bestH.y - wp.y);
+      const dV = Math.abs(bestV.x - wp.x);
+      return dH < dV ? bestH : bestV;
+    }
+    return bestH || bestV;
+  };
+
+  // Commit the current polyline draft to the scene via the parent's
+  // commitDragAdd-like callback. We pass a vertices array of
+  //   { x, y, snap?: { compId, anchor } }
+  // ; the parent resolves the first vertex into the component anchor and
+  // the rest into either `rel` (with dx/dy expressions for the deltas) or
+  // `snap` (component-anchor binding).
+  const commitPolylineDraft = (vertices) => {
+    if (!addMode || vertices.length < 2) return;
+    if (typeof commitDragAdd !== 'function') return;
+    // Encode the polyline as a special drag-add spec so the existing
+    // commit pipeline handles param creation + selection updates. The
+    // spec carries the full vertex list including snap bindings.
+    commitDragAdd(
+      { ...addMode, shape: 'polyline', vertices },
+      vertices[0],
+      vertices[vertices.length - 1],
+      vertices[0].snap || null,
+      vertices[vertices.length - 1].snap || null,
+    );
+  };
+
   const findAnchorSnap = (wp, worldThresh, excludeCompId = null) => {
     let best = null;
     const consider = (x, y, compId, anchor) => {
@@ -537,6 +604,55 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         const newM = { id: `m_${Date.now()}`, p1: rulerInProgress.p1, p2: pt };
         setRulerMeasurements(prev => [...prev, newM]);
         setRulerInProgress(null);
+      }
+      e.stopPropagation();
+      e.preventDefault();
+      return;
+    }
+
+    // Polyline tool: append a vertex on each click. Double-click commits
+    // the polyline as-is (caught via dblclick handler below). Anchor snaps
+    // are honored — a vertex landing on an existing anchor stores the
+    // snap binding so the vertex parametrically tracks the target.
+    if (addMode && addMode.shape === 'polyline') {
+      const wp = screenToWorld(e.clientX, e.clientY);
+      const worldThresh = viewport.w * 0.012;
+      const snap = findAnchorSnap(wp, worldThresh);
+      // Axis-aligned guideline: if the cursor isn't snapped to an anchor
+      // AND we have previous vertices, check if x or y aligns with any of
+      // them within tolerance; snap the cursor to that axis.
+      let vx = snap ? snap.x : wp.x;
+      let vy = snap ? snap.y : wp.y;
+      if (!snap && polylineDraft && polylineDraft.vertices.length > 0) {
+        const guide = pickAxisGuide(wp, polylineDraft.vertices, worldThresh * 0.6);
+        if (guide) { vx = guide.x; vy = guide.y; }
+      }
+      // Shift modifier: lock new vertex to horizontal / vertical relative
+      // to the LAST committed vertex (whichever axis dominates).
+      if (e.shiftKey && polylineDraft && polylineDraft.vertices.length > 0) {
+        const last = polylineDraft.vertices[polylineDraft.vertices.length - 1];
+        const ddx = vx - last.x;
+        const ddy = vy - last.y;
+        if (Math.abs(ddx) > Math.abs(ddy)) vy = last.y;
+        else                                vx = last.x;
+      }
+      const newVertex = { x: vx, y: vy, snap: snap ? { compId: snap.compId, anchor: snap.anchor } : null };
+      if (!polylineDraft) {
+        setPolylineDraft({ vertices: [newVertex], cursorPos: { x: vx, y: vy }, cursorSnap: snap || null });
+      } else {
+        // De-duplicate identical-position consecutive clicks (e.g. accidental
+        // double-click registers as both this single + dblclick handler).
+        const last = polylineDraft.vertices[polylineDraft.vertices.length - 1];
+        if (Math.abs(last.x - vx) < 1e-6 && Math.abs(last.y - vy) < 1e-6) {
+          // Same as last vertex — treat as commit signal.
+          if (polylineDraft.vertices.length >= 2) commitPolylineDraft(polylineDraft.vertices);
+          setPolylineDraft(null);
+        } else {
+          setPolylineDraft({
+            ...polylineDraft,
+            vertices: [...polylineDraft.vertices, newVertex],
+          });
+        }
       }
       e.stopPropagation();
       e.preventDefault();
@@ -786,6 +902,42 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       const snap = findRulerSnap(wp, worldThresh);
       if (snap) setRulerSnapPoint(snap);
       else setRulerSnapPoint({ x: wp.x, y: wp.y, label: null });
+    }
+    // Polyline draft: track cursor for the preview segment + axis-guide
+    // detection. We compute the snap target every move so the halo
+    // follows hover the way ruler mode does.
+    if (addMode && addMode.shape === 'polyline' && polylineDraft) {
+      const wp = screenToWorld(e.clientX, e.clientY);
+      const worldThresh = viewport.w * 0.012;
+      const snap = findAnchorSnap(wp, worldThresh);
+      let cx_ = snap ? snap.x : wp.x, cy_ = snap ? snap.y : wp.y;
+      let axisGuide = null;
+      if (!snap) {
+        const guide = pickAxisGuide(wp, polylineDraft.vertices, worldThresh * 0.6);
+        if (guide) { cx_ = guide.x; cy_ = guide.y; axisGuide = guide; }
+      }
+      // Shift modifier: project cursor along H or V from the LAST vertex.
+      if (e.shiftKey && polylineDraft.vertices.length > 0) {
+        const last = polylineDraft.vertices[polylineDraft.vertices.length - 1];
+        const ddx = cx_ - last.x;
+        const ddy = cy_ - last.y;
+        if (Math.abs(ddx) > Math.abs(ddy)) cy_ = last.y;
+        else                                cx_ = last.x;
+      }
+      setPolylineDraft({
+        ...polylineDraft,
+        cursorPos: { x: cx_, y: cy_ },
+        cursorSnap: snap || null,
+        axisGuide,
+      });
+      return;
+    }
+    // Polyline pre-draw hover: show snap halo before the first click.
+    if (addMode && addMode.shape === 'polyline' && !polylineDraft) {
+      const wp = screenToWorld(e.clientX, e.clientY);
+      const worldThresh = viewport.w * 0.012;
+      const snap = findAnchorSnap(wp, worldThresh);
+      setAddHoverSnap(snap || { x: wp.x, y: wp.y, compId: null, anchor: null });
     }
     // Add-drag: update p2 and re-evaluate snapEnd
     if (addMode && addDrag) {
@@ -1707,6 +1859,20 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       onMouseUp={onMouseUp}
       onMouseLeave={onMouseUp}
       onWheel={onWheel}
+      onDoubleClick={(e) => {
+        // Double-click while drawing a polyline commits it (using the
+        // vertices placed up to the previous single click — the double
+        // click's first event already appended a vertex, so we just
+        // commit what's there).
+        if (addMode && addMode.shape === 'polyline' && polylineDraft) {
+          if (polylineDraft.vertices.length >= 2) {
+            commitPolylineDraft(polylineDraft.vertices);
+          }
+          setPolylineDraft(null);
+          e.stopPropagation();
+          e.preventDefault();
+        }
+      }}
       onContextMenu={(e) => {
         // Right-click on a component opens the App-level context menu.
         // Right-click on the bare canvas falls through to the browser's
@@ -2390,6 +2556,58 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   shapeElement = (
                     <polygon points={pts} {...dataCompProps} />
                   );
+                } else if (shapeKind === 'polyline') {
+                  // Polyline trace: stroke the centerline at the trace
+                  // width parameter. Like racetracks, we use SVG's
+                  // path-stroke rendering instead of building an
+                  // explicit band ring — the browser handles joins and
+                  // butt-caps consistently regardless of zoom. Vertices
+                  // are resolved from the COMPONENT (not the instance)
+                  // each render so vertex snap-target moves are picked
+                  // up live; the instance's cx/cy is the post-transform
+                  // bbox center, which we don't use for the path here.
+                  const compById_pl = Object.fromEntries(scene.components.map(cc => [cc.id, cc]));
+                  const verts = resolvePolylineVertices(c, compById_pl, paramValues);
+                  const wgW = Number.isFinite(inst.width) ? inst.width : evalExpr(c.width, paramValues) || 0;
+                  if (verts.length >= 2 && wgW > 0) {
+                    let d = `M ${verts[0][0]} ${-verts[0][1]}`;
+                    for (let k = 1; k < verts.length; k++) {
+                      d += ` L ${verts[k][0]} ${-verts[k][1]}`;
+                    }
+                    if (c.closed) d += ' Z';
+                    const { fill: _f, stroke: _s, strokeWidth: _sw, ...restProps } = dataCompProps;
+                    shapeElement = (
+                      <path
+                        d={d}
+                        fill="none"
+                        stroke={style.fill}
+                        strokeWidth={wgW}
+                        strokeLinejoin="miter"
+                        strokeLinecap="butt"
+                        {...restProps}
+                      />
+                    );
+                  } else if (verts.length >= 2) {
+                    // Width = 0 (or unresolved): show the centerline as
+                    // a thin guide so the polyline is still visible.
+                    let d = `M ${verts[0][0]} ${-verts[0][1]}`;
+                    for (let k = 1; k < verts.length; k++) {
+                      d += ` L ${verts[k][0]} ${-verts[k][1]}`;
+                    }
+                    const { fill: _f, ...restProps } = dataCompProps;
+                    shapeElement = (
+                      <path
+                        d={d}
+                        fill="none"
+                        stroke={style.stroke}
+                        strokeWidth={sw}
+                        strokeDasharray={`${sw * 3},${sw * 3}`}
+                        {...restProps}
+                      />
+                    );
+                  } else {
+                    shapeElement = null;
+                  }
                 } else if (shapeKind === 'racetrack') {
                   // Racetrack waveguide: render the centerline as a closed
                   // SVG <path> stroked at the waveguide width. The browser
@@ -2445,9 +2663,10 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                     />
                   );
                 }
-                // For polygons and racetracks the ring/path already includes
-                // rotation; skip double-rotating via the wrapping group.
-                const wrapTransform = (shapeKind === 'polygon' || shapeKind === 'racetrack') ? undefined : rotAttr;
+                // For polygons, racetracks, and polylines the ring/path
+                // already includes the per-vertex rotation; skip double-
+                // rotating via the wrapping group.
+                const wrapTransform = (shapeKind === 'polygon' || shapeKind === 'racetrack' || shapeKind === 'polyline') ? undefined : rotAttr;
                 // Hit-pad: a transparent rect sized to at least
                 // MIN_HIT_PX on each axis, rendered BELOW the visible
                 // shape with the same data-comp-id. Only emitted when
@@ -3065,6 +3284,85 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             fill="none" stroke="#f59e0b" strokeWidth={sw * 0.5} opacity={0.6} />
         </g>
       )}
+
+      {/* Polyline drawing overlay: placed vertices as dots, the live
+          preview segment from last vertex → cursor, plus axis-aligned
+          guidelines through any prior vertex the cursor lines up with.
+          Snap halos on the cursor mirror ruler-mode styling so the
+          gesture feels consistent. */}
+      {addMode && addMode.shape === 'polyline' && polylineDraft && (() => {
+        const verts = polylineDraft.vertices;
+        const cur = polylineDraft.cursorPos;
+        const widthExpr = addMode.width || `trace_w`;
+        const widthVal = evalExpr(widthExpr, paramValues) || screen(2);
+        // Build the committed path: M v0 → L v1 → ... ; then a preview
+        // dashed segment from the last vertex to the cursor.
+        let pathD = '';
+        for (let i = 0; i < verts.length; i++) {
+          pathD += i === 0 ? `M ${verts[i].x} ${-verts[i].y}` : ` L ${verts[i].x} ${-verts[i].y}`;
+        }
+        return (
+          <g pointerEvents="none">
+            {/* Committed segments — stroked at the trace width with
+                emerald color so the user can see the actual trace
+                they're building. */}
+            {pathD && (
+              <path d={pathD} fill="none" stroke="#10b981" strokeWidth={widthVal}
+                strokeOpacity={0.55} strokeLinejoin="miter" strokeLinecap="butt" />
+            )}
+            {/* Vertex dots */}
+            {verts.map((v, i) => (
+              <g key={i}>
+                <circle cx={v.x} cy={-v.y} r={screen(5)} fill="white" stroke="#059669" strokeWidth={screen(1.2)} />
+                {v.snap && (
+                  <circle cx={v.x} cy={-v.y} r={screen(9)} fill="none" stroke="#f59e0b" strokeWidth={screen(0.8)} opacity={0.7} />
+                )}
+              </g>
+            ))}
+            {/* Preview segment from last vertex to cursor */}
+            {verts.length > 0 && cur && (
+              <line
+                x1={verts[verts.length - 1].x}
+                y1={-verts[verts.length - 1].y}
+                x2={cur.x} y2={-cur.y}
+                stroke="#10b981" strokeWidth={widthVal} strokeOpacity={0.3}
+                strokeDasharray={`${screen(6)},${screen(4)}`}
+              />
+            )}
+            {/* Axis-aligned guideline through the cursor */}
+            {polylineDraft.axisGuide && cur && (() => {
+              const g = polylineDraft.axisGuide;
+              if (g.axis === 'v') {
+                // Vertical line through ref vertex.
+                return (
+                  <line
+                    x1={g.refX} y1={-(g.refY - viewport.h * 2)}
+                    x2={g.refX} y2={-(g.refY + viewport.h * 2)}
+                    stroke="#a855f7" strokeWidth={screen(0.6)} opacity={0.6}
+                    strokeDasharray={`${screen(4)},${screen(4)}`}
+                  />
+                );
+              }
+              return (
+                <line
+                  x1={g.refX - viewport.w * 2} y1={-g.refY}
+                  x2={g.refX + viewport.w * 2} y2={-g.refY}
+                  stroke="#a855f7" strokeWidth={screen(0.6)} opacity={0.6}
+                  strokeDasharray={`${screen(4)},${screen(4)}`}
+                />
+              );
+            })()}
+            {/* Snap halo on cursor (anchor-style) when hovering a target */}
+            {polylineDraft.cursorSnap && cur && (
+              <g>
+                <circle cx={cur.x} cy={-cur.y} r={screen(14)} fill="none" stroke="#f59e0b" strokeWidth={screen(0.5)} opacity={0.3} />
+                <circle cx={cur.x} cy={-cur.y} r={screen(9)} fill="none" stroke="#f59e0b" strokeWidth={screen(0.9)} opacity={0.7} />
+                <circle cx={cur.x} cy={-cur.y} r={screen(3.5)} fill="#fbbf24" stroke="#f59e0b" strokeWidth={screen(0.6)} />
+              </g>
+            )}
+          </g>
+        );
+      })()}
 
       {/* Alt-drag snap-target look-ahead. While the user is dragging
           with Option/Alt held, surface every NEARBY shape's snap

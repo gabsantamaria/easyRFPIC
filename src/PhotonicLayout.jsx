@@ -901,10 +901,11 @@ export default function App() {
       : layerKind === 'port' ? 'port'
       : (conductorLayer ? sanitizeIdPrefix(conductorLayer.id) : 'el');
     // Shape-flavored id prefix so users can tell circles from rects from
-    // polygons at a glance in the SHAPES tree.
+    // polygons / polylines at a glance in the SHAPES tree.
     const shapePrefix = shapeKind === 'circle' ? 'circ'
       : shapeKind === 'ellipse' ? 'ell'
       : shapeKind === 'polygon' ? 'poly'
+      : shapeKind === 'polyline' ? 'trace'
       : layerPrefix;
     const idPrefix = shapeKind === 'rect' ? layerPrefix : shapePrefix;
     const baseId = `${idPrefix}${scene.components.filter(c => c.layer === layerKind).length + 1}`;
@@ -1151,6 +1152,61 @@ export default function App() {
           cutouts: [], label: id,
           ...(conductorLayerId ? { conductorLayerId } : {}),
         };
+      } else if (shapeKind === 'polyline') {
+        // Polyline trace. The drawing UX in Canvas hands us a vertex
+        // array with world coordinates and optional snap bindings per
+        // vertex. We encode the FIRST vertex into the component's
+        // (cx, cy) anchor (or, if it's snap-bound, leave cx, cy as the
+        // placement hint and store the snap in vertices[0]). Each
+        // subsequent vertex becomes either `rel` (parametric dx/dy
+        // expressions backed by fresh `<id>_dx_N` / `<id>_dy_N` params
+        // so the user can sweep individual segments in HFSS) or `snap`
+        // (parametrically pinned to the bound component's anchor —
+        // HFSS-side sweeps of THAT component move this vertex too).
+        const widthParam = `${id}_w`;
+        const wValForParam = (spec && Number.isFinite(spec.defaultWidth))
+          ? spec.defaultWidth
+          : 3;
+        newParams[widthParam] = { expr: String(wValForParam), unit: 'µm', desc: `${id} trace width` };
+        const polyVerts = (spec.vertices || []).map((v, i) => {
+          if (v.snap) {
+            return { kind: 'snap', compId: v.snap.compId, anchor: v.snap.anchor };
+          }
+          if (i === 0) {
+            // Vertex 0 unsnapped — sits at the component's (cx, cy)
+            // with dx=dy=0 (the polyline's anchor IS vertex 0).
+            return { kind: 'rel', dx: '0', dy: '0' };
+          }
+          // Subsequent rel-vertices get their own dx/dy params so the
+          // user can later edit a single segment's length / direction
+          // and have HFSS pick it up.
+          const dxParam = `${id}_dx_${i}`;
+          const dyParam = `${id}_dy_${i}`;
+          const prev = spec.vertices[i - 1];
+          const dx = (v.x - prev.x);
+          const dy = (v.y - prev.y);
+          newParams[dxParam] = { expr: dx.toFixed(3), unit: 'µm', desc: `${id} segment ${i} dx` };
+          newParams[dyParam] = { expr: dy.toFixed(3), unit: 'µm', desc: `${id} segment ${i} dy` };
+          return { kind: 'rel', dx: dxParam, dy: dyParam };
+        });
+        // Vertex 0's world position becomes the polyline's (cx, cy)
+        // anchor (used as the drag handle and as the chain root for
+        // any rel-vertex). If vertex 0 is snapped, cx/cy is still set
+        // to the snap target's world position so the AABB lands sanely
+        // on first render — the snap binding overrides it after solve.
+        const v0 = spec.vertices[0];
+        newComp = {
+          id, kind: 'polyline', layer: layerKind,
+          cx: v0.x, cy: v0.y,
+          width: widthParam,
+          // AABB w/h start as '0' literals; refreshPolylineBbox in the
+          // solver writes the real numeric bbox post-solve.
+          w: '0', h: '0',
+          vertices: polyVerts,
+          closed: false,
+          cutouts: [], label: id,
+          ...(conductorLayerId ? { conductorLayerId } : {}),
+        };
       } else {
         // Rectangle (default).
         newComp = {
@@ -1161,7 +1217,19 @@ export default function App() {
           ...(conductorLayerId ? { conductorLayerId } : {}),
         };
       }
+      // Polylines manage their own snap bindings via per-vertex
+      // `kind: 'snap'` specs — we skip the legacy single-corner snap
+      // installation below. The vertex's `compId`/`anchor` is enough
+      // for the solver + exporters to chase the parametric chain.
       const newSnaps = [];
+      if (shapeKind === 'polyline') {
+        return {
+          ...prev,
+          params: newParams,
+          components: [...prev.components, newComp],
+          snaps: [...prev.snaps, ...newSnaps],
+        };
+      }
       // Choose which drag corner to snap (prefer start, fall back to end).
       const snapAnchor = snapStart || snapEnd;
       if (snapAnchor) {
@@ -3615,6 +3683,21 @@ export default function App() {
                       <ellipse cx="12" cy="12" rx="10" ry="6" />
                     </svg>
                   </button>
+                  <button
+                    key="add-polyline"
+                    onClick={() => toggleShape('polyline')}
+                    className={baseBtn + (isShapeActive('polyline') ? activeRing : '')}
+                    style={{ background: '#1e293b', color: '#e2e8f0' }}
+                    title="Polyline trace — click to place each vertex; double-click or Enter to finish, Esc to cancel. Snap halos appear on other shapes' anchors; cursor aligns with previous vertices on H/V axes (purple guides). The trace's width is a parameter and the Z extrusion is the bound conductor's thickness — HFSS sees it as CreatePolyline + sweep, fully parametric."
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="3,18 9,8 14,14 21,4" />
+                      <circle cx="3" cy="18" r="1.5" fill="currentColor" />
+                      <circle cx="9" cy="8" r="1.5" fill="currentColor" />
+                      <circle cx="14" cy="14" r="1.5" fill="currentColor" />
+                      <circle cx="21" cy="4" r="1.5" fill="currentColor" />
+                    </svg>
+                  </button>
                   <div className="flex items-center gap-0.5">
                     <button
                       key="add-poly"
@@ -5110,6 +5193,103 @@ export default function App() {
                         <div className="grid grid-cols-2 gap-2">
                           {fieldRow('r', 'r (circumradius)', selected.r ?? '0', (v) => updateComp(selected.id, { r: v }))}
                           {fieldRow('n', 'n (sides)', selected.n ?? '6', (v) => updateComp(selected.id, { n: v }), (v) => Math.max(3, Math.round(v)).toString())}
+                        </div>
+                      );
+                    }
+                    if (shapeKind === 'polyline') {
+                      // Polyline trace: surface the trace width param plus
+                      // a per-vertex editor. Each vertex is either a `rel`
+                      // step (parametric dx, dy from the previous vertex)
+                      // or a `snap` binding to another component's anchor.
+                      // Editing dx/dy expressions surfaces all the existing
+                      // expression-parser machinery (param highlighting,
+                      // auto-create on commit, etc.).
+                      const vertSpecs = selected.vertices || [];
+                      return (
+                        <div className="space-y-2">
+                          <div className="grid grid-cols-2 gap-2">
+                            {fieldRow('width', 'trace width', selected.width ?? '5', (v) => updateComp(selected.id, { width: v }))}
+                          </div>
+                          <div className="border border-slate-700 rounded p-2" style={{ background: 'rgba(15,23,42,0.5)' }}>
+                            <div className="flex items-center justify-between mb-1">
+                              <span className="text-[10px] uppercase tracking-wider text-slate-400">Vertices ({vertSpecs.length})</span>
+                              <span className="text-[9px] text-slate-500">v0 sits at (cx, cy); subsequent vertices step relative</span>
+                            </div>
+                            <div className="space-y-1 max-h-64 overflow-y-auto">
+                              {vertSpecs.map((v, idx) => (
+                                <div key={idx} className="grid grid-cols-[1.4rem_1fr_1fr_auto] gap-1 items-center text-[10px]">
+                                  <span className="font-mono text-slate-400">v{idx}</span>
+                                  {v.kind === 'snap' ? (
+                                    <>
+                                      <span className="col-span-2 px-1 py-0.5 rounded text-[9px] font-mono text-amber-300 bg-slate-800 border border-amber-700">
+                                        snap → {v.compId}.{v.anchor}
+                                      </span>
+                                      <button
+                                        title="Replace this snap binding with a free (rel) vertex at the current solved position"
+                                        className="text-[9px] px-1 py-0.5 rounded border border-slate-600 hover:border-cyan-500 hover:text-cyan-300 text-slate-400"
+                                        onClick={() => {
+                                          const newVerts = vertSpecs.map((vv, i) => i === idx
+                                            ? { kind: 'rel', dx: '0', dy: '0' }
+                                            : vv);
+                                          updateComp(selected.id, { vertices: newVerts });
+                                        }}
+                                      >×</button>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <DeferredTextInput
+                                        autoGrow
+                                        value={String(v.dx ?? '0')}
+                                        onCommit={(val) => {
+                                          const newVerts = vertSpecs.map((vv, i) => i === idx ? { ...vv, dx: val } : vv);
+                                          updateComp(selected.id, { vertices: newVerts });
+                                          commitExpr(val, '0', 'µm', `${selected.id} v${idx}.dx`);
+                                        }}
+                                        className="bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-white outline-none focus:border-cyan-400"
+                                        placeholder="dx"
+                                      />
+                                      <DeferredTextInput
+                                        autoGrow
+                                        value={String(v.dy ?? '0')}
+                                        onCommit={(val) => {
+                                          const newVerts = vertSpecs.map((vv, i) => i === idx ? { ...vv, dy: val } : vv);
+                                          updateComp(selected.id, { vertices: newVerts });
+                                          commitExpr(val, '0', 'µm', `${selected.id} v${idx}.dy`);
+                                        }}
+                                        className="bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-white outline-none focus:border-cyan-400"
+                                        placeholder="dy"
+                                      />
+                                      {vertSpecs.length > 2 && idx > 0 && (
+                                        <button
+                                          title="Delete this vertex"
+                                          className="text-[9px] px-1 py-0.5 rounded border border-slate-600 hover:border-red-500 hover:text-red-300 text-slate-400"
+                                          onClick={() => {
+                                            const newVerts = vertSpecs.filter((_, i) => i !== idx);
+                                            updateComp(selected.id, { vertices: newVerts });
+                                          }}
+                                        >×</button>
+                                      )}
+                                    </>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                            <button
+                              title="Append a new vertex (relative dx/dy from the last vertex)"
+                              className="mt-1 text-[10px] px-2 py-0.5 rounded border border-slate-600 hover:border-emerald-500 hover:text-emerald-300 text-slate-300"
+                              onClick={() => {
+                                const newVerts = [...vertSpecs, { kind: 'rel', dx: '10', dy: '0' }];
+                                updateComp(selected.id, { vertices: newVerts });
+                              }}
+                            >+ vertex</button>
+                            <label className="ml-2 text-[10px] text-slate-400 inline-flex items-center gap-1 cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={!!selected.closed}
+                                onChange={(e) => updateComp(selected.id, { closed: e.target.checked })}
+                              /> closed
+                            </label>
+                          </div>
                         </div>
                       );
                     }

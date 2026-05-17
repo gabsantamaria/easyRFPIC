@@ -108,6 +108,21 @@ export function shapeInstanceToRing(inst) {
     }
     return out;
   }
+  if (kind === 'polyline') {
+    // For ring consumers (GDS / canvas boolean mask / etc.) we return the
+    // CENTERLINE as a polyline ring. The instance carries `_resolvedVerts`
+    // populated by the solver (world-space vertex positions). Canvas
+    // rendering prefers an explicit stroked <path> with parametric width
+    // — using the centerline as a ring here covers the few callers that
+    // need a generic perimeter (GDS BOUNDARY emission, boolean mask
+    // composition). HFSS export emits a native CreatePolyline + sweep
+    // with the proper XSection width, not via this ring.
+    const verts = (inst._resolvedVerts && inst._resolvedVerts.length > 0)
+      ? inst._resolvedVerts
+      : [];
+    if (verts.length === 0) return [];
+    return verts.map(([lx, ly]) => xform(lx - inst.cx, ly - inst.cy));
+  }
   if (kind === 'racetrack') {
     // The racetrack's "ring" for AABB/snap purposes is the OUTER edge of
     // the waveguide band — i.e., the centerline offset outward by half

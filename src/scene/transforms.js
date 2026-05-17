@@ -65,6 +65,16 @@ export function expandTransforms(components, paramValues) {
       const wExpr = c.wgWidth ?? 'w_wg';
       const wVal = evalExpr(wExpr, paramValues);
       shapeFields.wgWidth = Number.isFinite(wVal) ? wVal : 1.2;
+    } else if (kind === 'polyline') {
+      // Polylines carry their vertex list + width to each instance so the
+      // canvas / GDS / HFSS renderers can reconstruct the actual swept
+      // shape per copy under repeat / mirror / rotate transforms. The
+      // canonical vertex list lives on c.vertices (unchanged across
+      // instances); each instance also gets a numeric `width` scalar.
+      shapeFields.vertices = c.vertices || [];
+      shapeFields.closed = !!c.closed;
+      const wVal = evalExpr(c.width ?? '0', paramValues);
+      shapeFields.width = Number.isFinite(wVal) ? wVal : 0;
     }
     if (!Number.isFinite(w) || !Number.isFinite(h)) {
       // Skip degenerate components — keeps render path tolerant.
