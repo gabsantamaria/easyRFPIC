@@ -288,11 +288,17 @@ export default function App() {
   // Dialog state — replaces window.confirm/prompt/alert which are blocked in iframes
   const [dialog, setDialog] = useState(null);
   // Helpers that return a Promise: const ok = await confirmDialog('Sure?')
-  const confirmDialog = useCallback((message, title) => new Promise((resolve) => {
+  //
+  // The 3rd opts argument lets callers customize the confirm button —
+  // useful for destructive actions (delete, overwrite, etc.) where a
+  // red button + "Delete"-style label communicates the impact clearly.
+  const confirmDialog = useCallback((message, title, opts = {}) => new Promise((resolve) => {
     setDialog({
       kind: 'confirm', title: title || 'Confirm', message,
       onConfirm: () => { setDialog(null); resolve(true); },
       onCancel: () => { setDialog(null); resolve(false); },
+      confirmLabel: opts.confirmLabel,
+      confirmTone: opts.confirmTone,
     });
   }), []);
   const promptDialog = useCallback((message, defaultValue, title) => new Promise((resolve) => {
@@ -664,12 +670,30 @@ export default function App() {
     setSaveStatus('unsaved');
   }, [workspace, saveStatus, setSelection, confirmDialog, alertDialog]);
 
-  // Delete a single version from a design's history. Confirms first.
+  // Delete a single version from a design's history. The confirmation
+  // explicitly recommends snapshotting the current state first so a
+  // user who's about to lose work has an obvious recovery path. The
+  // confirm button is styled as a destructive red action.
   const handleDeleteVersion = useCallback(async (name, versionId) => {
-    const ok = await confirmDialog('Delete this snapshot? This cannot be undone.', 'Delete version');
-    if (!ok) return;
     const d = await loadDesign(workspace, name);
     if (!d) return;
+    const version = findVersionById(d.versions, versionId);
+    if (!version) return;
+    const dt = new Date(version.savedAt || 0);
+    const dateLabel = dt.toLocaleString();
+    const message =
+      `Delete v${version.versionNumber} (${version.id.slice(0, 7)}) from "${name}"?\n\n` +
+      (version.description ? `“${version.description}”\n` : '') +
+      `Saved: ${dateLabel}\n\n` +
+      `This is permanent — the frozen scene for this version will be lost.\n\n` +
+      `Tip: if you want to preserve your CURRENT working state first, ` +
+      `cancel and click the "snapshot" button to commit it as a new ` +
+      `version. You can always delete older snapshots afterwards.`;
+    const ok = await confirmDialog(message, 'Delete version', {
+      confirmLabel: 'Delete version',
+      confirmTone: 'danger',
+    });
+    if (!ok) return;
     const nextVersions = (d.versions || []).filter(v => v.id !== versionId);
     await saveDesign(workspace, name, { ...d, versions: nextVersions });
     if (name === designName) setVersions(nextVersions);
@@ -680,6 +704,35 @@ export default function App() {
     });
     mirrorWorkspaceToFileIfLinked();
   }, [workspace, designName, confirmDialog, mirrorWorkspaceToFileIfLinked]);
+
+  // Edit the description of an existing version. Pops up a prompt
+  // pre-filled with the current description; cancel leaves it
+  // unchanged. Empty result clears the description (matches the
+  // "no description" choice from the original snapshot flow).
+  const handleEditVersionDescription = useCallback(async (name, versionId) => {
+    const d = await loadDesign(workspace, name);
+    if (!d) return;
+    const version = findVersionById(d.versions, versionId);
+    if (!version) return;
+    const newDesc = await promptDialog(
+      `Edit description for v${version.versionNumber} (${version.id.slice(0, 7)}):`,
+      version.description || '',
+      'Edit description',
+    );
+    if (newDesc === null) return; // cancelled — leave as-is
+    const trimmed = newDesc.slice(0, 240);
+    const nextVersions = (d.versions || []).map(v =>
+      v.id === versionId ? { ...v, description: trimmed } : v
+    );
+    await saveDesign(workspace, name, { ...d, versions: nextVersions });
+    if (name === designName) setVersions(nextVersions);
+    setVersionsByDesign(prev => {
+      const next = { ...prev };
+      if (next[name]) next[name] = sortedVersions(nextVersions);
+      return next;
+    });
+    mirrorWorkspaceToFileIfLinked();
+  }, [workspace, designName, promptDialog, mirrorWorkspaceToFileIfLinked]);
 
   // Lazily load (and cache) the versions array for any design in
   // the workspace. Used when the user expands a non-active design's
@@ -4260,13 +4313,22 @@ export default function App() {
                                   <span className="text-slate-500">·</span>
                                   <span className="text-slate-500">{dateLabel}</span>
                                 </div>
-                                {v.description && (
+                                {v.description ? (
                                   <div className="text-[10px] text-slate-300 truncate mt-0.5">{v.description}</div>
+                                ) : (
+                                  <div className="text-[10px] text-slate-600 italic truncate mt-0.5">(no description)</div>
                                 )}
                               </button>
                               <button
+                                onClick={() => handleEditVersionDescription(name, v.id)}
+                                className="text-slate-600 hover:text-cyan-400 opacity-0 group-hover:opacity-100 transition-opacity p-0.5"
+                                title="Edit this version's description"
+                              >
+                                <Pencil size={10} />
+                              </button>
+                              <button
                                 onClick={() => handleDeleteVersion(name, v.id)}
-                                className="text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                                className="text-slate-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity p-0.5"
                                 title="Delete this version"
                               >
                                 <Trash2 size={10} />
@@ -5733,6 +5795,8 @@ export default function App() {
         kind={dialog?.kind}
         onConfirm={dialog?.onConfirm}
         onCancel={dialog?.onCancel}
+        confirmLabel={dialog?.confirmLabel}
+        confirmTone={dialog?.confirmTone}
       />
 
       {/* Export preview modal — shows the generated pyAEDT script with copy/download */}

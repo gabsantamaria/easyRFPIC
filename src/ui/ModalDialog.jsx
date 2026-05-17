@@ -10,7 +10,16 @@
 // Extracted from PhotonicLayout.jsx as Stage 4.3 of the planned refactor.
 import React, { useState, useRef, useEffect } from 'react';
 
-export function ModalDialog({ open, title, message, defaultValue, kind, onConfirm, onCancel }) {
+export function ModalDialog({
+  open, title, message, defaultValue, kind,
+  onConfirm, onCancel,
+  // Optional cosmetic overrides for the confirm button. `confirmLabel`
+  // replaces the default OK / Confirm text; `confirmTone` switches
+  // between the standard cyan accent and a destructive red — used for
+  // delete-style confirmations where the action can't be undone.
+  confirmLabel,
+  confirmTone = 'default',
+}) {
   // kind: 'confirm' | 'prompt' | 'alert'
   const [value, setValue] = useState(defaultValue || '');
   const inputRef = useRef(null);
@@ -70,9 +79,12 @@ export function ModalDialog({ open, title, message, defaultValue, kind, onConfir
           <button
             onClick={() => onConfirm?.(kind === 'prompt' ? value : true)}
             className="px-3 py-1 rounded text-xs font-medium"
-            style={{ background: '#06b6d4', color: '#0f172a' }}
+            style={{
+              background: confirmTone === 'danger' ? '#dc2626' : '#06b6d4',
+              color: confirmTone === 'danger' ? '#fff' : '#0f172a',
+            }}
           >
-            {kind === 'alert' ? 'OK' : kind === 'prompt' ? 'OK' : 'Confirm'}
+            {confirmLabel || (kind === 'alert' ? 'OK' : kind === 'prompt' ? 'OK' : 'Confirm')}
           </button>
         </div>
       </div>
