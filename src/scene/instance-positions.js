@@ -23,7 +23,7 @@
 // uses these helpers and falls back to a numeric position when the
 // chain isn't parametric-friendly.
 import { evalExpr } from './params.js';
-import { anchorLocal } from './anchors.js';
+import { anchorLocal, parseAnchor } from './anchors.js';
 
 // Look up an instance's NUMERIC center for (compId, idx). Falls back
 // through the operand-of-boolean case if compId itself doesn't have
@@ -76,24 +76,80 @@ export function resolveInstanceAnchorNumeric(compId, anchor, instanceIdx, byId, 
   return { x: inst.cx + lp.x, y: inst.cy + lp.y };
 }
 
+// Anchor offset as parametric (xOff, yOff) expressions given parametric
+// w / h. Same logic as the existing anchorOffsetParam in hfss-native;
+// duplicated here to avoid a cross-module dependency.
+function anchorOffsetParamLocal(anchorName, wExpr, hExpr) {
+  const a = parseAnchor(anchorName);
+  let xOff = '0', yOff = '0';
+  if (a.kind === 'edge') {
+    if (a.side === 'T')      { xOff = `(${a.t} - 0.5) * (${wExpr})`; yOff = `(${hExpr})/2`; }
+    else if (a.side === 'B') { xOff = `(${a.t} - 0.5) * (${wExpr})`; yOff = `-(${hExpr})/2`; }
+    else if (a.side === 'L') { xOff = `-(${wExpr})/2`; yOff = `(${a.t} - 0.5) * (${hExpr})`; }
+    else if (a.side === 'R') { xOff = `(${wExpr})/2`;  yOff = `(${a.t} - 0.5) * (${hExpr})`; }
+  } else {
+    const n = a.name;
+    if (n.includes('W')) xOff = `-(${wExpr})/2`;
+    else if (n.includes('E')) xOff = `(${wExpr})/2`;
+    if (n.includes('S')) yOff = `-(${hExpr})/2`;
+    else if (n.includes('N')) yOff = `(${hExpr})/2`;
+  }
+  return { xOff, yOff };
+}
+
 // Build the parametric expression for an instance's centroid OFFSET
 // from its base centroid. Returns { dxExpr, dyExpr } or null if the
-// transform chain contains operations we genuinely can't express
-// parametrically (currently: rotate with pivot='group' or a named-
-// anchor pivot, since both depend on group-centroid math or
-// post-rotation pivot positions).
+// transform chain contains an operation we genuinely cannot express
+// parametrically (currently: rotate with `pivot='group'` whose group
+// lookup fails, or any unsupported transform kind).
 //
 // The instanceIdx is the FLAT index used by expandTransforms (it
 // decomposes into a tuple under nested repeats). We re-walk the chain
 // keeping per-instance parametric (dx, dy) expressions and look up the
 // target idx in the resulting stream.
 //
-// `exprWithUm` is passed in by the caller (HFSS export's helper).
-// `baseCxExpr` / `baseCyExpr` are required for transforms that
-// reference the component's own absolute position (mirror about
-// origin, rotate about origin). For the simple case (repeat /
-// displace / duplicate_mirror only), they're unused.
-export function instanceChainOffsetExpr(comp, instanceIdx, paramValues, exprWithUm, baseCxExpr = '0um', baseCyExpr = '0um') {
+// `opts` accepts:
+//   - paramValues: scene parameter values (for numeric n/angle eval)
+//   - exprWithUm:  wrapper that tags bare-numeric strings with "um"
+//   - baseCxExpr, baseCyExpr: the owner component's parametric base
+//     position. Needed by mirror-origin and rotate-origin (which
+//     reflect / rotate about the world origin).
+//   - baseWExpr, baseHExpr: owner's parametric w/h. Needed by rotate
+//     with a named-anchor pivot (uses anchorLocal on the rect's bbox).
+//   - components: full scene component list. Needed for `rotate` with
+//     `pivot='group'` to find sibling members of the same group.
+//   - parametricPos: per-component parametric position map. Needed for
+//     `rotate` with `pivot='group'` to compute the group centroid as
+//     a parametric average of member positions.
+export function instanceChainOffsetExpr(comp, instanceIdx, arg3, arg4, arg5, arg6) {
+  // Back-compat: allow (comp, idx, paramValues, exprWithUm, baseCxExpr,
+  // baseCyExpr) positional form OR a single trailing opts object.
+  let opts;
+  if (arg3 && typeof arg3 === 'object' && typeof arg4 === 'undefined') {
+    // Heuristic: opts is an object AND no second positional arg
+    // present. (paramValues is also an object, so we additionally
+    // check whether it carries any of the opts-only keys.)
+    const looksLikeOpts = ('exprWithUm' in arg3) || ('baseCxExpr' in arg3) || ('parametricPos' in arg3);
+    if (looksLikeOpts) opts = arg3;
+    else opts = { paramValues: arg3 };
+  } else {
+    opts = {
+      paramValues: arg3 || {},
+      exprWithUm: arg4 || ((s) => `(${s})`),
+      baseCxExpr: arg5 || '0um',
+      baseCyExpr: arg6 || '0um',
+    };
+  }
+  const {
+    paramValues = {},
+    exprWithUm = (s) => `(${s})`,
+    baseCxExpr = '0um',
+    baseCyExpr = '0um',
+    baseWExpr = '0',
+    baseHExpr = '0',
+    components = [],
+    parametricPos = {},
+  } = opts;
   if (!comp || instanceIdx === 0) return { dxExpr: '0um', dyExpr: '0um' };
   const transforms = (comp.transforms || []).filter(t => t && t.enabled !== false);
   // Stream of { dxExpr, dyExpr } — each entry is one instance's offset
@@ -159,32 +215,109 @@ export function instanceChainOffsetExpr(comp, instanceIdx, paramValues, exprWith
       }
       // pivot='C': no change to offsets.
     } else if (t.kind === 'rotate') {
-      // Rotate each instance about the chosen pivot.
-      //   - pivot='C': instance center is invariant; offsets unchanged
-      //     in our chain. (Orientation changes, but we don't track it
-      //     for chain offsets.)
-      //   - pivot='origin': rotates the ABSOLUTE position around
-      //     (0, 0). New offset = R*(base + old_offset) - base.
-      //   - pivot='group' or named-anchor: bail out (return null);
-      //     would require group-centroid or post-rotation pivot math
-      //     that depends on solved positions of other components.
+      // Rotate each instance about the chosen pivot. Five sub-cases
+      // mirror expandTransforms's logic exactly so the parametric
+      // chain stays consistent with the numeric one:
+      //   1. pivot='C' single-instance stream: orientation flip only;
+      //      offsets unchanged.
+      //   2. pivot='C' multi-instance stream: rotate the whole cluster
+      //      around its centroid (avg of stream's own offsets, applied
+      //      atop the base). Each item's new offset is computed
+      //      relative to that centroid.
+      //   3. pivot='origin': new_offset = R*(base + old) - base.
+      //   4. pivot='group': rotate around the parametric centroid of
+      //      the component's group members (avg of their cx/cy expr).
+      //   5. pivot=<named anchor>: per-instance pivot at the anchor
+      //      location on the BASE w/h, so new_offset = old_offset +
+      //      anchorLocal·(1-cos / sin) trig terms.
       const pivot = t.pivot || 'C';
-      if (pivot === 'C') continue;
-      if (pivot === 'origin') {
-        const angleExpr = (typeof t.angle === 'string' && /[A-Za-z_]/.test(t.angle))
-          ? t.angle
-          : `${(t.angle ?? 0)}deg`;
+      const angleExpr = (typeof t.angle === 'string' && /[A-Za-z_]/.test(t.angle))
+        ? t.angle
+        : `${(t.angle ?? 0)}deg`;
+      if (pivot === 'C') {
+        if (stream.length <= 1) continue; // orientation-only, offset unchanged
+        // Multi-instance pivot='C': rotate the cluster about the
+        // centroid of its current parametric offsets. The centroid in
+        // offset-space is the AVERAGE of every stream item's dxExpr /
+        // dyExpr (the corresponding cluster-world centroid is then
+        // base + that average).
+        const n = stream.length;
+        const sumDx = stream.map(s => `(${s.dxExpr})`).join(' + ');
+        const sumDy = stream.map(s => `(${s.dyExpr})`).join(' + ');
+        const centroidDx = `((${sumDx})/${n})`;
+        const centroidDy = `((${sumDy})/${n})`;
         stream = stream.map(item => ({
-          // R*(base + old) - base, expanded so HFSS evaluates with
-          // cos/sin in degrees (HFSS expression syntax supports both).
+          // pivot + R*(old - pivot), expressed in offset-space.
+          dxExpr: `(${centroidDx}) + ((${item.dxExpr}) - (${centroidDx})) * cos(${angleExpr}) - ((${item.dyExpr}) - (${centroidDy})) * sin(${angleExpr})`,
+          dyExpr: `(${centroidDy}) + ((${item.dxExpr}) - (${centroidDx})) * sin(${angleExpr}) + ((${item.dyExpr}) - (${centroidDy})) * cos(${angleExpr})`,
+        }));
+      } else if (pivot === 'origin') {
+        stream = stream.map(item => ({
+          // R*(base + old) - base. HFSS evaluates cos/sin in degrees.
           dxExpr: `((${baseCxExpr}) + (${item.dxExpr})) * cos(${angleExpr}) - ((${baseCyExpr}) + (${item.dyExpr})) * sin(${angleExpr}) - (${baseCxExpr})`,
           dyExpr: `((${baseCxExpr}) + (${item.dxExpr})) * sin(${angleExpr}) + ((${baseCyExpr}) + (${item.dyExpr})) * cos(${angleExpr}) - (${baseCyExpr})`,
         }));
+      } else if (pivot === 'group' && comp.group) {
+        // Group centroid = avg of group members' parametric cx/cy.
+        // We need the parametricPos map populated for the members and
+        // for them to share the `group` field with `comp`. Skip
+        // consumed operands (they live inside booleans and don't
+        // drag the centroid sideways — same exclusion as
+        // expandTransforms).
+        const members = (components || []).filter(cc => cc.group === comp.group && !cc.consumedBy);
+        if (members.length === 0) return null;
+        const memberCxs = [];
+        const memberCys = [];
+        for (const m of members) {
+          const pp = parametricPos[m.id];
+          if (pp && pp.cxExpr && pp.cyExpr) {
+            memberCxs.push(`(${pp.cxExpr})`);
+            memberCys.push(`(${pp.cyExpr})`);
+          } else {
+            memberCxs.push(`${(m.cx ?? 0).toFixed(4)}um`);
+            memberCys.push(`${(m.cy ?? 0).toFixed(4)}um`);
+          }
+        }
+        const n = members.length;
+        const gxExpr = `((${memberCxs.join(' + ')})/${n})`;
+        const gyExpr = `((${memberCys.join(' + ')})/${n})`;
+        stream = stream.map(item => ({
+          // pivot + R*(absolute - pivot), in offset-space.
+          // absolute = base + old; new_offset = result - base.
+          dxExpr: `(${gxExpr}) + ((${baseCxExpr}) + (${item.dxExpr}) - (${gxExpr})) * cos(${angleExpr}) - ((${baseCyExpr}) + (${item.dyExpr}) - (${gyExpr})) * sin(${angleExpr}) - (${baseCxExpr})`,
+          dyExpr: `(${gyExpr}) + ((${baseCxExpr}) + (${item.dxExpr}) - (${gxExpr})) * sin(${angleExpr}) + ((${baseCyExpr}) + (${item.dyExpr}) - (${gyExpr})) * cos(${angleExpr}) - (${baseCyExpr})`,
+        }));
+      } else if (pivot === 'group') {
+        // Marked 'group' but no group on the component — fall back
+        // to pivot='C' semantics (per expandTransforms behavior).
+        if (stream.length <= 1) continue;
+        const n = stream.length;
+        const sumDx = stream.map(s => `(${s.dxExpr})`).join(' + ');
+        const sumDy = stream.map(s => `(${s.dyExpr})`).join(' + ');
+        const centroidDx = `((${sumDx})/${n})`;
+        const centroidDy = `((${sumDy})/${n})`;
+        stream = stream.map(item => ({
+          dxExpr: `(${centroidDx}) + ((${item.dxExpr}) - (${centroidDx})) * cos(${angleExpr}) - ((${item.dyExpr}) - (${centroidDy})) * sin(${angleExpr})`,
+          dyExpr: `(${centroidDy}) + ((${item.dxExpr}) - (${centroidDx})) * sin(${angleExpr}) + ((${item.dyExpr}) - (${centroidDy})) * cos(${angleExpr})`,
+        }));
       } else {
-        // 'group' or a named-anchor pivot: not currently expressible
-        // parametrically without much more machinery. Caller falls
-        // back to numeric instance position.
-        return null;
+        // Named-anchor pivot (NW / NE / 'T:0.3' / etc.). Per-instance
+        // pivot at the anchor offset on the BASE w/h. Derivation in
+        // (offset-from-base) space:
+        //   pivot = inst + anchorLocal      (so inst − pivot = −anchorLocal)
+        //   new_inst = pivot + R*(inst − pivot)
+        //   new_offset = new_inst − base
+        //   new_offset.x = old_offset.x + anchorLocal.x·(1 − cos)
+        //                                + anchorLocal.y·sin
+        //   new_offset.y = old_offset.y − anchorLocal.x·sin
+        //                                + anchorLocal.y·(1 − cos)
+        // anchorLocal is computed from the OWNER's parametric base w/h
+        // (the same w/h that drove the expansion's first instance).
+        const aOff = anchorOffsetParamLocal(pivot, baseWExpr, baseHExpr);
+        stream = stream.map(item => ({
+          dxExpr: `(${item.dxExpr}) + (${aOff.xOff}) * (1 - cos(${angleExpr})) + (${aOff.yOff}) * sin(${angleExpr})`,
+          dyExpr: `(${item.dyExpr}) - (${aOff.xOff}) * sin(${angleExpr}) + (${aOff.yOff}) * (1 - cos(${angleExpr}))`,
+        }));
       }
     }
     // Unknown kinds: silently ignore (matches expandTransforms's

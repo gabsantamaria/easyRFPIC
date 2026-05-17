@@ -1182,10 +1182,18 @@ except:
               const ownerPp = parametricPos[owner.id];
               const ownerBaseCxExpr = ownerPp ? ownerPp.cxExpr : `${(owner.cx ?? 0).toFixed(4)}um`;
               const ownerBaseCyExpr = ownerPp ? ownerPp.cyExpr : `${(owner.cy ?? 0).toFixed(4)}um`;
-              chainOffset = instanceChainOffsetExpr(
-                owner, ownerInstanceIdx, paramValues, exprWithUm,
-                ownerBaseCxExpr, ownerBaseCyExpr,
-              );
+              const ownerBaseWExpr = ownerPp?.wExpr || (typeof owner.w === 'number' ? `${owner.w}um` : String(owner.w ?? '0'));
+              const ownerBaseHExpr = ownerPp?.hExpr || (typeof owner.h === 'number' ? `${owner.h}um` : String(owner.h ?? '0'));
+              chainOffset = instanceChainOffsetExpr(owner, ownerInstanceIdx, {
+                paramValues,
+                exprWithUm,
+                baseCxExpr: ownerBaseCxExpr,
+                baseCyExpr: ownerBaseCyExpr,
+                baseWExpr: ownerBaseWExpr,
+                baseHExpr: ownerBaseHExpr,
+                components: solved,
+                parametricPos,
+              });
             }
             if (tgtPp && tgtPp.cxExpr && tgtPp.cyExpr) {
               const off = anchorOffsetParam(v.anchor, tgtPp.wExpr || '0', tgtPp.hExpr || '0');
