@@ -1,0 +1,62 @@
+# Deploy to GitHub Pages on every push to `main`. The app is a pure
+# static Vite build — no server, no secrets, no per-user backend. Each
+# visitor's data lives in their own browser via the localStorage shim
+# in src/storage/window-storage-shim.js, so sharing the deployed URL
+# automatically gives every user their own private workspace.
+#
+# After the first run: open Settings → Pages and confirm Source = "GitHub
+# Actions". Subsequent pushes auto-deploy.
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Allow GITHUB_TOKEN to write to Pages, and let the workflow request an
+# OIDC token to upload the artifact.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deploy at a time; queue-skip the older one if a newer
+# push lands while a deploy is in flight.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      # Vite `base` must match the URL the site is served from. For a
+      # GitHub Pages project site that's `/<repo>/`. github.event.repository.name
+      # is set on push events; workflow_dispatch needs the same.
+      - name: Build
+        env:
+          VITE_BASE_PATH: /${{ github.event.repository.name }}/
+        run: npm run build
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
