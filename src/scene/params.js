@@ -69,6 +69,9 @@ export function tokenizeComponentExprs(c) {
   for (const t of (c.transforms || [])) {
     if (!t) continue;
     push(t.dx); push(t.dy); push(t.angle); push(t.n);
+    // `offset` is the parametric shift used by duplicate_mirror —
+    // it's an expression like '-cap_d/2' and can reference any param.
+    push(t.offset);
   }
   return out;
 }

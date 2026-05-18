@@ -927,7 +927,45 @@ export default function App() {
     const snaps = scene.snaps
       .filter(s => ids.has(s.from.compId) && ids.has(s.to.compId))
       .map(s => ({ ...s }));
-    const payload = { components, snaps };
+    // Collect the transitive closure of every parameter referenced by
+    // the copied components or snaps. Paste will use these to backfill
+    // any params that are missing on the destination side (with the
+    // SOURCE's value), but leave any same-name destination params
+    // alone — see handlePaste. Synthetic _comp_<id>_* identifiers and
+    // math-fn RESERVED_IDENTS are filtered (they're not workspace
+    // params; we'd just bloat the payload).
+    const params = {};
+    {
+      const used = new Set();
+      const frontier = [];
+      for (const c of components) {
+        for (const id of tokenizeComponentExprs(c)) frontier.push(id);
+      }
+      for (const s of snaps) {
+        for (const expr of [s.dx, s.dy]) {
+          if (typeof expr !== 'string') continue;
+          for (const id of tokenizeIdents(expr)) frontier.push(id);
+        }
+      }
+      while (frontier.length) {
+        const id = frontier.pop();
+        if (RESERVED_IDENTS.has(id)) continue;
+        if (id.startsWith('_comp_')) continue; // solver internal
+        if (used.has(id)) continue;
+        const p = scene.params[id];
+        if (!p) continue;
+        used.add(id);
+        // Snapshot a deep-ish copy so subsequent edits in the source
+        // workspace don't mutate the clipboard payload.
+        params[id] = { ...p };
+        if (typeof p.expr === 'string') {
+          for (const childId of tokenizeIdents(p.expr)) {
+            if (!used.has(childId)) frontier.push(childId);
+          }
+        }
+      }
+    }
+    const payload = { components, snaps, params };
     setClipboard(payload);
     const wireFormat = JSON.stringify({ _kind: CLIPBOARD_KIND, ...payload });
     // Cross-tab: same-origin localStorage is the source of truth for
@@ -1009,11 +1047,27 @@ export default function App() {
       from: { ...s.from, compId: idMap[s.from.compId] },
       to: { ...s.to, compId: idMap[s.to.compId] },
     }));
-    updateScene(prev => ({
-      ...prev,
-      components: [...prev.components, ...newComponents],
-      snaps: [...prev.snaps, ...newSnaps],
-    }));
+    updateScene(prev => {
+      // Backfill any parameters the copied components reference but
+      // the destination workspace doesn't have yet. Existing-name
+      // collisions: DESTINATION WINS — same name in both probably
+      // means "same parameter, different value" (e.g. a wider trace
+      // in this workspace), and silently overwriting would break the
+      // user's existing geometry. The pasted shape will adopt the
+      // destination's value, which is the spec's intended behavior:
+      // "the pasted elements could be different since the destination
+      // parameters have different values and that's okay".
+      const mergedParams = { ...prev.params };
+      for (const [name, p] of Object.entries(cb.params || {})) {
+        if (!(name in mergedParams)) mergedParams[name] = { ...p };
+      }
+      return {
+        ...prev,
+        params: mergedParams,
+        components: [...prev.components, ...newComponents],
+        snaps: [...prev.snaps, ...newSnaps],
+      };
+    });
     // Select the pasted set
     const newIds = new Set(newComponents.map(c => c.id));
     setSelection({ ids: newIds, primary: newComponents[newComponents.length - 1].id });
