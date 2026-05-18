@@ -82,8 +82,10 @@ const repoUser = match?.[1];
 const repoName = match?.[2];
 
 // 5. Resolve the latest semver tag (across local + remote, after the
-//    fetch above local tags should already include everything).
-const tagList = sh('git tag --list v*')
+//    fetch above local tags should already include everything). The
+//    'v*' glob is QUOTED so the shell doesn't try to expand it against
+//    files in cwd — without the quotes you get an empty tag list.
+const tagList = sh("git tag --list 'v*'")
   .split('\n')
   .map(t => t.trim())
   .filter(t => /^v\d+\.\d+\.\d+$/.test(t));
