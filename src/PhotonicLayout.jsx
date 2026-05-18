@@ -220,7 +220,7 @@ export default function App() {
       try {
         const parsed = JSON.parse(e.newValue);
         if (parsed && parsed._kind === CLIPBOARD_KIND && Array.isArray(parsed.components)) {
-          setClipboard({ components: parsed.components, snaps: parsed.snaps || [] });
+          setClipboard({ components: parsed.components, snaps: parsed.snaps || [], params: parsed.params || {} });
         }
       } catch { /* corrupt — leave existing cache alone */ }
     };
@@ -238,7 +238,7 @@ export default function App() {
         if (cancelled || !r || typeof r.value !== 'string') return;
         const parsed = JSON.parse(r.value);
         if (parsed && parsed._kind === CLIPBOARD_KIND && Array.isArray(parsed.components)) {
-          setClipboard({ components: parsed.components, snaps: parsed.snaps || [] });
+          setClipboard({ components: parsed.components, snaps: parsed.snaps || [], params: parsed.params || {} });
         }
       } catch { /* nothing there or unreadable — fine */ }
     })();
@@ -999,7 +999,7 @@ export default function App() {
         if (r && typeof r.value === 'string') {
           const parsed = JSON.parse(r.value);
           if (parsed && parsed._kind === CLIPBOARD_KIND && Array.isArray(parsed.components)) {
-            cb = { components: parsed.components, snaps: parsed.snaps || [] };
+            cb = { components: parsed.components, snaps: parsed.snaps || [], params: parsed.params || {} };
           }
         }
       } catch { /* corrupt or missing — fall through */ }
@@ -1010,7 +1010,7 @@ export default function App() {
           const text = await navigator.clipboard.readText();
           const parsed = JSON.parse(text);
           if (parsed && parsed._kind === CLIPBOARD_KIND && Array.isArray(parsed.components)) {
-            cb = { components: parsed.components, snaps: parsed.snaps || [] };
+            cb = { components: parsed.components, snaps: parsed.snaps || [], params: parsed.params || {} };
           }
         }
       } catch { /* permission denied / not JSON / not our payload — give up */ }
