@@ -193,10 +193,15 @@ describe('generateHfssNative', () => {
     expect(out).toContain('AssignImpedance');
     expect(out).toMatch(/"Resistance:=", "0\.001"/);
     expect(out).toMatch(/"Reactance:=", "0"/);
-    // Boundary's object list mentions each default electrode by name.
-    expect(out).toMatch(/"sig"/);
-    expect(out).toMatch(/"gnd_top"/);
-    expect(out).toMatch(/"gnd_bot"/);
+    // Boundary's object list mentions each default-scene electrode
+    // by name. We pick the names dynamically from the loaded scene
+    // so the test stays correct when the canonical default scene is
+    // refreshed (it's a JSON asset, not source code).
+    const electrodes = scene.components.filter(c => c.layer === 'electrode').map(c => c.id);
+    expect(electrodes.length).toBeGreaterThan(0);
+    for (const id of electrodes) {
+      expect(out).toMatch(new RegExp(`"${id}"`));
+    }
   });
 
   it('predicts HFSS collision-resolved clone names for repeat→mirror→repeat', () => {

@@ -7,8 +7,13 @@
 // `makeDefaultScene` and `makeBlankScene` produce the two canned
 // starting points used by the New / Open flows.
 //
+// `makeDefaultScene` loads a frozen JSON asset (default-scene.json) so
+// the canonical "first-run" demo can be refreshed by re-exporting it
+// from the app and dropping the new file in place — no code edits.
+//
 // Pure JS — no external deps. Extracted from PhotonicLayout.jsx as
 // Stage 3.1 of the planned refactor.
+import defaultSceneJson from './default-scene.json' with { type: 'json' };
 
 // ----------------------------------------------------------------------
 // DEFAULT SCENE
@@ -304,70 +309,16 @@ export function normalizeScene(s) {
   };
 }
 
+// First-run demo scene. Returns a DEEP CLONE of the frozen JSON asset
+// (default-scene.json) so subsequent edits in the app don't mutate the
+// shared import. The asset is a workspace-exported "Untitled" design —
+// to refresh it, edit a new starting design in the app, export the
+// workspace JSON, copy `designs.Untitled.scene` into default-scene.json.
 export function makeDefaultScene() {
-  const params = {
-    w_wg: { expr: '1.2', unit: 'µm', desc: 'WG core width (rib bottom)' },
-    h_wg: { expr: '0.6', unit: 'µm', desc: 'WG total height (LiTaO3 layer)' },
-    h_slab: { expr: '0.1', unit: 'µm', desc: 'Slab height (unetched LiTaO3 below rib)' },
-    w_slab: { expr: '5', unit: 'µm', desc: 'Slab width (around rib)' },
-    etch_angle: { expr: '70', unit: 'deg', desc: 'Etch sidewall angle from horizontal (90 = vertical)' },
-    h_si: { expr: '250', unit: 'µm', desc: 'Silicon handle thickness' },
-    h_sio2: { expr: '4.7', unit: 'µm', desc: 'Buried oxide thickness' },
-    h_clad: { expr: '2', unit: 'µm', desc: 'Cladding (legacy slab) thickness' },
-    h_cond: { expr: '0.8', unit: 'µm', desc: 'Conductor (electrode) thickness' },
-    sidewall_angle: { expr: '75', unit: 'deg', desc: 'Sidewall angle (legacy, see etch_angle)' },
-    n_core: { expr: '2.13', unit: '', desc: 'Core index (LiTaO3, ne ~2.13 @ 1550)' },
-    n_clad: { expr: '1.45', unit: '', desc: 'Cladding index (SiO2)' },
-    electrode_h: { expr: '0.5', unit: 'µm', desc: 'Electrode thickness' },
-    electrode_gap: { expr: '4.0', unit: 'µm', desc: 'Electrode-to-WG gap' },
-    ring_R: { expr: '80', unit: 'µm', desc: 'Ring outer half-extent' },
-    ring_W: { expr: 'w_wg', unit: 'µm', desc: 'Ring waveguide width (= w_wg)' },
-    bus_W: { expr: 'w_wg', unit: 'µm', desc: 'Bus waveguide width (= w_wg)' },
-    bus_L: { expr: '2*ring_R + 80', unit: 'µm', desc: 'Bus waveguide length' },
-    coupling_gap: { expr: '0.4', unit: 'µm', desc: 'Bus-ring coupling gap' },
-    sig_W: { expr: '8', unit: 'µm', desc: 'Signal electrode width' },
-    sig_L: { expr: '2*ring_R - 4*ring_W', unit: 'µm', desc: 'Signal electrode length (inside ring)' },
-    gnd_W: { expr: '30', unit: 'µm', desc: 'Ground plane width' },
-    gnd_L: { expr: '2*ring_R + 40', unit: 'µm', desc: 'Ground plane length' },
-    // Snap-axis parameters (one per snap axis, even if 0 for galvanic contact)
-    gap_x1: { expr: '0', unit: 'µm', desc: 'bus.S → ring_top.N (dx)' },
-    gap_y1: { expr: '-coupling_gap', unit: 'µm', desc: 'bus.S → ring_top.N (dy)' },
-    gap_x2: { expr: '0', unit: 'µm', desc: 'ring_top.S → ring_bot.N (dx)' },
-    gap_y2: { expr: '-(2*ring_R - 2*ring_W)', unit: 'µm', desc: 'ring_top.S → ring_bot.N (dy)' },
-    gap_x3: { expr: '0', unit: 'µm', desc: 'ring_top.SW → ring_left.NW (dx)' },
-    gap_y3: { expr: '0', unit: 'µm', desc: 'ring_top.SW → ring_left.NW (dy)' },
-    gap_x4: { expr: '0', unit: 'µm', desc: 'ring_top.SE → ring_right.NE (dx)' },
-    gap_y4: { expr: '0', unit: 'µm', desc: 'ring_top.SE → ring_right.NE (dy)' },
-    gap_x5: { expr: 'ring_W', unit: 'µm', desc: 'ring_left.NE → sig.NW (dx)' },
-    gap_y5: { expr: '-(ring_R - ring_W - sig_W/2)', unit: 'µm', desc: 'ring_left.NE → sig.NW (dy)' },
-    gap_x6: { expr: '0', unit: 'µm', desc: 'bus.N → gnd_top.S (dx)' },
-    gap_y6: { expr: 'electrode_gap', unit: 'µm', desc: 'bus.N → gnd_top.S (dy)' },
-    gap_x7: { expr: '0', unit: 'µm', desc: 'ring_bot.S → gnd_bot.N (dx)' },
-    gap_y7: { expr: '-electrode_gap', unit: 'µm', desc: 'ring_bot.S → gnd_bot.N (dy)' },
-  };
-
-  const components = [
-    { id: 'bus', kind: 'rect', layer: 'waveguide', cx: 0, cy: 0, w: 'bus_L', h: 'bus_W', cutouts: [], label: 'Bus WG' },
-    { id: 'ring_top', kind: 'rect', layer: 'waveguide', cx: 0, cy: 0, w: '2*ring_R', h: 'ring_W', cutouts: [], label: 'Ring top' },
-    { id: 'ring_bot', kind: 'rect', layer: 'waveguide', cx: 0, cy: 0, w: '2*ring_R', h: 'ring_W', cutouts: [], label: 'Ring bottom' },
-    { id: 'ring_left', kind: 'rect', layer: 'waveguide', cx: 0, cy: 0, w: 'ring_W', h: '2*ring_R - 2*ring_W', cutouts: [], label: 'Ring left' },
-    { id: 'ring_right', kind: 'rect', layer: 'waveguide', cx: 0, cy: 0, w: 'ring_W', h: '2*ring_R - 2*ring_W', cutouts: [], label: 'Ring right' },
-    { id: 'sig', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: 'sig_L', h: 'sig_W', cutouts: [], label: 'Signal electrode' },
-    { id: 'gnd_top', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: 'gnd_L', h: 'gnd_W', cutouts: [], label: 'Top ground plane' },
-    { id: 'gnd_bot', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: 'gnd_L', h: 'gnd_W', cutouts: [], label: 'Bottom ground plane' },
-  ];
-
-  const snaps = [
-    { id: 's1', from: { compId: 'bus', anchor: 'S' }, to: { compId: 'ring_top', anchor: 'N' }, dx: 'gap_x1', dy: 'gap_y1' },
-    { id: 's2', from: { compId: 'ring_top', anchor: 'S' }, to: { compId: 'ring_bot', anchor: 'N' }, dx: 'gap_x2', dy: 'gap_y2' },
-    { id: 's3', from: { compId: 'ring_top', anchor: 'SW' }, to: { compId: 'ring_left', anchor: 'NW' }, dx: 'gap_x3', dy: 'gap_y3' },
-    { id: 's4', from: { compId: 'ring_top', anchor: 'SE' }, to: { compId: 'ring_right', anchor: 'NE' }, dx: 'gap_x4', dy: 'gap_y4' },
-    { id: 's5', from: { compId: 'ring_left', anchor: 'NE' }, to: { compId: 'sig', anchor: 'NW' }, dx: 'gap_x5', dy: 'gap_y5' },
-    { id: 's6', from: { compId: 'bus', anchor: 'N' }, to: { compId: 'gnd_top', anchor: 'S' }, dx: 'gap_x6', dy: 'gap_y6' },
-    { id: 's7', from: { compId: 'ring_bot', anchor: 'S' }, to: { compId: 'gnd_bot', anchor: 'N' }, dx: 'gap_x7', dy: 'gap_y7' },
-  ];
-
-  return { params, components, snaps, mirrors: [], groups: [], booleans: [], stack: defaultStack(), stackName: 'LTOI600_NbN_EPFL' };
+  // structuredClone keeps the snapshot decoupled from the import.
+  return typeof structuredClone === 'function'
+    ? structuredClone(defaultSceneJson)
+    : JSON.parse(JSON.stringify(defaultSceneJson));
 }
 
 // Empty starting scene: same default layer stack so add-tools work right
