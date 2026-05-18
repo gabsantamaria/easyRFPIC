@@ -82,6 +82,64 @@ export async function deleteArchivedLibraryItem(workspace, name) {
 }
 
 // ----- Bulk export / import -----
+// Bundle ONE design (with all its snapshots / version history) into
+// a portable JSON blob. Suitable for downloading as a `.json` file
+// and re-importing into the same — or a different — workspace, or
+// even a different browser / machine. Returns null if the design
+// doesn't exist; otherwise a `{ format, version, exportedAt, name,
+// payload }` object where `payload` is exactly what `loadDesign`
+// returns (scene + history + future + updatedAt + versions +
+// currentVersionId).
+export async function exportDesign(workspace, name) {
+  const payload = await loadDesign(workspace, name);
+  if (!payload) return null;
+  return {
+    format: 'easyrfpic_design',
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    name,
+    payload,
+  };
+}
+
+// Write a single-design bundle into the workspace. Returns
+// `{ name, replaced }` on success; throws on bad input.
+//
+// `opts.name`: target design name (defaults to bundle's recorded name).
+// `opts.mode`:
+//   - 'overwrite' (default): replace any existing design with that name.
+//   - 'rename':              pick the next free `<name>_imported`,
+//                            `<name>_imported2`, … if a collision exists.
+//   - 'skip':                throw if the name's already taken.
+export async function importDesign(workspace, bundle, opts = {}) {
+  if (!bundle || bundle.format !== 'easyrfpic_design') {
+    throw new Error('Not a design bundle (expected format = "easyrfpic_design")');
+  }
+  if (!bundle.payload || typeof bundle.payload !== 'object') {
+    throw new Error('Bundle is missing the design payload');
+  }
+  const targetName = opts.name || bundle.name || 'Imported design';
+  const mode = opts.mode || 'overwrite';
+  const existing = new Set(await listSavedDesigns(workspace));
+  let finalName = targetName;
+  let replaced = false;
+  if (existing.has(targetName)) {
+    if (mode === 'skip') {
+      throw new Error(`Design "${targetName}" already exists`);
+    } else if (mode === 'rename') {
+      let i = 1;
+      finalName = `${targetName}_imported`;
+      while (existing.has(finalName)) { i++; finalName = `${targetName}_imported${i}`; }
+    } else {
+      replaced = true; // overwrite
+    }
+  }
+  if (!await saveDesign(workspace, finalName, bundle.payload)) {
+    throw new Error('Save failed');
+  }
+  return { name: finalName, replaced };
+}
+
 // Snapshot the entire workspace into a serializable bundle. Round-trips through JSON.
 export async function exportWorkspace(workspace) {
   const designs = {};

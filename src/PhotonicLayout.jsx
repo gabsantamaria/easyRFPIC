@@ -52,6 +52,7 @@ import {
   saveLibraryItem, saveArchivedLibraryItem,
   deleteLibraryItem, deleteArchivedLibraryItem,
   exportWorkspace, importWorkspace,
+  exportDesign, importDesign,
 } from './storage/library-items.js';
 import {
   fsAccessAPIPresent, openHandleDB,
@@ -3149,7 +3150,119 @@ export default function App() {
     }
   };
 
+  // Export ONE design as a .json file the user can download. Includes
+  // every snapshot in `versions[]`. Saved as `<name>.json` — same
+  // download path used by the workspace export.
+  const handleExportDesign = async (name) => {
+    try {
+      const bundle = await exportDesign(workspace, name);
+      if (!bundle) {
+        await alertDialog(`Design "${name}" not found.`, 'Export error');
+        return;
+      }
+      // Sanitize filename: replace anything that's not a-z/0-9/-/_ with _.
+      const safe = name.replace(/[^A-Za-z0-9._-]+/g, '_') || 'design';
+      const ts = new Date().toISOString().slice(0, 10);
+      downloadFile(`${safe}_${ts}.json`, JSON.stringify(bundle, null, 2), 'application/json;charset=utf-8');
+    } catch (err) {
+      await alertDialog(`Export failed: ${err.message}`, 'Export error');
+    }
+  };
 
+  // Import ONE design from a user-picked .json file. Mirrors the
+  // workspace-import file-picker flow (FileSystem API first, hidden
+  // <input type="file"> fallback for Safari/Firefox + sandboxed
+  // iframes). Prompts on name collision: choose between overwriting
+  // the existing design, picking a `<name>_imported` suffix, or
+  // cancelling.
+  const handleImportDesignFromFile = async () => {
+    let file = null;
+    const useFileInput = () => new Promise((resolve) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'application/json,.json';
+      input.onchange = (e) => resolve(e.target.files?.[0] || null);
+      input.click();
+    });
+    try {
+      if ('showOpenFilePicker' in window && !fsBlockedAtRuntime) {
+        try {
+          const [h] = await window.showOpenFilePicker({
+            types: [{ description: 'easyRFPIC design', accept: { 'application/json': ['.json'] } }],
+            multiple: false,
+          });
+          file = await h.getFile();
+        } catch (e) {
+          if (e?.name === 'AbortError') return;
+          const msg = String(e?.message || '');
+          const isSandboxed = e?.name === 'SecurityError' || /Cross[- ]origin|sub[- ]?frames?|sandboxed?/i.test(msg);
+          if (isSandboxed) {
+            setFsBlockedAtRuntime(true);
+            file = await useFileInput();
+          } else throw e;
+        }
+      } else {
+        file = await useFileInput();
+      }
+    } catch (e) {
+      if (e?.name === 'AbortError') return;
+      await alertDialog(`Could not open file: ${e.message}`, 'Import error');
+      return;
+    }
+    if (!file) return;
+    let bundle;
+    try {
+      bundle = JSON.parse(await file.text());
+    } catch (err) {
+      await alertDialog(`Could not parse file: ${err.message}`, 'Import error');
+      return;
+    }
+    if (!bundle || bundle.format !== 'easyrfpic_design') {
+      await alertDialog(
+        'Not an easyRFPIC design file (expected format = "easyrfpic_design"). For a workspace bundle, use "Import workspace from file…" instead.',
+        'Import error'
+      );
+      return;
+    }
+    const versionCount = Array.isArray(bundle.payload?.versions) ? bundle.payload.versions.length : 0;
+    const sourceName = bundle.name || 'Imported design';
+    const existing = new Set(await listSavedDesigns(workspace));
+    let mode = 'overwrite';
+    let finalName = sourceName;
+    if (existing.has(sourceName)) {
+      // Use a prompt to ask what to do. Three valid answers: overwrite,
+      // rename, or cancel (anything else cancels).
+      const ans = await promptDialog(
+        `A design named "${sourceName}" already exists in workspace "${workspace || 'default'}".\n\nType:\n  • "overwrite"  to REPLACE the existing design (its versions are lost!)\n  • "rename"     to import as "${sourceName}_imported"\n  • anything else to cancel`,
+        'rename',
+        'Name collision',
+      );
+      if (ans === null) return;
+      const a = (ans || '').trim().toLowerCase();
+      if (a === 'overwrite') mode = 'overwrite';
+      else if (a === 'rename') mode = 'rename';
+      else return;
+    } else {
+      // No collision — confirm with a summary.
+      const proceed = await confirmDialog(
+        `Import design "${sourceName}" with ${versionCount} snapshot${versionCount === 1 ? '' : 's'} into workspace "${workspace || 'default'}"?`,
+        'Import design',
+      );
+      if (!proceed) return;
+    }
+    try {
+      const result = await importDesign(workspace, bundle, { mode });
+      finalName = result.name;
+      await refreshSavedList();
+      mirrorWorkspaceToFileIfLinked();
+      await alertDialog(
+        `Imported "${finalName}"${result.replaced ? ' (replaced existing)' : ''}.${versionCount > 0 ? `\n${versionCount} snapshot${versionCount === 1 ? '' : 's'} restored.` : ''}`,
+        'Import complete',
+      );
+    } catch (err) {
+      await alertDialog(`Import failed: ${err.message}`, 'Import error');
+    }
+  };
 
   // Switch to a different workspace ("folder"). The empty string means the default folder.
   // The workspace useEffect re-triggers loading of the saved-list and active design.
@@ -4546,6 +4659,13 @@ export default function App() {
                     >
                       rename
                     </button>
+                    <button
+                      onClick={() => handleExportDesign(name)}
+                      className="text-slate-500 hover:text-cyan-400"
+                      title="Export this design (with all snapshots) as a .json file"
+                    >
+                      <Download size={11} />
+                    </button>
                     <button onClick={() => handleDeleteDesign(name)} className="text-slate-500 hover:text-red-400" title="Delete">
                       <Trash2 size={11} />
                     </button>
@@ -4630,8 +4750,15 @@ export default function App() {
               );
             })}
           </div>
-          <div className="px-3 py-2 border-t border-slate-700 flex items-center gap-2 text-[10px] text-slate-500">
-            <span>Cmd+S = save · snapshot = commit version · ⇧Cmd+S = save as</span>
+          <div className="px-3 py-2 border-t border-slate-700 flex items-center justify-between gap-2 text-[10px] text-slate-500">
+            <span className="truncate">Cmd+S · snapshot · ⇧Cmd+S = save as</span>
+            <button
+              onClick={handleImportDesignFromFile}
+              className="flex items-center gap-1 px-1.5 py-0.5 rounded border border-slate-600 hover:border-cyan-400 hover:text-cyan-300 text-slate-400 flex-shrink-0"
+              title="Import a single design from a .json file (with all its snapshots). Per-row ⬇ on each design exports the same format."
+            >
+              <Upload size={10} /> Import design…
+            </button>
           </div>
         </div>
       )}
