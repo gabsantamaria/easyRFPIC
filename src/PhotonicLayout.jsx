@@ -24,6 +24,17 @@ import { makeVersion, sortedVersions, findVersionById } from './storage/versions
 // payloads pre-versions, or designs where the pointer was cleared by a
 // delete-version), fall back to the LATEST snapshot as the implicit
 // default. New/empty designs (no versions yet) get null.
+// Shared localStorage key used by the cross-tab copy/paste mechanism.
+// All keys living under `photonic_layout:_*` are reserved internals
+// (not designs, libraries, or workspaces) — see storage/workspace.js
+// listing filter, which excludes them from SAVED DESIGNS.
+const CLIPBOARD_STORAGE_KEY = 'photonic_layout:_clipboard';
+// Magic marker embedded in clipboard payloads so a paste handler can
+// distinguish "our JSON" from random stuff a user copied into the OS
+// clipboard (e.g. plain text). Without this we'd risk parsing whatever
+// happens to be in `navigator.clipboard.readText()` as a scene fragment.
+const CLIPBOARD_KIND = 'easyRFPIC_clipboard_v1';
+
 const resolveCurrentVersionId = (savedCurId, versions) => {
   const list = Array.isArray(versions) ? versions : [];
   // If we have an explicit pointer AND it still resolves to a real
@@ -187,7 +198,52 @@ export default function App() {
   // Which design rows in the SAVED DESIGNS list are currently expanded
   // to show their per-version sub-list. Pure UI state.
   const [expandedDesigns, setExpandedDesigns] = useState(new Set());
+  // App-level clipboard: rich scene fragments (components + snaps + transforms
+  // + cutouts + …). The in-memory React state is just a per-tab cache; the
+  // canonical store is a localStorage entry (CLIPBOARD_STORAGE_KEY) so Copy
+  // in one browser tab is visible to Paste in another. We also try to
+  // mirror the JSON to the OS clipboard via navigator.clipboard.writeText,
+  // which makes the rich payload paste-able into TextEdit / Slack / etc.
+  // for backup — that call is best-effort (permission may be denied or
+  // unavailable; we silently fall back to localStorage-only).
   const [clipboard, setClipboard] = useState(null); // { components, snaps }
+  // Listen for cross-tab Copy events. The browser fires `storage` on
+  // EVERY other tab on the same origin when one tab writes to
+  // localStorage. We watch the clipboard key and hydrate the in-memory
+  // cache so paste is instantaneous (no async lookup needed). The
+  // localStorage fallback in handlePaste handles the cold-start case
+  // for tabs that were opened AFTER the most recent Copy.
+  useEffect(() => {
+    const onStorage = (e) => {
+      if (e.key !== CLIPBOARD_STORAGE_KEY) return;
+      if (!e.newValue) { setClipboard(null); return; }
+      try {
+        const parsed = JSON.parse(e.newValue);
+        if (parsed && parsed._kind === CLIPBOARD_KIND && Array.isArray(parsed.components)) {
+          setClipboard({ components: parsed.components, snaps: parsed.snaps || [] });
+        }
+      } catch { /* corrupt — leave existing cache alone */ }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+  // Initial hydration on mount: if a previous tab's Copy is sitting in
+  // localStorage already, prime the in-memory cache so the first
+  // Paste in this tab is instant.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await window.storage.get(CLIPBOARD_STORAGE_KEY);
+        if (cancelled || !r || typeof r.value !== 'string') return;
+        const parsed = JSON.parse(r.value);
+        if (parsed && parsed._kind === CLIPBOARD_KIND && Array.isArray(parsed.components)) {
+          setClipboard({ components: parsed.components, snaps: parsed.snaps || [] });
+        }
+      } catch { /* nothing there or unreadable — fine */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
   // Holds a reference to createBoolean (defined later). Keyboard-shortcut
   // effects need the function but are wired up earlier in the component
   // body, so we defer the resolution to call-time via this ref. Updated
@@ -847,26 +903,85 @@ export default function App() {
   }, [workspace, savedList, designName, refreshSavedList, alertDialog]);
 
   // ----- Copy / Paste -----
-  const handleCopy = useCallback(() => {
+  //
+  // The clipboard payload is a rich scene fragment (components + snaps,
+  // with cutouts/transforms preserved). We persist it three ways, each
+  // with a different reach:
+  //
+  //   1. Per-tab React state — instant, hot in this tab.
+  //   2. localStorage (CLIPBOARD_STORAGE_KEY) — shared across every tab
+  //      on this origin, survives refresh. This is what fixes the
+  //      cross-tab paste use case.
+  //   3. OS clipboard via navigator.clipboard.writeText — best-effort;
+  //      makes the JSON available to pastes into TextEdit / Notion / a
+  //      teammate's chat, AND survives even if localStorage is cleared.
+  //      Will silently no-op if the API isn't present or the user
+  //      hasn't granted clipboard-write permission.
+  const handleCopy = useCallback(async () => {
     if (selectedIds.size === 0) return;
     const ids = selectedIds;
     const components = scene.components
       .filter(c => ids.has(c.id))
       .map(c => ({ ...c, cutouts: (c.cutouts || []).map(cu => ({ ...cu })) }));
-    // Internal snaps: both endpoints in the selection
+    // Internal snaps: both endpoints in the selection.
     const snaps = scene.snaps
       .filter(s => ids.has(s.from.compId) && ids.has(s.to.compId))
       .map(s => ({ ...s }));
-    setClipboard({ components, snaps });
+    const payload = { components, snaps };
+    setClipboard(payload);
+    const wireFormat = JSON.stringify({ _kind: CLIPBOARD_KIND, ...payload });
+    // Cross-tab: same-origin localStorage is the source of truth for
+    // Paste in another tab.
+    try { await window.storage.set(CLIPBOARD_STORAGE_KEY, wireFormat); } catch {}
+    // Cross-app bonus: try the OS clipboard too. The permission prompt
+    // is browser-mediated and fires on the FIRST writeText() in a
+    // session if the page doesn't already have permission. If declined
+    // or unavailable, swallow — localStorage carries the in-app case.
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(JSON.stringify({ _kind: CLIPBOARD_KIND, ...payload }, null, 2));
+      }
+    } catch { /* permission denied / not allowed — silent fallback */ }
     setSaveStatus(s => s); // no-op, just to indicate user feedback could go here
   }, [selectedIds, scene.components, scene.snaps]);
 
-  const handlePaste = useCallback(() => {
-    if (!clipboard || clipboard.components.length === 0) return;
+  const handlePaste = useCallback(async () => {
+    // Resolve the clipboard payload with a three-tier fallback so paste
+    // works across tabs / after refresh / from the OS clipboard:
+    //   1. The in-memory React clipboard (this tab's most recent Copy).
+    //   2. localStorage — set by Copy in this tab OR any other tab on
+    //      the same origin. Survives refreshes.
+    //   3. The OS clipboard, if it contains our magic-marker JSON
+    //      (CLIPBOARD_KIND). Lets users paste content that was copied
+    //      in an earlier session whose localStorage got cleared.
+    let cb = clipboard;
+    if (!cb || cb.components.length === 0) {
+      try {
+        const r = await window.storage.get(CLIPBOARD_STORAGE_KEY);
+        if (r && typeof r.value === 'string') {
+          const parsed = JSON.parse(r.value);
+          if (parsed && parsed._kind === CLIPBOARD_KIND && Array.isArray(parsed.components)) {
+            cb = { components: parsed.components, snaps: parsed.snaps || [] };
+          }
+        }
+      } catch { /* corrupt or missing — fall through */ }
+    }
+    if (!cb || cb.components.length === 0) {
+      try {
+        if (typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
+          const text = await navigator.clipboard.readText();
+          const parsed = JSON.parse(text);
+          if (parsed && parsed._kind === CLIPBOARD_KIND && Array.isArray(parsed.components)) {
+            cb = { components: parsed.components, snaps: parsed.snaps || [] };
+          }
+        }
+      } catch { /* permission denied / not JSON / not our payload — give up */ }
+    }
+    if (!cb || cb.components.length === 0) return;
     // Generate fresh IDs for pasted components, mapping old → new
     const idMap = {};
     const existingIds = new Set(scene.components.map(c => c.id));
-    for (const c of clipboard.components) {
+    for (const c of cb.components) {
       // Try `<id>_copy`, `<id>_copy2`, …
       let candidate = `${c.id}_copy`;
       let i = 2;
@@ -878,7 +993,7 @@ export default function App() {
     }
     // Offset the pasted components so they're visible (in grid units)
     const offset = gridSize * 5;
-    const newComponents = clipboard.components.map(c => ({
+    const newComponents = cb.components.map(c => ({
       ...c,
       id: idMap[c.id],
       cx: c.cx + offset,
@@ -888,7 +1003,7 @@ export default function App() {
     // Snaps among the copied set: rewire endpoints to the new IDs
     // Note: dx/dy expressions stay the same — they reference the same gap_* parameters,
     // so the pasted pair has the same separation as the original.
-    const newSnaps = clipboard.snaps.map(s => ({
+    const newSnaps = cb.snaps.map(s => ({
       ...s,
       id: `snap_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       from: { ...s.from, compId: idMap[s.from.compId] },
@@ -902,6 +1017,9 @@ export default function App() {
     // Select the pasted set
     const newIds = new Set(newComponents.map(c => c.id));
     setSelection({ ids: newIds, primary: newComponents[newComponents.length - 1].id });
+    // Keep the in-memory cache hot so the NEXT paste skips the
+    // localStorage / OS-clipboard lookup.
+    setClipboard(cb);
   }, [clipboard, scene.components, gridSize, updateScene, setSelection]);
 
   // Cmd+S = save, Cmd+C / Cmd+V = copy/paste, + = union, - = subtract
