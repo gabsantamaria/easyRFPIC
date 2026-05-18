@@ -486,6 +486,27 @@ export default function App() {
     return names.sort();
   }, [scene.params]);
 
+  // True when the working scene has drifted away from the snapshot the
+  // current-version pointer (currentVersionId) points to. Drives the
+  // synthetic "current" virtual row in the SAVED DESIGNS version list
+  // — the user's mental model is "after I snapshot v4 and start
+  // editing, my live work should show as a separate row above v4 so
+  // I don't accidentally throw it away by clicking v4 again".
+  //
+  // Deep-equality via JSON.stringify is fine for typical scenes
+  // (sub-millisecond at a few hundred components); memoized so it
+  // only recomputes when the scene / versions / pointer change.
+  const currentIsModified = useMemo(() => {
+    if (!currentVersionId) return false;
+    const v = versions.find(vv => vv && vv.id === currentVersionId);
+    if (!v || !v.scene) return false;
+    try {
+      return JSON.stringify(scene) !== JSON.stringify(v.scene);
+    } catch {
+      return false;
+    }
+  }, [scene, versions, currentVersionId]);
+
   // Undo checkpointing: only commit a snapshot to history once per ~2s of continuous edits.
   // pendingCheckpointRef holds the scene as it was at the start of the current edit window.
   // checkpointTimerRef holds the timer that will commit it.
@@ -749,8 +770,21 @@ export default function App() {
   // (starts a new chain entry). Marks the design as `unsaved` so
   // the user is reminded that they've moved off the latest state.
   const handleLoadVersion = useCallback(async (name, versionId) => {
-    if (saveStatus === 'unsaved') {
-      const ok = await confirmDialog('Discard unsaved changes and load this version?', 'Load version');
+    // Two reasons to confirm-discard: unsaved edits since last Save,
+    // OR scene drifted from the snapshot the current pointer points
+    // to (i.e. the synthetic "current" row in the version list is
+    // showing). The user might've hit Cmd+S already (saveStatus =
+    // 'saved') but their working state is still ahead of any
+    // snapshot — without this second branch they'd lose those
+    // edits silently when loading a different version.
+    if (saveStatus === 'unsaved' || currentIsModified) {
+      const msg = currentIsModified
+        ? 'Your working state has unsnapshotted edits ("current" row above). Loading this version will REPLACE them.\n\nDiscard your in-progress edits and load this version?'
+        : 'Discard unsaved changes and load this version?';
+      const ok = await confirmDialog(msg, 'Load version', {
+        confirmLabel: 'Discard & load',
+        confirmTone: 'danger',
+      });
       if (!ok) return;
     }
     const d = await loadDesign(workspace, name);
@@ -769,7 +803,7 @@ export default function App() {
     // back into the working state (vs. silently overwriting after
     // an autosave debounce).
     setSaveStatus('unsaved');
-  }, [workspace, saveStatus, setSelection, confirmDialog, alertDialog]);
+  }, [workspace, saveStatus, currentIsModified, setSelection, confirmDialog, alertDialog]);
 
   // Delete a single version from a design's history. The confirmation
   // explicitly recommends snapshotting the current state first so a
@@ -4611,10 +4645,14 @@ export default function App() {
               const activeVer = activeCurId
                 ? vlist.find(v => v.id === activeCurId)
                 : null;
-              // Drift indicator: only meaningful for the ACTIVE
-              // design (we know live save status). Other rows just
-              // show the version chip without a "modified" tag.
-              const isModified = isCurrent && saveStatus === 'unsaved' && activeCurId;
+              // Drift indicator: scene-vs-snapshot deep-equal check
+              // for the active design (we have the live state to
+              // diff against). Other rows just show the snapshot chip
+              // without a "modified" tag. Note this is distinct from
+              // saveStatus: you can save the working state (saveStatus
+              // = 'saved') and still be modified relative to the
+              // snapshot — Save just persists, it doesn't snapshot.
+              const isModified = isCurrent && currentIsModified && activeCurId;
               return (
                 <div key={name} className={`border-b border-slate-800 ${isCurrent ? 'bg-slate-800/40' : ''}`}>
                   <div className={`flex items-center gap-1 px-3 py-1.5 hover:bg-slate-800/60`}>
@@ -4672,6 +4710,42 @@ export default function App() {
                   </div>
                   {isExpanded && (
                     <div className="pl-6 pr-2 pb-1.5 border-l-2 border-cyan-900/40 ml-3 mb-1">
+                      {/* Synthetic "current" virtual row — ONLY for the
+                          active design when the working state has
+                          drifted from its currentVersionId snapshot.
+                          Represents the in-progress edits the user
+                          hasn't snapshotted yet. Visually mirrors a
+                          real version row (cyan border + ● bullet)
+                          so the user knows their work isn't lost,
+                          and that clicking a real snapshot row would
+                          replace it (with the existing confirm
+                          dialog as a backstop). */}
+                      {isCurrent && currentIsModified && activeVer && (
+                        <div
+                          className="flex items-start gap-1 py-1 rounded px-1 bg-amber-900/20 border-l-2 border-amber-400 -ml-px group"
+                        >
+                          <div className="flex-1 text-left min-w-0">
+                            <div className="flex items-center gap-1.5 text-[10px] font-mono">
+                              <span className="text-amber-300 font-bold" title="Working state — not yet snapshotted">●</span>
+                              <span className="text-amber-300 font-bold">current</span>
+                              <span className="text-slate-500">·</span>
+                              <span className="text-slate-500" title={`Based on v${activeVer.versionNumber} (${activeVer.id.slice(0, 7)})`}>
+                                modified since v{activeVer.versionNumber}
+                              </span>
+                            </div>
+                            <div className="text-[10px] text-slate-400 italic truncate mt-0.5">
+                              Working state — click <span className="text-cyan-300 font-mono not-italic">snapshot</span> above to save as a new version.
+                            </div>
+                          </div>
+                          <button
+                            onClick={handleSnapshot}
+                            className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-800/60 hover:bg-cyan-700 text-cyan-100 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+                            title="Commit the current state as a new snapshot"
+                          >
+                            snapshot
+                          </button>
+                        </div>
+                      )}
                       {vlist.length === 0 ? (
                         <p className="text-[10px] text-slate-500 italic py-1">
                           No snapshots yet — click <span className="font-mono text-cyan-400">snapshot</span> to commit a version.
@@ -4686,38 +4760,41 @@ export default function App() {
                             ? dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
                             : dt.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
                           // Highlight the version the working state is
-                          // currently "based on" so the user can see at
-                          // a glance which snapshot they'd diff against.
-                          // For the active design that drift may be live
-                          // (saveStatus === 'unsaved' tags it modified).
+                          // currently on. When `isModified` is true the
+                          // synthetic "current" row above represents
+                          // the live state instead, and this real row
+                          // becomes just the version we're "based on"
+                          // — toned-down highlight, no ● bullet (the
+                          // bullet lives on the synthetic row).
                           const isCurVer = v.id === activeCurId;
+                          const isBasedOn = isCurVer && isModified; // synthetic current is the bullet holder
+                          const isExactlyOn = isCurVer && !isModified;
                           return (
                             <div
                               key={v.id}
                               className={`flex items-start gap-1 py-1 rounded px-1 group ${
-                                isCurVer
+                                isExactlyOn
                                   ? 'bg-cyan-900/30 border-l-2 border-cyan-400 -ml-px'
-                                  : 'hover:bg-slate-800/50'
+                                  : isBasedOn
+                                    ? 'bg-cyan-900/10'
+                                    : 'hover:bg-slate-800/50'
                               }`}
                             >
                               <button
                                 onClick={() => { handleLoadVersion(name, v.id); setShowDesigns(false); }}
                                 className="flex-1 text-left min-w-0"
-                                title={`Load version ${v.versionNumber} (${v.id}) into the working state.${isCurVer ? ' (Currently based on this version.)' : ''}`}
+                                title={`Load version ${v.versionNumber} (${v.id}) into the working state.${isExactlyOn ? ' (Currently on this version.)' : isBasedOn ? ' (Working state is based on this — loading it will discard your unsnapshotted edits.)' : ''}`}
                               >
                                 <div className="flex items-center gap-1.5 text-[10px] font-mono">
-                                  {isCurVer && (
-                                    <span
-                                      className="text-cyan-300 font-bold"
-                                      title={isModified ? 'Currently on this version (modified since)' : 'Currently on this version'}
-                                    >●</span>
+                                  {isExactlyOn && (
+                                    <span className="text-cyan-300 font-bold" title="Currently on this version">●</span>
                                   )}
-                                  <span className={isCurVer ? 'text-cyan-300 font-bold' : 'text-cyan-400'}>v{v.versionNumber}</span>
+                                  <span className={isExactlyOn ? 'text-cyan-300 font-bold' : 'text-cyan-400'}>v{v.versionNumber}</span>
                                   <span className="text-slate-500">{v.id.slice(0, 7)}</span>
                                   <span className="text-slate-500">·</span>
                                   <span className="text-slate-500">{dateLabel}</span>
-                                  {isCurVer && isModified && (
-                                    <span className="text-amber-400 ml-1" title="Working state differs from this snapshot">· modified</span>
+                                  {isBasedOn && (
+                                    <span className="text-amber-400 ml-1" title="Working state is based on this snapshot but has unsnapshotted edits — see the 'current' row above">· based on</span>
                                   )}
                                 </div>
                                 {v.description ? (
