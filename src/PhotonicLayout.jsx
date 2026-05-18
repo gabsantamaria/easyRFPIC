@@ -5893,8 +5893,46 @@ export default function App() {
                     binding was set in `commitDragAdd` and silently
                     defaulted to the first conductor. */}
                 {(selected.layer === 'electrode' || selected.layer === 'port') && (() => {
+                  // Conductor-layer binding picker. Three states to handle:
+                  //
+                  //   1. EXPLICITLY BOUND to an existing role='conductor' layer.
+                  //      Show as the selected option; user can pick another to rebind.
+                  //
+                  //   2. UNBOUND (conductorLayerId is missing). Older components
+                  //      created before this picker existed used the implicit
+                  //      "first conductor in stack" fallback — that's silently
+                  //      wrong when the stack later grows to multiple conductors.
+                  //      Surface an "(unbound — falls back to first conductor)"
+                  //      sentinel option marked with ⚠ so the user knows they
+                  //      need to make the choice explicit. Picking ANY real
+                  //      conductor below persists the binding.
+                  //
+                  //   3. STALE BOUND (conductorLayerId points to a layer that
+                  //      doesn't exist anymore OR has had its role changed
+                  //      away from conductor). Show the stale id pinned to the
+                  //      top of the list (red ⚠) so the user sees the binding
+                  //      is broken and can correct it.
+                  //
+                  // The dropdown ALWAYS lists every layer in the stack with
+                  // role='conductor' — same filter as the export uses. If the
+                  // user reports "the new layer doesn't show up", the layer
+                  // either isn't in the stack or its role hasn't been set to
+                  // conductor. Check the LAYERS panel.
                   const conductorLayers = (scene.stack || []).filter(l => l.role === 'conductor');
                   if (conductorLayers.length === 0) return null;
+                  const explicitBoundId = selected.conductorLayerId || null;
+                  const boundExists = explicitBoundId
+                    ? conductorLayers.some(l => l.id === explicitBoundId)
+                    : false;
+                  const isUnbound = !explicitBoundId;
+                  const isStale = !!explicitBoundId && !boundExists;
+                  // What to display in the <select>. For unbound we use a
+                  // sentinel value '__unbound__' so the select doesn't visually
+                  // suggest a layer is bound when none is. For stale, show the
+                  // stale id so the user sees what's recorded.
+                  const displayValue = isUnbound
+                    ? '__unbound__'
+                    : (boundExists ? explicitBoundId : explicitBoundId);
                   const labelText = selected.layer === 'port'
                     ? 'Conductor layer (port Z)'
                     : 'Conductor layer';
@@ -5905,16 +5943,52 @@ export default function App() {
                     <div>
                       <label className="text-[10px] uppercase tracking-wider text-slate-500">{labelText}</label>
                       <select
-                        value={selected.conductorLayerId || conductorLayers[0]?.id || ''}
-                        onChange={(e) => updateComp(selected.id, { conductorLayerId: e.target.value })}
-                        className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-slate-100 outline-none focus:border-cyan-400"
+                        value={displayValue}
+                        onChange={(e) => {
+                          // Sentinel values from the unbound/stale options
+                          // are no-ops on commit. Only real ids persist.
+                          if (e.target.value === '__unbound__') return;
+                          updateComp(selected.id, { conductorLayerId: e.target.value });
+                        }}
+                        className={`w-full bg-slate-900 border rounded px-2 py-1 text-xs font-mono outline-none ${
+                          isUnbound || isStale
+                            ? 'border-amber-500 text-amber-300 focus:border-amber-400'
+                            : 'border-slate-700 text-slate-100 focus:border-cyan-400'
+                        }`}
                         title={helpText}
                       >
+                        {isUnbound && (
+                          <option value="__unbound__">
+                            ⚠ unbound — falls back to "{conductorLayers[0]?.name || conductorLayers[0]?.id}"
+                          </option>
+                        )}
+                        {isStale && (
+                          <option value={explicitBoundId}>
+                            ⚠ {explicitBoundId} (deleted or no longer a conductor)
+                          </option>
+                        )}
                         {conductorLayers.map(l => (
                           <option key={l.id} value={l.id}>{l.name || l.id}</option>
                         ))}
                       </select>
-                      <p className="text-[9px] text-slate-500 mt-1 leading-snug">{helpText}</p>
+                      {isUnbound && (
+                        <p className="text-[9px] text-amber-400 mt-1 leading-snug">
+                          No explicit binding — the export will silently fall back to the
+                          first conductor in the stack. Pick a layer above to make the
+                          binding explicit and immune to stack reordering.
+                        </p>
+                      )}
+                      {isStale && (
+                        <p className="text-[9px] text-red-400 mt-1 leading-snug">
+                          Bound to "{explicitBoundId}" which is no longer a conductor layer
+                          (it was deleted or its role was changed). Pick a real conductor
+                          above; until you do, the export silently falls back to the first
+                          conductor — which may not be what you want.
+                        </p>
+                      )}
+                      {!isUnbound && !isStale && (
+                        <p className="text-[9px] text-slate-500 mt-1 leading-snug">{helpText}</p>
+                      )}
                     </div>
                   );
                 })()}

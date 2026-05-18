@@ -639,6 +639,51 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   const cond_z_um = `${cond_z.toFixed(4)}um`;
   const condMaterial = condLayer ? condLayer.material : 'gold';
 
+  // All conductor layers in stack order — used to detect multi-conductor
+  // designs (where the default-fallback path becomes ambiguous).
+  const allConductorLayers = (stack || []).filter(l => l.role === 'conductor');
+
+  // Resolve a component's conductor binding to a concrete layer, returning
+  // both the picked layer and a one-line Python comment that explains why
+  // this layer was picked. The comment surfaces three failure modes that
+  // bit the user previously:
+  //   1. component has NO explicit conductorLayerId (legacy / pre-dropdown)
+  //      and silently falls back to "first conductor in stack"; in a multi-
+  //      conductor design that's whatever happens to be ordered first.
+  //   2. component has an explicit conductorLayerId but it doesn't match
+  //      any conductor layer (stale binding — the layer was deleted or
+  //      its role flipped). Falls back to first conductor; the Python
+  //      comment shows the stale id so the user can trace it.
+  //   3. component is explicitly bound and the binding resolves cleanly.
+  //      Comment confirms which layer was used.
+  const resolveCondForComp = (c) => {
+    if (!c) return { layer: condLayer, comment: '# (no component)' };
+    const bound = c.conductorLayerId || null;
+    if (!bound) {
+      if (allConductorLayers.length > 1) {
+        return {
+          layer: condLayer,
+          comment: `# WARNING: ${c.id} has no explicit conductor-layer binding; defaulted to "${condLayer ? condLayer.id : '(none)'}" (first of ${allConductorLayers.length} conductor layers in the stack: ${allConductorLayers.map(l => l.id).join(', ')}). Set the binding in the Inspector to lock this choice.`,
+        };
+      }
+      return {
+        layer: condLayer,
+        comment: `# Conductor layer for ${c.id}: "${condLayer ? condLayer.id : '(none)'}" (default — only conductor in stack).`,
+      };
+    }
+    const match = allConductorLayers.find(l => l.id === bound);
+    if (match) {
+      return {
+        layer: match,
+        comment: `# Conductor layer for ${c.id}: "${match.id}" (explicit binding).`,
+      };
+    }
+    return {
+      layer: condLayer,
+      comment: `# WARNING: ${c.id} was bound to conductor layer id "${bound}", but no conductor layer with that id exists in the current stack. Falling back to "${condLayer ? condLayer.id : '(none)'}". Re-bind it in the Inspector.`,
+    };
+  };
+
   // Substrate Z positions, bottom-up (now derived from layerZ)
   const substrateLayers = (stack || []).filter(l => l.role === 'substrate');
   const substratePositions = substrateLayers.map(layer => ({
@@ -821,6 +866,52 @@ def set_var(name, value):
   code += `set_var("chip_y_min", "${minY.toFixed(4)}um")\n`;
   code += `set_var("chip_x_size", "${(maxX - minX).toFixed(4)}um")\n`;
   code += `set_var("chip_y_size", "${(maxY - minY).toFixed(4)}um")\n`;
+
+  // ===== Conductor-layer binding summary =====
+  // Emit a top-of-file audit listing every conductor in the stack and
+  // flagging components whose conductorLayerId is missing or stale.
+  // Previously, an unbound electrode silently fell back to "first
+  // conductor in the stack" — fine when there was only one, but
+  // catastrophic when the user added a second (the meaning of the
+  // export changed without warning). This block makes the binding
+  // state visible at the top of the script so the user can audit it
+  // before running, without having to scroll through inline comments
+  // by every shape.
+  {
+    const allCondLayers = allConductorLayers; // alias for clarity
+    const elecOrPort = (solved || []).filter(c => c.layer === 'electrode' || c.layer === 'port');
+    const unbound = [];
+    const stale = []; // [{ id, badId }]
+    for (const c of elecOrPort) {
+      const bound = c.conductorLayerId || null;
+      if (!bound) { unbound.push(c.id); continue; }
+      if (!allCondLayers.some(l => l.id === bound)) stale.push({ id: c.id, badId: bound });
+    }
+    code += `\n# ===== Conductor-layer audit =====\n`;
+    if (allCondLayers.length === 0) {
+      code += `# (No conductor layers defined in the stack.)\n`;
+    } else {
+      code += `# Conductor layers in stack order:\n`;
+      for (const l of allCondLayers) {
+        code += `#   - ${l.id} (material=${l.material}, thickness=${l.thickness})\n`;
+      }
+      code += `# Default-fallback conductor (used when a component has no explicit binding): ${condLayer ? condLayer.id : '(none)'}\n`;
+    }
+    if (unbound.length > 0) {
+      code += `# WARNING: components with NO explicit conductor-layer binding (will use default-fallback above):\n`;
+      for (const id of unbound) code += `#   - ${id}\n`;
+      if (allCondLayers.length > 1) {
+        code += `# >>> Because the stack has multiple conductor layers, the default-fallback choice is ambiguous.\n`;
+        code += `# >>> Open the Inspector for each of the above and explicitly pick a conductor layer to lock the binding.\n`;
+      }
+    }
+    if (stale.length > 0) {
+      code += `# WARNING: components bound to a conductor-layer id that no longer exists in the stack (will use default-fallback):\n`;
+      for (const s of stale) code += `#   - ${s.id} -> "${s.badId}" (stale)\n`;
+      code += `# >>> Re-bind these in the Inspector. The dropdown will show a "stale" row at the top of the list.\n`;
+    }
+    code += `\n`;
+  }
 
   // ===== Materials =====
   // HFSS doesn't ship lithium_tantalate (or any non-standard material) by default.
@@ -1079,10 +1170,8 @@ except:
       let zBottomExpr = '0um';
       let zSizeExpr = exprWithUm('h_wg');
       if (c.layer === 'electrode') {
-        const boundLayer = c.conductorLayerId
-          ? (stack || []).find(l => l.id === c.conductorLayerId && l.role === 'conductor')
-          : null;
-        const elecLayer = boundLayer || condLayer;
+        const { layer: elecLayer, comment: elecComment } = resolveCondForComp(c);
+        code += `${elecComment}\n`;
         if (elecLayer && layerZ[elecLayer.id]) {
           zBottom = layerZ[elecLayer.id].zBottom;
           zSize = layerZ[elecLayer.id].thickness;
@@ -2008,9 +2097,8 @@ except Exception as e:
       // layer's zBottom — the sheet and the port coincide on the same
       // plane. Falls back to the legacy h_wg position if no conductor
       // layer is defined.
-      const portCondLayer = c.conductorLayerId
-        ? (stack || []).find(l => l.id === c.conductorLayerId && l.role === 'conductor')
-        : condLayer;
+      const { layer: portCondLayer, comment: portCondComment } = resolveCondForComp(c);
+      code += `${portCondComment}\n`;
       const portCondZBot = portCondLayer && layerZ[portCondLayer.id] ? layerZ[portCondLayer.id].zBottom : evalExpr('h_wg', paramValues) || 0.6;
       const portCondThk = portCondLayer && layerZ[portCondLayer.id] ? layerZ[portCondLayer.id].thickness : 0;
       // Parametric Z = condZBottom + condThickness/2 so an HFSS sweep of
@@ -2047,11 +2135,13 @@ except Exception as e:
 `;
     } else {
       emittedElecNames.push(id);
-      // Pick the conductor layer this component is bound to (or fall back to default)
-      const boundLayer = c.conductorLayerId
-        ? (stack || []).find(l => l.id === c.conductorLayerId && l.role === 'conductor')
-        : null;
-      const elecLayer = boundLayer || condLayer;
+      // Pick the conductor layer this component is bound to (or fall back to default).
+      // Resolver also returns a Python comment that gets emitted next to
+      // the shape — that way the user can audit the exported script and
+      // see which layer was actually used, and whether it was an explicit
+      // binding, a legacy default, or a stale-binding fallback.
+      const { layer: elecLayer, comment: elecComment } = resolveCondForComp(c);
+      code += `${elecComment}\n`;
       const elecZ = elecLayer && layerZ[elecLayer.id] ? layerZ[elecLayer.id].zBottom : 0;
       const elecThickness = elecLayer && layerZ[elecLayer.id] ? layerZ[elecLayer.id].thickness : cond_z;
       const elecMaterial = elecLayer ? elecLayer.material : condMaterial;
@@ -2893,9 +2983,8 @@ oBoundarySetup = oDesign.GetModule("BoundarySetup")
       // Per-port Z: half-way up the conductor layer that hosts this
       // port (so the IntLine endpoint Z matches the port sheet's Z
       // EXACTLY). Falls back to h_wg if no conductor layer is bound.
-      const portCondLayerLP = comp.conductorLayerId
-        ? (stack || []).find(l => l.id === comp.conductorLayerId && l.role === 'conductor')
-        : condLayer;
+      const { layer: portCondLayerLP, comment: portCondLPComment } = resolveCondForComp(comp);
+      code += `${portCondLPComment}\n`;
       const portZ_zBot = portCondLayerLP && layerZ[portCondLayerLP.id] ? layerZ[portCondLayerLP.id].zBottom : evalExpr('h_wg', paramValues) || 0.6;
       const portZ_thk  = portCondLayerLP && layerZ[portCondLayerLP.id] ? layerZ[portCondLayerLP.id].thickness : 0;
       const portZ_um = portZ_zBot + portZ_thk / 2;
