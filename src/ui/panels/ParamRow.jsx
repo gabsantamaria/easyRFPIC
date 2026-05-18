@@ -12,24 +12,13 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Trash2, AlertTriangle } from 'lucide-react';
 import { HoverTooltip } from '../HoverTooltip.jsx';
 import { ParamTuner } from './ParamTuner.jsx'; // EXPERIMENTAL — see ParamTuner.jsx for removal instructions
+import { DeferredTextInput } from '../DeferredTextInput.jsx';
 
-export function ParamRow({ name, p, onRename, onUpdateExpr, onCommitExpr, onUpdateUnit, onUpdateDesc, onDelete, value, error, isUnused, isInvolved, autoFocus, onAutoFocusDone }) {
+export function ParamRow({ name, p, onRename, onUpdateExpr, onCommitExpr, onUpdateUnit, onUpdateDesc, onDelete, value, error, isUnused, isInvolved, autoFocus, onAutoFocusDone, suggestions }) {
   const [editingName, setEditingName] = useState(name);
   const [expanded, setExpanded] = useState(false);
-  const [exprFocused, setExprFocused] = useState(false);
-  // Local draft for the expression — see notes on the textarea below.
-  // While the textarea is focused, every keystroke updates this draft only;
-  // the scene-level expression is left alone until the user commits via
-  // Enter or blur. Geometry therefore doesn't re-solve on every keystroke.
-  const [exprDraft, setExprDraft] = useState(p.expr ?? '');
   const inputRef = useRef(null);
-  const exprTextareaRef = useRef(null);
   useEffect(() => { setEditingName(name); }, [name]);
-  // Keep the draft in sync with props when the textarea isn't focused, so
-  // sibling edits / undo-redo / programmatic changes flow through.
-  useEffect(() => {
-    if (!exprFocused) setExprDraft(p.expr ?? '');
-  }, [p.expr, exprFocused]);
   useEffect(() => {
     if (autoFocus && inputRef.current) {
       inputRef.current.focus();
@@ -37,21 +26,15 @@ export function ParamRow({ name, p, onRename, onUpdateExpr, onCommitExpr, onUpda
       onAutoFocusDone?.();
     }
   }, [autoFocus, onAutoFocusDone]);
-  // Auto-grow the expression textarea while it's focused so the user can see
-  // the full expression. Resets to single-line height when unfocused.
-  // Tracks the draft (not p.expr) so the height keeps up with what the user
-  // is currently typing, even though p.expr only changes at commit time.
-  useEffect(() => {
-    const el = exprTextareaRef.current;
-    if (!el || !exprFocused) return;
-    el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
-  }, [exprFocused, exprDraft]);
 
-  const commitExprDraft = () => {
-    if (exprDraft !== (p.expr ?? '')) onUpdateExpr(exprDraft);
-    onCommitExpr?.(exprDraft);
-    setExprFocused(false);
+  // Commit handler: update the param's stored expression, then run the
+  // auto-create-missing-identifiers pass (which decides what default
+  // value to use for any new param). Same pattern as before — we just
+  // route both calls through DeferredTextInput's onCommit so we get
+  // identifier-prefix autocomplete for free.
+  const onExprCommit = (v) => {
+    if (v !== (p.expr ?? '')) onUpdateExpr(v);
+    onCommitExpr?.(v);
   };
 
   // Visual treatment when this parameter is involved in the selected
@@ -94,37 +77,24 @@ export function ParamRow({ name, p, onRename, onUpdateExpr, onCommitExpr, onUpda
             spellCheck={false}
           />
         </HoverTooltip>
-        {/* Expression field: SAME <textarea> across collapsed and focused
-            states so the cursor isn't lost when the user clicks (React
-            would remount if the element type swapped between input and
-            textarea, with the new one taking cursor position 0). The
-            textarea's row count and styling shift on focus to give the
-            same visual feel as before: single-line, narrow border when
-            collapsed; full-width, cyan border, auto-grown when active. */}
-        <textarea
-          ref={exprTextareaRef}
-          value={exprFocused ? exprDraft : (p.expr ?? '')}
-          onChange={(e) => setExprDraft(e.target.value)}
-          onFocus={() => {
-            setExprDraft(p.expr ?? '');
-            setExprFocused(true);
-          }}
-          onBlur={commitExprDraft}
-          onKeyDown={(e) => {
-            // Enter commits and exits (unless Shift held — newline).
-            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); e.target.blur(); }
-            // Escape reverts the draft and exits without committing.
-            if (e.key === 'Escape') { setExprDraft(p.expr ?? ''); e.target.blur(); }
-          }}
-          className={`flex-1 min-w-0 bg-slate-900 border rounded text-[11px] font-mono outline-none resize-none whitespace-pre-wrap break-words leading-tight ${
-            exprFocused
-              ? `px-1.5 py-1 ${error ? 'border-red-500 text-red-300' : 'border-cyan-400 text-white'}`
-              : `px-1.5 py-0.5 ${error ? 'border-red-500 text-red-300' : 'border-slate-700 text-white hover:border-slate-500'}`
-          }`}
-          spellCheck={false}
-          rows={1}
-          title={exprTooltip}
-        />
+        {/* Expression field with draft-then-commit semantics + optional
+            identifier-prefix autocomplete (when the caller passes
+            `suggestions`). DeferredTextInput auto-grows to a textarea on
+            focus so long expressions stay fully visible without taking
+            up vertical room on every other row. */}
+        <div className="flex-1 min-w-0">
+          <DeferredTextInput
+            autoGrow
+            value={p.expr ?? ''}
+            onCommit={onExprCommit}
+            suggestions={suggestions}
+            className={`w-full bg-slate-900 border rounded text-[11px] font-mono outline-none whitespace-pre-wrap break-words leading-tight px-1.5 py-0.5 ${
+              error ? 'border-red-500 text-red-300' : 'border-slate-700 text-white hover:border-slate-500 focus:border-cyan-400 focus:py-1'
+            }`}
+            spellCheck={false}
+            title={exprTooltip}
+          />
+        </div>
         <span className="text-[9px] text-slate-500 font-mono w-14 text-right truncate" title={error || ''}>
           {error ? <AlertTriangle size={10} className="text-red-400 inline" /> : `${value?.toFixed?.(2) ?? value}${p.unit ? p.unit : ''}`}
         </span>

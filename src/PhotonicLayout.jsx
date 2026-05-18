@@ -419,6 +419,16 @@ export default function App() {
   const selected = scene.components.find(c => c.id === selectedId);
   const selectedHasIncoming = selected ? scene.snaps.some(s => s.to.compId === selected.id) : false;
 
+  // Workspace parameter names — fed into expression-bearing inputs as
+  // autocomplete suggestions. Excludes synthetic `_comp_<id>_*` keys
+  // (those are solver internals; the user shouldn't type them) and the
+  // RESERVED_IDENTS (math functions / constants — typing `sin(`
+  // already works without the field suggesting it).
+  const paramNames = useMemo(() => {
+    const names = Object.keys(scene.params || {}).filter(n => !n.startsWith('_comp_'));
+    return names.sort();
+  }, [scene.params]);
+
   // Undo checkpointing: only commit a snapshot to history once per ~2s of continuous edits.
   // pendingCheckpointRef holds the scene as it was at the start of the current edit window.
   // checkpointTimerRef holds the timer that will commit it.
@@ -4507,7 +4517,16 @@ export default function App() {
                     onAutoFocusDone={() => setNewParamFocus(null)}
                     onRename={(o, n) => renameParam(o, n)}
                     onUpdateExpr={(v) => updateParam(name, { expr: v })}
-                    onCommitExpr={(v) => commitExpr(v, '0', scene.params[name]?.unit || 'µm', `Auto-created (used by ${name})`, name)}
+                    onCommitExpr={(v) => {
+                      // Default newly-created idents to the CURRENT
+                      // evaluated value of THIS parameter, so renaming
+                      // `cap_d = 60` to `cap_d = big_cap_d` produces
+                      // `big_cap_d = 60` (keeps the layout intact).
+                      const prevEval = paramValues[name];
+                      const prevDefault = Number.isFinite(prevEval) ? String(prevEval) : '0';
+                      commitExpr(v, prevDefault, scene.params[name]?.unit || 'µm', `Auto-created (used by ${name})`, name);
+                    }}
+                    suggestions={paramNames.filter(n => n !== name)}
                     onUpdateUnit={(v) => updateParam(name, { unit: v })}
                     onUpdateDesc={(v) => updateParam(name, { desc: v })}
                     onDelete={() => deleteParam(name)}
@@ -4945,11 +4964,35 @@ export default function App() {
                     <div className="grid grid-cols-2 gap-1 mt-1">
                       <div>
                         <label className="text-[9px] text-slate-500">dx</label>
-                        <DeferredTextInput autoGrow value={s.dx} onCommit={(v) => updateSnap(s.id, { dx: v })} className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-white outline-none focus:border-cyan-400 whitespace-pre-wrap break-words leading-tight" spellCheck={false} />
+                        <DeferredTextInput
+                          autoGrow
+                          value={s.dx}
+                          suggestions={paramNames}
+                          onCommit={(v) => {
+                            const prevEval = evalExpr(s.dx, paramValues);
+                            const prevDefault = Number.isFinite(prevEval) ? String(prevEval) : '0';
+                            updateSnap(s.id, { dx: v });
+                            commitExpr(v, prevDefault, 'µm', `Snap ${s.id} dx`);
+                          }}
+                          className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-white outline-none focus:border-cyan-400 whitespace-pre-wrap break-words leading-tight"
+                          spellCheck={false}
+                        />
                       </div>
                       <div>
                         <label className="text-[9px] text-slate-500">dy</label>
-                        <DeferredTextInput autoGrow value={s.dy} onCommit={(v) => updateSnap(s.id, { dy: v })} className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-white outline-none focus:border-cyan-400 whitespace-pre-wrap break-words leading-tight" spellCheck={false} />
+                        <DeferredTextInput
+                          autoGrow
+                          value={s.dy}
+                          suggestions={paramNames}
+                          onCommit={(v) => {
+                            const prevEval = evalExpr(s.dy, paramValues);
+                            const prevDefault = Number.isFinite(prevEval) ? String(prevEval) : '0';
+                            updateSnap(s.id, { dy: v });
+                            commitExpr(v, prevDefault, 'µm', `Snap ${s.id} dy`);
+                          }}
+                          className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-white outline-none focus:border-cyan-400 whitespace-pre-wrap break-words leading-tight"
+                          spellCheck={false}
+                        />
                       </div>
                     </div>
                   </div>
@@ -5537,9 +5580,18 @@ export default function App() {
                         <DeferredTextInput
                           autoGrow
                           value={value}
+                          suggestions={paramNames}
                           onCommit={(v) => {
+                            // Snapshot the field's CURRENT evaluated value
+                            // before the commit fires; any new parameter
+                            // auto-created from the new expression should
+                            // default to that value instead of a generic
+                            // '1' — so renaming `5` to `my_w` makes
+                            // `my_w = 5` (preserves the visual size).
+                            const prevEval = evalExpr(value, paramValues);
+                            const prevDefault = Number.isFinite(prevEval) ? String(prevEval) : '1';
                             onChange(v);
-                            commitExpr(v, '1', 'µm', `Auto-created (${selected.id}.${key})`);
+                            commitExpr(v, prevDefault, 'µm', `Auto-created (${selected.id}.${key})`);
                           }}
                           className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-white outline-none focus:border-cyan-400 whitespace-pre-wrap break-words leading-tight"
                           spellCheck={false}
@@ -5617,10 +5669,13 @@ export default function App() {
                                       <DeferredTextInput
                                         autoGrow
                                         value={String(v.dx ?? '0')}
+                                        suggestions={paramNames}
                                         onCommit={(val) => {
+                                          const prevEval = evalExpr(v.dx ?? '0', paramValues);
+                                          const prevDefault = Number.isFinite(prevEval) ? String(prevEval) : '0';
                                           const newVerts = vertSpecs.map((vv, i) => i === idx ? { ...vv, dx: val } : vv);
                                           updateComp(selected.id, { vertices: newVerts });
-                                          commitExpr(val, '0', 'µm', `${selected.id} v${idx}.dx`);
+                                          commitExpr(val, prevDefault, 'µm', `${selected.id} v${idx}.dx`);
                                         }}
                                         className="bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-white outline-none focus:border-cyan-400"
                                         placeholder="dx"
@@ -5628,10 +5683,13 @@ export default function App() {
                                       <DeferredTextInput
                                         autoGrow
                                         value={String(v.dy ?? '0')}
+                                        suggestions={paramNames}
                                         onCommit={(val) => {
+                                          const prevEval = evalExpr(v.dy ?? '0', paramValues);
+                                          const prevDefault = Number.isFinite(prevEval) ? String(prevEval) : '0';
                                           const newVerts = vertSpecs.map((vv, i) => i === idx ? { ...vv, dy: val } : vv);
                                           updateComp(selected.id, { vertices: newVerts });
-                                          commitExpr(val, '0', 'µm', `${selected.id} v${idx}.dy`);
+                                          commitExpr(val, prevDefault, 'µm', `${selected.id} v${idx}.dy`);
                                         }}
                                         className="bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-white outline-none focus:border-cyan-400"
                                         placeholder="dy"
@@ -5710,6 +5768,7 @@ export default function App() {
                   onUpdateComp={(patch) => updateComp(selected.id, patch)}
                   paramValues={paramValues}
                   commitExpr={commitExpr}
+                  suggestions={paramNames}
                 />
 
                 {/* Lumped port: only shown for components on the port

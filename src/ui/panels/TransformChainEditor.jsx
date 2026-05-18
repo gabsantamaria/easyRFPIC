@@ -21,16 +21,23 @@ import { DeferredTextInput } from '../DeferredTextInput.jsx';
 // re-renders — defining it inside TransformRow's body created a fresh
 // function each render, which caused remounts that could wipe the
 // deferred-commit local draft mid-type.
-function ExprField({ label, value, onChange, fieldKey, paramValues, commitExpr }) {
+function ExprField({ label, value, onChange, fieldKey, paramValues, commitExpr, suggestions }) {
   return (
     <div className="flex-1 min-w-0">
       <label className="text-[9px] uppercase tracking-wider text-slate-500">{label}</label>
       <DeferredTextInput
         autoGrow
         value={value ?? ''}
+        suggestions={suggestions}
         onCommit={(v) => {
+          // Default newly-auto-created identifiers in this field to
+          // the current evaluated value, so renaming a literal `5` to
+          // a new var `my_pitch` produces `my_pitch = 5` and the
+          // visible geometry doesn't jump.
+          const prevEval = evalExpr(value, paramValues);
+          const prevDefault = Number.isFinite(prevEval) ? String(prevEval) : '0';
           onChange(v);
-          commitExpr && commitExpr(v, '0', 'µm', `Auto-created (transform.${fieldKey})`);
+          commitExpr && commitExpr(v, prevDefault, 'µm', `Auto-created (transform.${fieldKey})`);
         }}
         className="w-full bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-[11px] font-mono text-white outline-none focus:border-cyan-400 whitespace-pre-wrap break-words leading-tight"
         spellCheck={false}
@@ -46,7 +53,7 @@ function ExprField({ label, value, onChange, fieldKey, paramValues, commitExpr }
 function TransformRow({
   transform, idx, total,
   onUpdate, onToggle, onMoveUp, onMoveDown, onDelete,
-  paramValues, commitExpr, isGrouped,
+  paramValues, commitExpr, isGrouped, suggestions,
 }) {
   const t = transform;
   const enabled = t.enabled !== false;
@@ -86,13 +93,13 @@ function TransformRow({
       {/* Per-kind fields */}
       {t.kind === 'displace' && (
         <div className="flex gap-1.5">
-          <ExprField label="dx" value={t.dx} onChange={(v) => onUpdate({ dx: v })} fieldKey="dx" paramValues={paramValues} commitExpr={commitExpr} />
-          <ExprField label="dy" value={t.dy} onChange={(v) => onUpdate({ dy: v })} fieldKey="dy" paramValues={paramValues} commitExpr={commitExpr} />
+          <ExprField label="dx" value={t.dx} onChange={(v) => onUpdate({ dx: v })} fieldKey="dx" paramValues={paramValues} commitExpr={commitExpr} suggestions={suggestions} />
+          <ExprField label="dy" value={t.dy} onChange={(v) => onUpdate({ dy: v })} fieldKey="dy" paramValues={paramValues} commitExpr={commitExpr} suggestions={suggestions} />
         </div>
       )}
       {t.kind === 'rotate' && (
         <div className="flex gap-1.5">
-          <ExprField label="angle (deg)" value={t.angle} onChange={(v) => onUpdate({ angle: v })} fieldKey="angle" paramValues={paramValues} commitExpr={commitExpr} />
+          <ExprField label="angle (deg)" value={t.angle} onChange={(v) => onUpdate({ angle: v })} fieldKey="angle" paramValues={paramValues} commitExpr={commitExpr} suggestions={suggestions} />
           <div className="flex-1 min-w-0">
             <label className="text-[9px] uppercase tracking-wider text-slate-500">pivot</label>
             <select
@@ -121,9 +128,9 @@ function TransformRow({
       {t.kind === 'repeat' && (
         <div className="space-y-1">
           <div className="flex gap-1.5">
-            <ExprField label="N copies" value={t.n} onChange={(v) => onUpdate({ n: v })} fieldKey="n" paramValues={paramValues} commitExpr={commitExpr} />
-            <ExprField label="dx" value={t.dx} onChange={(v) => onUpdate({ dx: v })} fieldKey="dx" paramValues={paramValues} commitExpr={commitExpr} />
-            <ExprField label="dy" value={t.dy} onChange={(v) => onUpdate({ dy: v })} fieldKey="dy" paramValues={paramValues} commitExpr={commitExpr} />
+            <ExprField label="N copies" value={t.n} onChange={(v) => onUpdate({ n: v })} fieldKey="n" paramValues={paramValues} commitExpr={commitExpr} suggestions={suggestions} />
+            <ExprField label="dx" value={t.dx} onChange={(v) => onUpdate({ dx: v })} fieldKey="dx" paramValues={paramValues} commitExpr={commitExpr} suggestions={suggestions} />
+            <ExprField label="dy" value={t.dy} onChange={(v) => onUpdate({ dy: v })} fieldKey="dy" paramValues={paramValues} commitExpr={commitExpr} suggestions={suggestions} />
           </div>
           <label className="flex items-center gap-1 text-[10px] text-slate-400">
             <input type="checkbox" checked={t.includeOriginal !== false} onChange={(e) => onUpdate({ includeOriginal: e.target.checked })} />
@@ -172,7 +179,7 @@ function TransformRow({
                 <option value="y">y (mirror along ±y)</option>
               </select>
             </div>
-            <ExprField label="offset (to mirror line)" value={t.offset} onChange={(v) => onUpdate({ offset: v })} fieldKey="offset" paramValues={paramValues} commitExpr={commitExpr} />
+            <ExprField label="offset (to mirror line)" value={t.offset} onChange={(v) => onUpdate({ offset: v })} fieldKey="offset" paramValues={paramValues} commitExpr={commitExpr} suggestions={suggestions} />
           </div>
           <p className="text-[9px] text-slate-500 leading-snug">
             Mirror line sits at <span className="font-mono">offset</span> from source center; duplicate lands at <span className="font-mono">+2·offset</span>.
@@ -187,7 +194,7 @@ function TransformRow({
   );
 }
 
-export function TransformChainEditor({ component, onUpdateComp, paramValues, commitExpr }) {
+export function TransformChainEditor({ component, onUpdateComp, paramValues, commitExpr, suggestions }) {
   const transforms = component.transforms || [];
   const isGrouped = !!component.group;
   const setTransforms = (next) => onUpdateComp({ transforms: next });
@@ -277,6 +284,7 @@ export function TransformChainEditor({ component, onUpdateComp, paramValues, com
               paramValues={paramValues}
               commitExpr={commitExpr}
               isGrouped={isGrouped}
+              suggestions={suggestions}
             />
           ))}
         </div>
