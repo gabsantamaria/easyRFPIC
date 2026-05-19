@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { Plus, Trash2, RotateCcw, RotateCw, Download, Upload, Lock, Unlock, FlipHorizontal, FlipVertical, Layers, Settings2, Box, Square, Link2, Link2Off, Grid3x3, AlertTriangle, Maximize2, Save, FileText, FilePlus, Copy, FolderTree, BookOpen, Package, Boxes, Pencil, Ruler, Eye, EyeOff, ArrowDown, ArrowUp, Move, Repeat, Combine, Minus, X as XIcon, Circle, Hexagon, Radio } from 'lucide-react';
+import { Plus, Trash2, RotateCcw, RotateCw, Download, Upload, Lock, Unlock, FlipHorizontal, FlipVertical, Layers, Settings2, Box, Square, Link2, Link2Off, Grid3x3, AlertTriangle, Maximize2, Save, FileText, FilePlus, Copy, FolderTree, BookOpen, Package, Boxes, Pencil, Ruler, Eye, EyeOff, ArrowDown, ArrowUp, Move, Repeat, Combine, Minus, X as XIcon, Circle, Hexagon, Radio, HelpCircle } from 'lucide-react';
 import { eulerBend180Centerline, buildRacetrackCenterline, offsetCenterlineToBand } from './geometry/racetrack.js';
 import { tokenizeIdents, tokenizeComponentExprs, resolveParams, evalExpr, RESERVED_IDENTS } from './scene/params.js';
 import { ANCHORS, parseAnchor, anchorLocal, anchorWorld } from './scene/anchors.js';
@@ -65,6 +65,7 @@ import {
 import { HoverTooltip } from './ui/HoverTooltip.jsx';
 import { DropdownMenu } from './ui/DropdownMenu.jsx';
 import { ModalDialog } from './ui/ModalDialog.jsx';
+import { HelpTutorial } from './ui/HelpTutorial.jsx';
 import { WorkspaceCreateRow, LibraryItemRow } from './ui/panels/LibraryPanelRows.jsx';
 import { ParamRow } from './ui/panels/ParamRow.jsx';
 import { SnapAxisField, SnapConnectionRow } from './ui/panels/SnapConnectionRow.jsx';
@@ -142,6 +143,8 @@ export default function App() {
   // every parameter-bound width/height/snap-offset. Variable name is the
   // primary label; numeric value is appended only if there's room.
   const [showDimensions, setShowDimensions] = useState(false);
+  // Help / tutorial overlay. Opened from the "?" button in the header.
+  const [showHelp, setShowHelp] = useState(false);
   // Add-component mode. Set by clicking a shape button in the toolbar.
   // Drives a drag-to-create interaction in Canvas: the next click+drag
   // creates a new shape of the chosen kind on the chosen layer.
@@ -4373,6 +4376,17 @@ export default function App() {
               )}
               <span className="text-[9px] opacity-70 normal-case font-normal">▾</span>
             </button>
+            {/* Help / tutorial — opens an animated walkthrough of the
+                app's main capabilities (stack, drawing, params, snap,
+                ops, save/versions, library, dimensions, export). */}
+            <button
+              onClick={() => setShowHelp(true)}
+              className="flex items-center justify-center w-7 h-7 rounded-full border border-slate-600 hover:bg-slate-800 hover:border-cyan-500 text-slate-400 hover:text-cyan-300 ml-1"
+              title="Show me how this works (animated tutorial)"
+              aria-label="Help"
+            >
+              <HelpCircle size={14} />
+            </button>
           </div>
         </div>
         {/* Row 2 — secondary tools and view controls */}
@@ -6399,6 +6413,9 @@ export default function App() {
           onClose={() => setContextMenu(null)}
         />
       )}
+
+      {/* Animated help tutorial overlay */}
+      <HelpTutorial open={showHelp} onClose={() => setShowHelp(false)} />
 
       {/* Modal dialog (confirm/prompt/alert) */}
       <ModalDialog
