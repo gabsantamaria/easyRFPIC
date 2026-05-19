@@ -38,7 +38,11 @@ import { instanceChainOffsetExpr, chainOwnerForInstance } from '../scene/instanc
 //   Fixed anchor like 'NW': (-w/2, +h/2)
 //   Edge anchor 'T:0.3':    ((0.3 - 0.5) * w, +h/2)
 // Component w/h are themselves expression strings (e.g., 'cap_W' or '20').
-function computeParametricPositions(components, snaps, paramValues = {}) {
+// Exported so other exporters (e.g. gdsfactory.js) can reuse the same
+// snap-chain → parametric-position resolution. The output expressions
+// use HFSS-style "um" unit suffixes on bare numerics; callers that
+// target a different language post-process those out.
+export function computeParametricPositions(components, snaps, paramValues = {}) {
   const byId = Object.fromEntries(components.map(c => [c.id, c]));
   // Helper: produce an expression for the X/Y offset of an anchor on a comp
   // whose width-expression is wExpr and height-expression is hExpr.

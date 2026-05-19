@@ -10,6 +10,7 @@ import { solveLayout, applyMirrors, resolveBooleanBboxes } from './scene/solver.
 import { generateGDS } from './export/gds.js';
 import { generatePyAEDT } from './export/pyaedt.js';
 import { generateHfssNative } from './export/hfss-native.js';
+import { generateGdsfactory } from './export/gdsfactory.js';
 import { defaultStack, normalizeScene, makeDefaultScene, makeBlankScene, paramsForStack, migrateStackCoplanarGroups } from './scene/schema.js';
 import {
   BASE_DESIGN_PREFIX, BASE_LIB_PREFIX, BASE_ARCHIVE_PREFIX, WORKSPACE_KEY,
@@ -4041,6 +4042,12 @@ export default function App() {
     const suffix = appendToActive ? '_hfss_append' : '_hfss';
     return handleExport(`${designFileBase()}${suffix}.py`, generateHfssNative, { appendToActive });
   };
+  // gdsfactory export: a parametric @gf.cell function. The design name
+  // is passed through so the function and output .gds share the design
+  // filename instead of defaulting to "layout".
+  const handleExportGdsfactory = () => {
+    return handleExport(`${designFileBase()}_gf.py`, generateGdsfactory, { designName: designFileBase() });
+  };
   const handleExportGDS = async () => {
     let bytes;
     try {
@@ -4340,6 +4347,7 @@ export default function App() {
                 { label: 'pyAEDT', icon: Download, onClick: handleExportPyAEDT, hint: 'layout.py', title: 'External Python with pyaedt installed (run from terminal: python layout.py)' },
                 { label: 'HFSS native', icon: Download, onClick: handleExportHfssNative, hint: 'layout_hfss.py', title: 'Native HFSS COM script (run inside HFSS via Tools -> Run Script)' },
                 { label: 'GDS-II', icon: Download, onClick: handleExportGDS, hint: 'layout.gds', title: 'Binary GDS-II layout. Layers: waveguide=1, conductors=10+ (one per stack layer), port=100. Coords in µm with 1nm database resolution.' },
+                { label: 'gdsfactory', icon: Download, onClick: handleExportGdsfactory, hint: 'layout_gf.py', title: 'Parametric @gf.cell Python function. Every scene parameter becomes a kwarg with its current value as default — call the function with overrides to sweep params in Python.' },
               ]}
             />
             <div className="w-px h-5 bg-slate-700 mx-1" />
