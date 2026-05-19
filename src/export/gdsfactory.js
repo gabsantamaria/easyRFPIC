@@ -28,7 +28,7 @@
 // Layer mapping mirrors the GDS-II exporter (waveguide=1, conductors
 // 10+, port=100) so the generated script's output GDS is layer-
 // compatible with the binary GDS export.
-import { evalExpr } from '../scene/params.js';
+import { evalExpr, tokenizeIdents, RESERVED_IDENTS } from '../scene/params.js';
 import { solveLayout, applyMirrors } from '../scene/solver.js';
 import { expandTransforms } from '../scene/transforms.js';
 import { shapeInstanceToRing } from '../geometry/rings.js';
@@ -129,20 +129,103 @@ export function generateGdsfactory(scene, paramValues, options = {}) {
   };
 
   // ── Build the parameter signature ──────────────────────────────────
-  // Every scene param becomes a kwarg with default = current value.
-  // Params keep their original name when it's already valid Python;
-  // otherwise we sanitize and emit a mapping comment.
+  // Every scene param becomes a kwarg, but params split into two groups:
+  //
+  //   LEAVES — expression is a bare number (no references to other
+  //            params). Default = current numeric value. Overriding
+  //            in Python plugs in the new number directly.
+  //
+  //   DERIVED — expression references one or more other params (e.g.
+  //             cap_d = 2*R + 5). Default = None; a recompute block
+  //             at the top of the function body re-evaluates the
+  //             expression from whatever the caller supplied. So:
+  //               derived(R=200)        → cap_d auto-recomputes to 405
+  //               derived(R=200, cap_d=400) → cap_d stays at 400
+  //
+  // Derived params are emitted in topological order (dependencies
+  // first) so each `if x is None: x = ...` line can reference the
+  // already-resolved values. A cycle in the param graph (rare; the
+  // scene-side resolver flags these as errors) falls back to the
+  // numeric value with an inline comment.
   const paramEntries = Object.entries(params || {});
-  const paramArgList = [];   // ["w_wg: float = 1.0", "h_wg: float = 0.3", ...]
   const paramSanitized = {}; // original name → sanitized name (for body references)
+  const paramExpr = {};      // original name → expression string
+  const paramValue = {};     // original name → resolved numeric value
+  const paramDeps = {};      // original name → array of OTHER-param names it references
+  const paramDesc = {};      // original name → desc string (may be empty)
+
   for (const [name, p] of paramEntries) {
-    const v = (paramValues && Object.prototype.hasOwnProperty.call(paramValues, name))
-      ? paramValues[name]
-      : evalExpr(p.expr ?? p.value ?? '0', paramValues || {});
     const safe = pyIdent(name);
     paramSanitized[name] = safe;
-    const desc = p.desc ? `  # ${p.desc}` : '';
-    paramArgList.push(`    ${safe}: float = ${pyFloat(v || 0)},${desc}`);
+    paramDesc[name] = p.desc || '';
+    const exprStr = String(p.expr ?? p.value ?? '0');
+    paramExpr[name] = exprStr;
+    const v = (paramValues && Object.prototype.hasOwnProperty.call(paramValues, name))
+      ? paramValues[name]
+      : evalExpr(exprStr, paramValues || {});
+    paramValue[name] = Number.isFinite(v) ? v : 0;
+    // Dependencies: identifiers in expr that are OTHER params (i.e.
+    // exist in scene.params and aren't this param itself, math
+    // functions, or unit suffixes).
+    const idents = tokenizeIdents(exprStr);
+    const deps = [];
+    for (const id of idents) {
+      if (id === name) continue;
+      if (RESERVED_IDENTS.has(id)) continue;
+      if (Object.prototype.hasOwnProperty.call(params, id)) deps.push(id);
+    }
+    paramDeps[name] = Array.from(new Set(deps));
+  }
+
+  // Topological sort over derived params (Kahn's algorithm). Leaves
+  // stay in declaration order; derived ones get sorted so deps come
+  // before dependents. Cycles fall back to declaration order with
+  // the cycled params emitted as leaves (with a "# circular" note).
+  const topoOrder = []; // names in dependency-respecting order
+  const inCycle = new Set();
+  {
+    const remaining = new Set(paramEntries.map(([n]) => n));
+    const inDeg = {};
+    for (const n of remaining) {
+      inDeg[n] = (paramDeps[n] || []).filter(d => remaining.has(d)).length;
+    }
+    // Process zero-indegree params first, in declaration order for stability.
+    while (remaining.size > 0) {
+      const next = paramEntries.map(([n]) => n).find(n => remaining.has(n) && inDeg[n] === 0);
+      if (!next) {
+        // Cycle: drain the rest in declaration order and flag them.
+        for (const [n] of paramEntries) {
+          if (remaining.has(n)) { inCycle.add(n); topoOrder.push(n); remaining.delete(n); }
+        }
+        break;
+      }
+      topoOrder.push(next);
+      remaining.delete(next);
+      for (const n of remaining) {
+        if ((paramDeps[n] || []).includes(next)) inDeg[n] = Math.max(0, (inDeg[n] || 0) - 1);
+      }
+    }
+  }
+
+  // Now emit the kwarg list and the recompute block.
+  const paramArgList = [];     // ["    R: float = 100.0,  # bend radius", …]
+  const recomputeLines = [];   // body lines, e.g. "    if cap_d is None: cap_d = 2*R + 5"
+  for (const name of topoOrder) {
+    const safe = paramSanitized[name];
+    const deps = paramDeps[name] || [];
+    const isLeaf = deps.length === 0 || inCycle.has(name);
+    const descSuffix = paramDesc[name] ? `  # ${paramDesc[name]}` : '';
+    if (isLeaf) {
+      const cycleNote = inCycle.has(name) ? '  # NOTE: param graph cycle — emitted as numeric leaf' : '';
+      paramArgList.push(`    ${safe}: float = ${pyFloat(paramValue[name])},${descSuffix}${cycleNote}`);
+    } else {
+      // Derived: default None, recompute from expression at runtime.
+      const depList = deps.map(d => paramSanitized[d]).join(', ');
+      const sig = `    ${safe}: float = None,${descSuffix || `  # derived from: ${depList}`}`;
+      paramArgList.push(sig);
+      const pyExprStr = exprToPython(paramExpr[name]);
+      recomputeLines.push(`    if ${safe} is None: ${safe} = ${pyExprStr}`);
+    }
   }
 
   // ── Header ──────────────────────────────────────────────────────────
@@ -236,6 +319,13 @@ export function generateGdsfactory(scene, paramValues, options = {}) {
     code += `\n    Parameters:\n${describedParams.join('\n')}\n`;
   }
   code += `    """\n`;
+  // Recompute block: derived params with default=None re-evaluate
+  // their expressions from whatever the caller supplied. Topologically
+  // ordered so dependencies are resolved first.
+  if (recomputeLines.length > 0) {
+    code += `    # ── Derived parameters (auto-recompute when not overridden) ──\n`;
+    code += recomputeLines.join('\n') + '\n\n';
+  }
   code += `    c = gf.Component()\n\n`;
 
   // Helper for the body: emit one polygon for one instance of a
