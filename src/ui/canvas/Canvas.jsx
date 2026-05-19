@@ -2092,6 +2092,31 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             rotation: 0,
           };
         };
+        // Same as instOf but returns ALL instances of the primitive. Used
+        // by the boolean rendering paths (renderInterior / renderOutline /
+        // collectBbox) so a primitive operand with its own repeat / mirror
+        // / duplicate_mirror chain contributes every clone to the boolean
+        // — not just the base. Without this, subtract(A, B) where A has
+        // repeat=3 only subtracts B from A's first instance; the other
+        // three clones silently disappear from the boolean's mask.
+        //
+        // When an override is present (boolean has its OWN transforms),
+        // it currently provides a single synthetic instance per operand
+        // — the operand's own multi-instance chain inside that transformed
+        // boolean copy is not yet expanded. Returning a 1-element array
+        // here keeps that path's behavior unchanged. The combined case
+        // (boolean has transforms AND operand has transforms) would need
+        // a Cartesian-product expansion which is intentionally deferred.
+        const instancesOf = (c, overrides) => {
+          if (overrides && overrides[c.id]) return [overrides[c.id]];
+          const list = instancesByCompId[c.id];
+          if (list && list.length > 0) return list;
+          return [{
+            compId: c.id, idx: 0, cx: c.cx, cy: c.cy,
+            w: evalExpr(c.w, paramValues), h: evalExpr(c.h, paramValues),
+            rotation: 0,
+          }];
+        };
         // Path "d" string for an instance, dispatching on the instance's
         // shape kind via shapeInstanceToRing (circles/ellipses/polygons
         // become tessellated rings; rectangles use their 4-corner ring).
@@ -2106,10 +2131,16 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             if (c.kind === 'boolean') {
               for (const id of (c.operandIds || [])) visit(compById[id]);
             } else {
-              const ring = shapeInstanceToRing(instOf(c, overrides));
-              for (const [x, y] of ring) {
-                if (x < out.minX) out.minX = x; if (x > out.maxX) out.maxX = x;
-                if (y < out.minY) out.minY = y; if (y > out.maxY) out.maxY = y;
+              // Walk every instance the primitive produces (repeat /
+              // mirror / duplicate_mirror clones included) so the mask
+              // viewport is large enough to cover the full extent of
+              // the operand inside a boolean.
+              for (const inst of instancesOf(c, overrides)) {
+                const ring = shapeInstanceToRing(inst);
+                for (const [x, y] of ring) {
+                  if (x < out.minX) out.minX = x; if (x > out.maxX) out.maxX = x;
+                  if (y < out.minY) out.minY = y; if (y > out.maxY) out.maxY = y;
+                }
               }
             }
           };
@@ -2205,15 +2236,38 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           if (!comp) return null;
           const isPrim = comp.kind !== 'boolean';
           if (isPrim) {
-            const inst = instOf(comp, overrides);
+            // Emit one <path> per transform-instance of this primitive.
+            // For a comp without transforms this is a single path (no
+            // change from the previous behavior). For a comp with
+            // repeat / mirror / duplicate_mirror this paints every
+            // clone — critical when the primitive is an operand of a
+            // boolean: without iterating, only the base instance ends
+            // up in the mask, and all clones silently disappear from
+            // the boolean's rendered footprint.
+            const insts = instancesOf(comp, overrides);
+            if (insts.length === 1) {
+              return (
+                <path
+                  key={keyBase}
+                  d={rectPathD(insts[0])}
+                  fill={fillColor}
+                  {...(dataCompId ? { 'data-comp-id': dataCompId } : {})}
+                  {...(parentClip ? { clipPath: parentClip } : {})}
+                />
+              );
+            }
             return (
-              <path
-                key={keyBase}
-                d={rectPathD(inst)}
-                fill={fillColor}
-                {...(dataCompId ? { 'data-comp-id': dataCompId } : {})}
-                {...(parentClip ? { clipPath: parentClip } : {})}
-              />
+              <g key={keyBase}>
+                {insts.map((inst, i) => (
+                  <path
+                    key={`${keyBase}-i${i}`}
+                    d={rectPathD(inst)}
+                    fill={fillColor}
+                    {...(dataCompId ? { 'data-comp-id': dataCompId } : {})}
+                    {...(parentClip ? { clipPath: parentClip } : {})}
+                  />
+                ))}
+              </g>
             );
           }
           // Derived boolean operand. Resolve children components.
@@ -2297,12 +2351,29 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           if (!comp) return null;
           const isPrim = comp.kind !== 'boolean';
           if (isPrim) {
-            const inst = instOf(comp, overrides);
+            // Stroke every instance of this primitive — matches the
+            // multi-instance rendering done by renderInterior so the
+            // visible outline traces every clone, not just the base.
+            const insts = instancesOf(comp, overrides);
+            if (insts.length === 1) {
+              return (
+                <path key={keyBase} d={rectPathD(insts[0])}
+                  fill="none" stroke={strokeColor} strokeWidth={strokeW}
+                  pointerEvents="none"
+                />
+              );
+            }
             return (
-              <path key={keyBase} d={rectPathD(inst)}
-                fill="none" stroke={strokeColor} strokeWidth={strokeW}
-                pointerEvents="none"
-              />
+              <g key={keyBase}>
+                {insts.map((inst, i) => (
+                  <path
+                    key={`${keyBase}-i${i}`}
+                    d={rectPathD(inst)}
+                    fill="none" stroke={strokeColor} strokeWidth={strokeW}
+                    pointerEvents="none"
+                  />
+                ))}
+              </g>
             );
           }
           const ops = (comp.operandIds || []).map(id => compById[id]).filter(Boolean);

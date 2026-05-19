@@ -2552,6 +2552,23 @@ except Exception as e:
     return activePartIds;
   };
 
+  // Map: component id → list of final HFSS part names after that
+  // component's per-primitive transform chain has been emitted. Used by
+  // the boolean section below so a Subtract on an operand that owns a
+  // repeat / mirror / duplicate_mirror knows ALL of the surviving part
+  // names — not just the base, which would silently leave the clones
+  // un-subtracted. Pre-populated with the base name(s) for every non-
+  // boolean component so operands without their own transforms map to
+  // a single-element list.
+  const finalPartIdsByCompId = new Map();
+  for (const c of solved) {
+    if (c.kind === 'boolean') continue;
+    const id = c.id.replace(/[^A-Za-z0-9_]/g, '_');
+    const partIds = (c.layer === 'waveguide' && (c.kind || 'rect') === 'rect')
+      ? [`${id}_wg_slab`, `${id}_wg_rib`]
+      : [id];
+    finalPartIdsByCompId.set(c.id, partIds);
+  }
   for (const c of solved) {
     if (c.kind === 'boolean') continue; // booleans handled below
     if (!c.transforms || c.transforms.length === 0) continue;
@@ -2577,6 +2594,7 @@ except Exception as e:
       ppForChain ? ppForChain.wExpr : undefined,
       ppForChain ? ppForChain.hExpr : undefined,
     );
+    finalPartIdsByCompId.set(c.id, finalPartIds);
     // If this part is a zero-thickness conductor sheet, every clone the
     // transform chain creates also needs the impedance boundary. Extend
     // the sheet list with the new names so the boundary block at the end
@@ -2606,71 +2624,104 @@ except Exception as e:
         code += `# Skipped ${b.id} (${b.op}) — fewer than 2 valid operands\n`;
         continue;
       }
-      const safeIds = ids.map(id => id.replace(/[^A-Za-z0-9_]/g, '_'));
       const safeBoolId = b.id.replace(/[^A-Za-z0-9_]/g, '_');
+      // For each operand, the full list of HFSS part names AFTER its
+      // own per-primitive transform chain ran. An operand with a
+      // repeat(n=3) contributes 4 entries; an operand without
+      // transforms contributes 1. Critical: without this, a multi-
+      // instance operand would only see its base name in the
+      // boolean op, and the clones would survive un-subtracted.
+      const partListsByOp = ids.map(opId => finalPartIdsByCompId.get(opId) || [opId.replace(/[^A-Za-z0-9_]/g, '_')]);
+      const baseParts = partListsByOp[0];
+      const toolParts = partListsByOp.slice(1).flat();
+      const baseSel = baseParts.join(',');
+      const toolSel = toolParts.join(',');
+      const allSel = [...baseParts, ...toolParts].join(',');
+      // The post-boolean surviving parts depend on the op:
+      //   - union / intersect: HFSS collapses the selection into ONE
+      //     part with operand[0]'s first instance name.
+      //   - subtract / punch: each blank survives with its original
+      //     name (HFSS Subtract modifies blanks in place).
+      // The boolean's own transforms (and any later references) act on
+      // this list. For a single surviving part we can rename to the
+      // boolean's id; for multiple parts we skip the rename and target
+      // every part directly.
+      let resultParts;
       if (b.op === 'union') {
         code += `try:
     oEditor.Unite(
-        ["NAME:Selections", "Selections:=", "${safeIds.join(',')}"],
+        ["NAME:Selections", "Selections:=", "${allSel}"],
         ["NAME:UniteParameters", "KeepOriginals:=", False])
 except Exception as e:
     oDesktop.AddMessage("", "", 1, "Union failed: " + str(e))
 `;
+        // Unite keeps the first selection's name → one surviving part.
+        resultParts = [baseParts[0]];
       } else if (b.op === 'intersect') {
         code += `try:
     oEditor.Intersect(
-        ["NAME:Selections", "Selections:=", "${safeIds.join(',')}"],
+        ["NAME:Selections", "Selections:=", "${allSel}"],
         ["NAME:IntersectParameters", "KeepOriginals:=", False])
 except Exception as e:
     oDesktop.AddMessage("", "", 1, "Intersect failed: " + str(e))
 `;
+        resultParts = [baseParts[0]];
       } else if (b.op === 'subtract') {
         code += `try:
     oEditor.Subtract(
-        ["NAME:Selections", "Blank Parts:=", "${safeIds[0]}", "Tool Parts:=", "${safeIds.slice(1).join(',')}"],
+        ["NAME:Selections", "Blank Parts:=", "${baseSel}", "Tool Parts:=", "${toolSel}"],
         ["NAME:SubtractParameters", "KeepOriginals:=", False])
 except Exception as e:
     oDesktop.AddMessage("", "", 1, "Subtract failed: " + str(e))
 `;
+        // Subtract on N blanks leaves N parts (one hole-shape per
+        // blank). Their names are unchanged.
+        resultParts = baseParts.slice();
       } else if (b.op === 'punch') {
         // The clones are consumed by the subtract; the original tools
         // live outside the boolean and were emitted as their own
         // primitives earlier — so KeepOriginals=False is correct here.
         code += `try:
     oEditor.Subtract(
-        ["NAME:Selections", "Blank Parts:=", "${safeIds[0]}", "Tool Parts:=", "${safeIds.slice(1).join(',')}"],
+        ["NAME:Selections", "Blank Parts:=", "${baseSel}", "Tool Parts:=", "${toolSel}"],
         ["NAME:SubtractParameters", "KeepOriginals:=", False])
 except Exception as e:
     oDesktop.AddMessage("", "", 1, "Punch failed: " + str(e))
 `;
+        resultParts = baseParts.slice();
       }
-      // Rename the surviving part (first operand's name) to the boolean's id
-      // so post-boolean transforms target the right name. In append mode
-      // any leftover object with the target boolean's name from a previous
-      // run must be removed first — otherwise the rename fails because
-      // the name is taken (HFSS would auto-suffix to something like
-      // 'punch2_1' and break downstream references).
-      if (safeIds[0] !== safeBoolId) {
+      // Rename only when ONE part survives. Multi-part subtract results
+      // would all need the same id which HFSS rejects — leave them under
+      // their original cloned names (e.g. A, A_1, A_2, …); the boolean's
+      // own transforms (next) operate on the whole list.
+      const renameTarget = resultParts && resultParts.length === 1 ? resultParts[0] : null;
+      if (renameTarget && renameTarget !== safeBoolId) {
         code += `_delete_geom_if_exists("${safeBoolId}")
 try:
     oEditor.ChangeProperty(
         ["NAME:AllTabs",
          ["NAME:Geometry3DAttributeTab",
-          ["NAME:PropServers", "${safeIds[0]}"],
+          ["NAME:PropServers", "${renameTarget}"],
           ["NAME:ChangedProps",
            ["NAME:Name", "Value:=", "${safeBoolId}"]]]])
 except Exception as e:
-    oDesktop.AddMessage("", "", 1, "Rename failed for ${safeIds[0]}: " + str(e))
+    oDesktop.AddMessage("", "", 1, "Rename failed for ${renameTarget}: " + str(e))
 `;
+        resultParts = [safeBoolId];
+      } else if (!renameTarget && resultParts && resultParts.length > 1) {
+        code += `# NOTE: ${safeBoolId} — operand "${baseParts[0]}" had a transform chain producing ${resultParts.length} parts (${resultParts.join(', ')}). HFSS Subtract on multiple blanks leaves them under their original names; the boolean id ${safeBoolId} is not assigned to any single part. Reference these names directly if you need them in boundaries / setups.\n`;
       }
       // Apply the boolean component's own transforms as a chain of
       // HFSS history operations using the same helper as primitives.
+      // For a multi-part result the chain acts on every part in lockstep
+      // (emitTransformChainHfss already supports passing a list — see
+      // the rib-waveguide [_wg_slab, _wg_rib] precedent).
       const solvedB = solved.find(sc => sc.id === b.id) || b;
       const bW = typeof solvedB.w === 'number' ? solvedB.w : evalExpr(solvedB.w, paramValues);
       const bH = typeof solvedB.h === 'number' ? solvedB.h : evalExpr(solvedB.h, paramValues);
       const ppForBool = parametricPosForExport[b.id];
       const finalBoolIds = emitTransformChainHfss(
-        b.transforms || [], [safeBoolId], solvedB.cx, solvedB.cy, bW || 0, bH || 0, b.group,
+        b.transforms || [], resultParts || [safeBoolId], solvedB.cx, solvedB.cy, bW || 0, bH || 0, b.group,
         ppForBool ? ppForBool.cxExpr : undefined,
         ppForBool ? ppForBool.cyExpr : undefined,
         ppForBool ? ppForBool.wExpr : undefined,
@@ -2704,16 +2755,33 @@ except Exception as e:
         const idx = list.indexOf(name);
         if (idx >= 0) list.splice(idx, 1);
       };
-      renameInList(emittedElecNames, safeIds[0], safeBoolId);
-      renameInList(emittedWgNames, safeIds[0], safeBoolId);
-      // Zero-thickness conductor sheets — boolean ops produce a sheet
-      // result when the operands are sheets, so the boolean's id
-      // inherits the sheet treatment (and the impedance boundary).
-      renameInList(zeroThicknessSheets, safeIds[0], safeBoolId);
+      // operand[0]'s base id — needed to either rename it to safeBoolId
+      // (single-part result) or just track it through unchanged (multi-
+      // part subtract result with the original base name still alive).
+      const base0Id = ids[0].replace(/[^A-Za-z0-9_]/g, '_');
+      const toolIds = ids.slice(1).map(id => id.replace(/[^A-Za-z0-9_]/g, '_'));
+      if (renameTarget) {
+        // Single-part result; original behavior — rename operand[0]'s
+        // base id to the boolean's id everywhere it appears in the
+        // downstream-tracking lists.
+        renameInList(emittedElecNames, base0Id, safeBoolId);
+        renameInList(emittedWgNames, base0Id, safeBoolId);
+        // Zero-thickness conductor sheets — boolean ops produce a sheet
+        // result when the operands are sheets, so the boolean's id
+        // inherits the sheet treatment (and the impedance boundary).
+        renameInList(zeroThicknessSheets, base0Id, safeBoolId);
+      }
+      // (Multi-part subtract result: operand[0]'s base name still exists
+      // as one of the surviving parts, so we leave the lists alone for
+      // operand[0]. The clones aren't in emittedElecNames anyway — they
+      // were created by emitTransformChainHfss but not pushed there; that
+      // pre-existing limitation affects cladding subtract for any
+      // transformed electrode and is independent of this bug fix.)
+
       // Non-first operands are consumed by the subtract (and clones in
       // a punch are consumed too — they're the "Tool Parts" of the
       // KeepOriginals=False subtract).
-      for (const oldId of safeIds.slice(1)) {
+      for (const oldId of toolIds) {
         removeFromList(emittedElecNames, oldId);
         removeFromList(emittedWgNames, oldId);
         removeFromList(zeroThicknessSheets, oldId);

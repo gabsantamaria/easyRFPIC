@@ -105,6 +105,11 @@ def build_wg(name, cx, cy, w, h):
 
 # ===== Components =====
 `;
+  // Per-component final HFSS part-name list AFTER the inline transform
+  // chain ran. Populated at the end of each iteration (operands without
+  // transforms map to [baseId]). Read by the boolean section below so a
+  // Subtract / Unite / Intersect lists every clone, not just the base.
+  const partIdsByCompId = new Map();
   for (const c of solved) {
     // Skip boolean components — they're handled in the booleans block below.
     if (c.kind === 'boolean') continue;
@@ -346,6 +351,12 @@ def build_wg(name, cx, cy, w, h):
       }
       // Unknown kinds silently ignored.
     }
+    // Record this primitive's final HFSS part-name list so the boolean
+    // section below can list every clone as a Blank Part (Subtract) or
+    // a Tool Part. Without this, an operand with a repeat on it would
+    // only contribute its base name to the boolean op and the clones
+    // would survive un-subtracted / un-united.
+    partIdsByCompId.set(c.id, partTargets.slice());
   }
 
   // Helper: emit a chain of pyAEDT history operations corresponding to the
@@ -499,27 +510,56 @@ def build_wg(name, cx, cy, w, h):
     for (const b of booleanComps) {
       const ids = (b.operandIds || []).filter(id => solved.some(c => c.id === id));
       if (ids.length < 2) continue;
-      const idsStr = ids.map(id => `"${ascii(id)}"`).join(', ');
-      if (b.op === 'union') code += `hfss.modeler.unite([${idsStr}])\n`;
-      else if (b.op === 'intersect') code += `hfss.modeler.intersect([${idsStr}], keep_originals=False)\n`;
-      else if (b.op === 'subtract') code += `hfss.modeler.subtract(blank_list=["${ascii(ids[0])}"], tool_list=[${ids.slice(1).map(id => `"${ascii(id)}"`).join(', ')}], keep_originals=False)\n`;
-      // Punch: the tool clones are themselves consumed by the subtract.
-      // The original tools live outside the boolean as fully independent
-      // primitives — they're emitted on their own. So in HFSS we want
-      // KeepOriginals=False here (the clones are gone after the op).
-      else if (b.op === 'punch') code += `hfss.modeler.subtract(blank_list=["${ascii(ids[0])}"], tool_list=[${ids.slice(1).map(id => `"${ascii(id)}"`).join(', ')}], keep_originals=False)\n`;
-      // Rename the surviving part (the first operand) to the boolean's id
-      // so subsequent transforms target the correct name.
-      if (ids[0] !== b.id) {
-        code += `try:\n    hfss.modeler[${JSON.stringify(ascii(ids[0]))}].name = ${JSON.stringify(ascii(b.id))}\nexcept Exception:\n    pass\n`;
+      // For each operand, the full list of HFSS part names after its
+      // inline transform chain ran (operand with repeat n=3 → 4 names).
+      // Falls back to the bare id when partIdsByCompId has no entry
+      // (operand was skipped during the primitive loop — degenerate).
+      const partListsByOp = ids.map(opId =>
+        partIdsByCompId.get(opId) || [ascii(opId)]
+      );
+      const baseParts = partListsByOp[0];
+      const toolParts = partListsByOp.slice(1).flat();
+      const allPartsStr = [...baseParts, ...toolParts].map(p => `"${p}"`).join(', ');
+      const baseStr = baseParts.map(p => `"${p}"`).join(', ');
+      const toolStr = toolParts.map(p => `"${p}"`).join(', ');
+      let resultParts;
+      if (b.op === 'union') {
+        code += `hfss.modeler.unite([${allPartsStr}])\n`;
+        // Unite collapses N selections into one with the first's name.
+        resultParts = [baseParts[0]];
+      } else if (b.op === 'intersect') {
+        code += `hfss.modeler.intersect([${allPartsStr}], keep_originals=False)\n`;
+        resultParts = [baseParts[0]];
+      } else if (b.op === 'subtract') {
+        code += `hfss.modeler.subtract(blank_list=[${baseStr}], tool_list=[${toolStr}], keep_originals=False)\n`;
+        // Subtract on N blanks → N parts (each blank gets the tools
+        // subtracted; original names preserved).
+        resultParts = baseParts.slice();
+      } else if (b.op === 'punch') {
+        // Punch: the tool clones are themselves consumed by the subtract.
+        // The original tools live outside the boolean as fully independent
+        // primitives — they're emitted on their own. So we want
+        // keep_originals=False here (the clones are gone after the op).
+        code += `hfss.modeler.subtract(blank_list=[${baseStr}], tool_list=[${toolStr}], keep_originals=False)\n`;
+        resultParts = baseParts.slice();
+      }
+      // Rename only when ONE part survives. Multi-blank subtract leaves
+      // every blank under its original cloned name; renaming them all to
+      // one boolean id would collide.
+      const renameTarget = resultParts && resultParts.length === 1 ? resultParts[0] : null;
+      if (renameTarget && renameTarget !== ascii(b.id)) {
+        code += `try:\n    hfss.modeler[${JSON.stringify(renameTarget)}].name = ${JSON.stringify(ascii(b.id))}\nexcept Exception:\n    pass\n`;
+        resultParts = [ascii(b.id)];
+      } else if (!renameTarget && resultParts && resultParts.length > 1) {
+        code += `# NOTE: ${ascii(b.id)} (${b.op}) — operand "${ids[0]}" had a transform chain producing ${resultParts.length} parts (${resultParts.join(', ')}). pyAEDT Subtract on multiple blanks leaves them under their cloned names; boolean id ${ascii(b.id)} is not assigned to a single part.\n`;
       }
       // Apply the boolean component's OWN transforms as chain history.
-      // The boolean's stored cx/cy is the bbox center post-solve; we use
-      // it as the starting position for the chain.
+      // Targets the full result-parts list so a transform applied to the
+      // boolean as a whole moves every surviving piece together.
       const solvedB = solved.find(c => c.id === b.id) || b;
       const bW = typeof solvedB.w === 'number' ? solvedB.w : evalExpr(solvedB.w, paramValues);
       const bH = typeof solvedB.h === 'number' ? solvedB.h : evalExpr(solvedB.h, paramValues);
-      emitTransformChainPyAEDT(b.transforms || [], [ascii(b.id)], solvedB.cx, solvedB.cy, bW || 0, bH || 0, b.group);
+      emitTransformChainPyAEDT(b.transforms || [], resultParts || [ascii(b.id)], solvedB.cx, solvedB.cy, bW || 0, bH || 0, b.group);
     }
   }
 

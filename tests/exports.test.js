@@ -204,6 +204,42 @@ describe('generateHfssNative', () => {
     }
   });
 
+  it('Subtract on an operand with repeat lists ALL clones as Blank Parts', () => {
+    // Regression: a primitive with a repeat transform that becomes the
+    // base operand of a Subtract used to lose its clones — only the
+    // base instance got the tool subtracted; A_1, A_2, A_3 survived
+    // un-cut. Fix: the Subtract's "Blank Parts" enumerates every name
+    // the per-primitive transform chain produced, so HFSS's multi-
+    // blank Subtract applies the tool to each clone independently.
+    const condLayerId = scene.stack.find(l => l.role === 'conductor')?.id;
+    const minimal = {
+      params: { h_cond: { expr: '0.5' }, h_wg: { expr: '0.3' } },
+      components: [
+        { id: 'A', kind: 'rect', layer: 'electrode', conductorLayerId: condLayerId,
+          cx: 0, cy: 0, w: 20, h: 20, cutouts: [],
+          transforms: [{ id: 't1', kind: 'repeat', enabled: true, n: 3, dx: 30, dy: 0, includeOriginal: true }],
+          consumedBy: 'BOOL' },
+        { id: 'B', kind: 'rect', layer: 'electrode', conductorLayerId: condLayerId,
+          cx: 30, cy: 0, w: 10, h: 10, cutouts: [], transforms: [], consumedBy: 'BOOL' },
+        { id: 'BOOL', kind: 'boolean', op: 'subtract', operandIds: ['A', 'B'],
+          layer: 'electrode', conductorLayerId: condLayerId,
+          cx: 0, cy: 0, w: '0', h: '0', cutouts: [], transforms: [] },
+      ],
+      snaps: [], mirrors: [], groups: [], booleans: [],
+      stack: scene.stack, stackName: scene.stackName, simSetup: scene.simSetup,
+    };
+    const { values: pv } = resolveParams(minimal.params);
+    const out = generateHfssNative(minimal, pv);
+    // Find the Subtract call and inspect its Blank Parts list.
+    const subMatch = out.match(/oEditor\.Subtract\(\s*\["NAME:Selections",\s*"Blank Parts:=",\s*"([^"]+)",\s*"Tool Parts:=",\s*"([^"]+)"/);
+    expect(subMatch).not.toBeNull();
+    const blanks = subMatch[1].split(',');
+    const tools = subMatch[2].split(',');
+    // Operand A has repeat n=3 + includeOriginal → 4 instances total.
+    expect(blanks).toEqual(['A', 'A_1', 'A_2', 'A_3']);
+    expect(tools).toEqual(['B']);
+  });
+
   it('predicts HFSS collision-resolved clone names for repeat→mirror→repeat', () => {
     // After DuplicateAlongLine creates `m_1..m_9`, DuplicateMirror must
     // NOT name the new clone of `m` as `m_1` (collision). HFSS picks the
