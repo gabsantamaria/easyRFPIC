@@ -31,6 +31,8 @@ function buildHarness(scene) {
     instancesByCompId[i.compId].push(i);
   }
   const compById = Object.fromEntries(scene.components.map(c => [c.id, c]));
+  const solvedById = Object.fromEntries(solved.map(c => [c.id, c]));
+  const solvedBase = (c) => { const s = solvedById[c.id]; return { cx: s ? s.cx : c.cx, cy: s ? s.cy : c.cy }; };
   let defCounter = 0;
   const nextDefId = (p) => `${p}-${defCounter++}`;
   const instOf = (c, overrides) => {
@@ -72,9 +74,10 @@ function buildHarness(scene) {
     if (comp.kind === 'boolean') {
       const bInsts = instancesOf(comp, overrides);
       if (bInsts.length > 1) {
+        const base = solvedBase(comp);
         return React.createElement(React.Fragment, { key: keyBase },
           bInsts.map((bInst, ii) => {
-            const perInst = buildBoolInstanceOverrides(comp, bInst, comp.cx, comp.cy);
+            const perInst = buildBoolInstanceOverrides(comp, bInst, base.cx, base.cy);
             const merged = { ...(overrides || {}), ...(perInst || {}), [comp.id]: bInst };
             return renderInterior(comp, fillColor, `${keyBase}-bi${ii}`, dataCompId, parentClip, merged);
           })
@@ -267,5 +270,46 @@ describe('Boolean rendering with multi-instance operand', () => {
     expect(whites).toBe(6);
     expect(blacks).toBe(1);
     expect(fills).toBe(6);
+  });
+
+  it('uses SOLVED boolean cx/cy as the per-instance shift origin', () => {
+    // The bug: scene-side boolean.cx ≠ solved boolean.cx because
+    // resolveBooleanBboxes rewrites cx/cy to the bbox CENTER of the
+    // operands. If renderInterior used scene cx, the per-instance
+    // shift would collapse to (solved - scene) for the base copy
+    // and to (solved - scene + transformOffset) for clones — moving
+    // the whole boolean to the wrong place. The fix looks up
+    // solvedById[comp.id].cx so shift = transformOffset purely.
+    //
+    // Construct a scene where boolean.cx is stored at a value that
+    // does NOT match the bbox center, exercising the gap explicitly.
+    const scene = {
+      params: {},
+      components: [
+        // A at cx=0, B at cx=20 → bbox center = 10. Scene U.cx = 999
+        // (deliberately wrong, but resolveBooleanBboxes will overwrite).
+        { id: 'A', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: 8, h: 8, cutouts: [], transforms: [], consumedBy: 'U' },
+        { id: 'B', kind: 'rect', layer: 'electrode', cx: 20, cy: 0, w: 8, h: 8, cutouts: [], transforms: [], consumedBy: 'U' },
+        { id: 'U', kind: 'boolean', op: 'union', operandIds: ['A', 'B'],
+          layer: 'electrode', cx: 999, cy: 999, w: '0', h: '0', cutouts: [],
+          transforms: [{ id: 't1', kind: 'repeat', enabled: true, n: 1, dx: 50, dy: 0, includeOriginal: true }],
+          consumedBy: 'D' },
+        { id: 'C', kind: 'rect', layer: 'electrode', cx: 10, cy: 0, w: 4, h: 4, cutouts: [], transforms: [], consumedBy: 'D' },
+        { id: 'D', kind: 'boolean', op: 'subtract', operandIds: ['U', 'C'], layer: 'electrode', cx: 0, cy: 0, w: '0', h: '0', cutouts: [], transforms: [] },
+      ],
+      snaps: [], mirrors: [],
+    };
+    const { renderInterior, compById } = buildHarness(scene);
+    const out = renderInterior(compById.D, '#daa520', 'fill', 'D', undefined, null);
+    const html = renderToStaticMarkup(out);
+    // Mask underlay: instance 0 = A at cx=0 (path starts M -4), B at cx=20 (M 16).
+    // Instance 1 = A shifted by +50 → cx=50 (M 46), B at cx=70 (M 66).
+    // If the bug were present, instance 0 would be at (scene.U.cx - solved.U.cx)
+    // = (999 - 10) = +989 offset, putting A at cx ≈ 989 (M 985). Verify NOT.
+    expect(html).toContain('M -4');   // A instance 0
+    expect(html).toContain('M 16');   // B instance 0
+    expect(html).toContain('M 46');   // A instance 1 (shifted by 50)
+    expect(html).toContain('M 66');   // B instance 1
+    expect(html).not.toMatch(/M 9\d\d/); // No path at the bad-bug coordinates
   });
 });

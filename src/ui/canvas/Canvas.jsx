@@ -2073,6 +2073,21 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         const nextDefId = (prefix) => `${prefix}-${_defIdCounter++}`;
         // Map id → component for recursive resolution.
         const compById = Object.fromEntries(scene.components.map(c => [c.id, c]));
+        // Same map but keyed onto the SOLVED components, which carry the
+        // post-snap cx/cy AND the post-resolveBooleanBboxes bbox-center
+        // for booleans (whose stored scene cx/cy is just a placeholder).
+        // Critical for buildBoolInstanceOverrides: the boolean's base
+        // position must come from the solved record, not the scene one,
+        // or the per-instance shift collapses to (solved - scene) instead
+        // of zero for the base copy.
+        const solvedById = Object.fromEntries(solved.map(c => [c.id, c]));
+        // Helper: the right base cx/cy to pass to buildBoolInstanceOverrides
+        // for a given component. Falls back to scene cx/cy if the solved
+        // record is missing (defensive — shouldn't happen in practice).
+        const solvedBase = (c) => {
+          const s = solvedById[c.id];
+          return { cx: s ? s.cx : c.cx, cy: s ? s.cy : c.cy };
+        };
         // Resolve a component's first rendered instance (post-transform).
         // The optional `overrides` map lets callers force a specific
         // instance for one or more compIds — used by the boolean renderer
@@ -2140,8 +2155,9 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             if (!c) return;
             if (c.kind === 'boolean') {
               const bInsts = instancesOf(c, currentOverrides);
+              const base = solvedBase(c);
               for (const bInst of bInsts) {
-                const perInst = buildBoolInstanceOverrides(c, bInst, c.cx, c.cy);
+                const perInst = buildBoolInstanceOverrides(c, bInst, base.cx, base.cy);
                 const merged = { ...(currentOverrides || {}), ...(perInst || {}), [c.id]: bInst };
                 for (const id of (c.operandIds || [])) visit(compById[id], merged);
               }
@@ -2258,10 +2274,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           if (comp.kind === 'boolean') {
             const bInsts = instancesOf(comp, overrides);
             if (bInsts.length > 1) {
+              const base = solvedBase(comp);
               return (
                 <React.Fragment key={keyBase}>
                   {bInsts.map((bInst, ii) => {
-                    const perInst = buildBoolInstanceOverrides(comp, bInst, comp.cx, comp.cy);
+                    const perInst = buildBoolInstanceOverrides(comp, bInst, base.cx, base.cy);
                     const merged = { ...(overrides || {}), ...(perInst || {}), [comp.id]: bInst };
                     return renderInterior(comp, fillColor, `${keyBase}-bi${ii}`, dataCompId, parentClip, merged);
                   })}
@@ -2393,10 +2410,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           if (comp.kind === 'boolean') {
             const bInsts = instancesOf(comp, overrides);
             if (bInsts.length > 1) {
+              const base = solvedBase(comp);
               return (
                 <React.Fragment key={keyBase}>
                   {bInsts.map((bInst, ii) => {
-                    const perInst = buildBoolInstanceOverrides(comp, bInst, comp.cx, comp.cy);
+                    const perInst = buildBoolInstanceOverrides(comp, bInst, base.cx, base.cy);
                     const merged = { ...(overrides || {}), ...(perInst || {}), [comp.id]: bInst };
                     return renderOutline(comp, strokeColor, strokeW, `${keyBase}-bi${ii}`, merged);
                   })}
