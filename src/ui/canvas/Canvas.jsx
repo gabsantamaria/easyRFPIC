@@ -2126,16 +2126,27 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // through derived operands so the bbox covers the entire object.
         const collectBbox = (comp, overrides) => {
           const out = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
-          const visit = (c) => {
+          // Visit a component, expanding both PRIMITIVE transform clones
+          // (handled at the leaf) and BOOLEAN transform clones (handled
+          // by iterating the boolean's own instances and recursing with
+          // per-instance override maps). Without the boolean iteration,
+          // a nested boolean operand carrying a repeat transform (e.g. a
+          // union-of-rects with a repeat=3 transform, then subtracted by
+          // another shape) would contribute only its base instance to
+          // the mask viewport — the repeated clones would fall outside
+          // the mask and visually disappear from the parent boolean's
+          // compositing.
+          const visit = (c, currentOverrides) => {
             if (!c) return;
             if (c.kind === 'boolean') {
-              for (const id of (c.operandIds || [])) visit(compById[id]);
+              const bInsts = instancesOf(c, currentOverrides);
+              for (const bInst of bInsts) {
+                const perInst = buildBoolInstanceOverrides(c, bInst, c.cx, c.cy);
+                const merged = { ...(currentOverrides || {}), ...(perInst || {}), [c.id]: bInst };
+                for (const id of (c.operandIds || [])) visit(compById[id], merged);
+              }
             } else {
-              // Walk every instance the primitive produces (repeat /
-              // mirror / duplicate_mirror clones included) so the mask
-              // viewport is large enough to cover the full extent of
-              // the operand inside a boolean.
-              for (const inst of instancesOf(c, overrides)) {
+              for (const inst of instancesOf(c, currentOverrides)) {
                 const ring = shapeInstanceToRing(inst);
                 for (const [x, y] of ring) {
                   if (x < out.minX) out.minX = x; if (x > out.maxX) out.maxX = x;
@@ -2144,7 +2155,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
               }
             }
           };
-          visit(comp);
+          visit(comp, overrides);
           return out;
         };
 
@@ -2234,6 +2245,30 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // `depth` is for unique key generation; bumped per nesting level.
         const renderInterior = (comp, fillColor, keyBase, dataCompId, parentClip, overrides) => {
           if (!comp) return null;
+          // Multi-instance boolean operand (e.g. a union with a repeat
+          // transform that's now the base of a subtract): iterate the
+          // boolean's own transform instances and recurse per-instance
+          // with overrides that shift each descendant into position.
+          // The recursive call sees overrides[comp.id] set, so its
+          // instancesOf returns a single-element array → falls through
+          // to the op dispatch below without re-iterating. The cluster
+          // path also sets overrides[b.id], so top-level booleans
+          // don't double-iterate (the cluster handles per-instance
+          // styling like the 85% opacity for non-base copies).
+          if (comp.kind === 'boolean') {
+            const bInsts = instancesOf(comp, overrides);
+            if (bInsts.length > 1) {
+              return (
+                <React.Fragment key={keyBase}>
+                  {bInsts.map((bInst, ii) => {
+                    const perInst = buildBoolInstanceOverrides(comp, bInst, comp.cx, comp.cy);
+                    const merged = { ...(overrides || {}), ...(perInst || {}), [comp.id]: bInst };
+                    return renderInterior(comp, fillColor, `${keyBase}-bi${ii}`, dataCompId, parentClip, merged);
+                  })}
+                </React.Fragment>
+              );
+            }
+          }
           const isPrim = comp.kind !== 'boolean';
           if (isPrim) {
             // Emit one <path> per transform-instance of this primitive.
@@ -2351,6 +2386,24 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // contribute. Recursive — operands can themselves be booleans.
         const renderOutline = (comp, strokeColor, strokeW, keyBase, overrides) => {
           if (!comp) return null;
+          // Mirror the renderInterior logic: iterate a multi-instance
+          // boolean's own transform copies so each copy's outline is
+          // emitted (with descendants shifted by the per-instance
+          // override map). See renderInterior for the full rationale.
+          if (comp.kind === 'boolean') {
+            const bInsts = instancesOf(comp, overrides);
+            if (bInsts.length > 1) {
+              return (
+                <React.Fragment key={keyBase}>
+                  {bInsts.map((bInst, ii) => {
+                    const perInst = buildBoolInstanceOverrides(comp, bInst, comp.cx, comp.cy);
+                    const merged = { ...(overrides || {}), ...(perInst || {}), [comp.id]: bInst };
+                    return renderOutline(comp, strokeColor, strokeW, `${keyBase}-bi${ii}`, merged);
+                  })}
+                </React.Fragment>
+              );
+            }
+          }
           const isPrim = comp.kind !== 'boolean';
           if (isPrim) {
             // Stroke every instance of this primitive — matches the
@@ -2530,7 +2583,13 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           // No transforms ⇒ single entry equal to the base.
           const insts = instancesByCompId[b.id] || [{ cx: baseCx, cy: baseCy, idx: 0, rotation: 0 }];
           const elements = insts.map((inst, i) => {
-            const overrides = buildBoolInstanceOverrides(b, inst, baseCx, baseCy);
+            const baseOv = buildBoolInstanceOverrides(b, inst, baseCx, baseCy);
+            // Always include [b.id]: inst so the recursive renderInterior /
+            // renderOutline see this boolean as "single instance" and skip
+            // their own iteration — otherwise the cluster's per-instance
+            // loop and renderInterior's boolean-iteration loop would
+            // multiply, producing N × N copies.
+            const overrides = { ...(baseOv || {}), [b.id]: inst };
             const isBase = i === 0;
             return (
               <g
