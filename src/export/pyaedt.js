@@ -366,7 +366,7 @@ def build_wg(name, cx, cy, w, h):
   // world coords (numeric); these are mutated as transforms accumulate so
   // rotation-about-current-center math stays correct.
   const emitTransformChainPyAEDT = (transforms, partIds, startCx, startCy, baseW, baseH, componentGroup) => {
-    if (!transforms || transforms.length === 0) return;
+    if (!transforms || transforms.length === 0) return partIds.slice();
     let curCx = startCx, curCy = startCy, curRotation = 0;
     // Active selection list. Grows after each `repeat` or
     // `duplicate_mirror` so any subsequent op affects the whole cluster.
@@ -490,6 +490,10 @@ def build_wg(name, cx, cy, w, h):
         else curCy += offsetNum;
       }
     }
+    // Return the final selection list so callers can record the post-
+    // transform part names (e.g. so a downstream boolean that consumes
+    // this object knows about all the clones, not just the base).
+    return activePartIds;
   };
 
   // Boolean operations applied AFTER all primitive components are created.
@@ -559,7 +563,12 @@ def build_wg(name, cx, cy, w, h):
       const solvedB = solved.find(c => c.id === b.id) || b;
       const bW = typeof solvedB.w === 'number' ? solvedB.w : evalExpr(solvedB.w, paramValues);
       const bH = typeof solvedB.h === 'number' ? solvedB.h : evalExpr(solvedB.h, paramValues);
-      emitTransformChainPyAEDT(b.transforms || [], resultParts || [ascii(b.id)], solvedB.cx, solvedB.cy, bW || 0, bH || 0, b.group);
+      const finalBoolPartIds = emitTransformChainPyAEDT(b.transforms || [], resultParts || [ascii(b.id)], solvedB.cx, solvedB.cy, bW || 0, bH || 0, b.group);
+      // Record this boolean's POST-transform part list so a downstream
+      // boolean that consumes it picks up every clone. Without this, a
+      // subtract(boolean-with-repeat, …) would only list the base name
+      // in blank_list and the repeat clones would survive un-cut.
+      partIdsByCompId.set(b.id, finalBoolPartIds || resultParts || [ascii(b.id)]);
     }
   }
 

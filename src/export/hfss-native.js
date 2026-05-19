@@ -2727,6 +2727,13 @@ except Exception as e:
         ppForBool ? ppForBool.wExpr : undefined,
         ppForBool ? ppForBool.hExpr : undefined,
       );
+      // Record this boolean's POST-transform part list so a downstream
+      // boolean that consumes it sees every clone. Critical for
+      // subtract(boolean-with-repeat, ...) — without this, only the
+      // base name lands in the Blank Parts list and the repeat clones
+      // survive untouched, so the user's "hole" only appears in the
+      // first cell of an N-cell meander.
+      finalPartIdsByCompId.set(b.id, finalBoolIds);
       // If the boolean result is a zero-thickness conductor sheet (any
       // operand sat on a zero-thickness conductor layer ⇒ Unite/Subtract
       // produces a sheet), every clone the transform chain creates also

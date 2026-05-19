@@ -204,6 +204,50 @@ describe('generateHfssNative', () => {
     }
   });
 
+  it('Subtract on a NESTED boolean (union with repeat) lists every clone as Blank Parts', () => {
+    // Nested case: U = union(A, B) carries its own repeat n=2 transform
+    // (so U expands to 3 HFSS parts: U, U_1, U_2 after DuplicateAlongLine).
+    // D = subtract(U, C). Before the fix, the Subtract only listed "U" in
+    // Blank Parts → U_1 and U_2 survived un-cut. Fix: emitTransformChainHfss
+    // returns its final part-id list, which gets recorded in
+    // finalPartIdsByCompId[U]; the downstream D boolean reads from there
+    // and emits all 3 names.
+    const condLayerId = scene.stack.find(l => l.role === 'conductor')?.id;
+    const minimal = {
+      params: { h_cond: { expr: '0.5' }, h_wg: { expr: '0.3' } },
+      components: [
+        { id: 'A', kind: 'rect', layer: 'electrode', conductorLayerId: condLayerId,
+          cx: 0, cy: 0, w: 8, h: 8, cutouts: [], transforms: [], consumedBy: 'U' },
+        { id: 'B', kind: 'rect', layer: 'electrode', conductorLayerId: condLayerId,
+          cx: 12, cy: 0, w: 8, h: 8, cutouts: [], transforms: [], consumedBy: 'U' },
+        { id: 'U', kind: 'boolean', op: 'union', operandIds: ['A', 'B'],
+          layer: 'electrode', conductorLayerId: condLayerId,
+          cx: 6, cy: 0, w: '0', h: '0', cutouts: [],
+          transforms: [{ id: 't1', kind: 'repeat', enabled: true, n: 2, dx: 30, dy: 0, includeOriginal: true }],
+          consumedBy: 'D' },
+        { id: 'C', kind: 'rect', layer: 'electrode', conductorLayerId: condLayerId,
+          cx: 36, cy: 0, w: 4, h: 4, cutouts: [], transforms: [], consumedBy: 'D' },
+        { id: 'D', kind: 'boolean', op: 'subtract', operandIds: ['U', 'C'],
+          layer: 'electrode', conductorLayerId: condLayerId,
+          cx: 0, cy: 0, w: '0', h: '0', cutouts: [], transforms: [] },
+      ],
+      snaps: [], mirrors: [], groups: [], booleans: [],
+      stack: scene.stack, stackName: scene.stackName, simSetup: scene.simSetup,
+    };
+    const { values: pv } = resolveParams(minimal.params);
+    const out = generateHfssNative(minimal, pv);
+    // Find the Subtract emitted for D. There are two booleans (U then
+    // D); D's Subtract is the only one (U's is a Unite).
+    const subMatch = out.match(/oEditor\.Subtract\(\s*\["NAME:Selections",\s*"Blank Parts:=",\s*"([^"]+)",\s*"Tool Parts:=",\s*"([^"]+)"/);
+    expect(subMatch).not.toBeNull();
+    const blanks = subMatch[1].split(',');
+    const tools = subMatch[2].split(',');
+    // U has repeat n=2 includeOriginal=true → DuplicateAlongLine NumClones=3
+    // → U, U_1, U_2.
+    expect(blanks).toEqual(['U', 'U_1', 'U_2']);
+    expect(tools).toEqual(['C']);
+  });
+
   it('Subtract on an operand with repeat lists ALL clones as Blank Parts', () => {
     // Regression: a primitive with a repeat transform that becomes the
     // base operand of a Subtract used to lose its clones — only the
