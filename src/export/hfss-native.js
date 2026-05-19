@@ -1226,8 +1226,9 @@ except:
       // for zero-thickness sheets. The result is a single HFSS object
       // whose width, thickness, path, and vertex bindings ALL re-evaluate
       // under HFSS-side variable sweeps — no hardcoded coordinates.
-      if (shapeKind === 'polyline') {
-        const widthExprUm = exprWithUm(c.width ?? '0');
+      if (shapeKind === 'polyline' || shapeKind === 'polyshape') {
+        const isPolyshape = shapeKind === 'polyshape';
+        const widthExprUm = isPolyshape ? '0um' : exprWithUm(c.width ?? '0');
         // Build the parametric per-vertex (xExpr, yExpr) chain.
         const baseCxExpr = ppShape ? exprWithUm(ppShape.cxExpr) : `(${cx.toFixed(4)})um`;
         const baseCyExpr = ppShape ? exprWithUm(ppShape.cyExpr) : `(${cy.toFixed(4)})um`;
@@ -1341,28 +1342,42 @@ except:
             vertExprs.push({ xExpr: curXExpr, yExpr: curYExpr });
           }
         }
-        if (vertExprs.length < 2) {
-          code += `# ${c.id}: polyline has fewer than 2 vertices — skipped\n`;
+        // polyshape needs ≥ 3 vertices to enclose an interior; polyline
+        // is fine with 2 (a 1-segment trace).
+        const minVerts = isPolyshape ? 3 : 2;
+        if (vertExprs.length < minVerts) {
+          code += `# ${c.id}: ${shapeKind} has fewer than ${minVerts} vertices — skipped\n`;
           continue;
         }
-        // Z policy: solid traces ride the conductor's MID-Z so the
-        // rectangular cross-section straddles ±thickness/2 from the
-        // path; sheets (zero-thickness conductor) lay on the
-        // conductor's zBottom (which equals zTop for zero thickness).
+        // Z policy:
+        //  - polyline solid trace: rides the conductor's MID-Z (path
+        //    runs at mid-Z; Rectangle XSection straddles ±thickness/2)
+        //  - polyline sheet (zero-thickness): runs at zBottom (= zTop)
+        //  - polyshape: ALWAYS at zBottom — it's a flat sheet that we
+        //    SweepAlongVector upward by zSize to extrude into a 3-D
+        //    box (or leave as a 2-D sheet for zero-thickness conductors
+        //    / ports). Mid-Z would put the sweep range OUTSIDE the
+        //    intended layer extent.
         const isSheet = (Math.abs(zSize) < 1e-9);
-        const pathZExpr = isSheet
+        const pathZExpr = (isPolyshape || isSheet)
           ? zBottomExpr
           : `(${zBottomExpr}) + (${zSizeExpr})/2`;
+        // polyshape is always closed; the segments list runs through
+        // every consecutive pair INCLUDING the wrap-around (so the
+        // last point connects back to vertex 0).
+        const polyClosed = isPolyshape || c.closed;
         // Build PLPoint and PLSegment records.
         const ptList = vertExprs.map(v =>
           `["NAME:PLPoint", "X:=", "${v.xExpr}", "Y:=", "${v.yExpr}", "Z:=", "${pathZExpr}"]`
         ).join(',\n          ');
-        const segList = vertExprs.slice(0, c.closed ? vertExprs.length : vertExprs.length - 1).map((_, i) =>
+        const segList = vertExprs.slice(0, polyClosed ? vertExprs.length : vertExprs.length - 1).map((_, i) =>
           `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", ${i}, "NoOfPoints:=", 2]`
         ).join(',\n          ');
         // XSection: Rectangle for solid traces, Line for sheets, None
-        // for stroke-width-zero (degenerate — emits a 1-D curve).
-        const widthEval = evalExpr(c.width ?? '0', paramValues) || 0;
+        // for stroke-width-zero (degenerate — emits a 1-D curve) AND
+        // for polyshape (it's a covered closed polygon, not a swept
+        // path; the IsPolylineCovered=True flag fills it).
+        const widthEval = isPolyshape ? 0 : (evalExpr(c.width ?? '0', paramValues) || 0);
         let xsec;
         if (widthEval <= 0) {
           xsec = `"XSectionType:=", "None",
@@ -1392,15 +1407,18 @@ except:
         const colorPl = isPortSheet ? '(255 100 100)' : '(218 165 32)';
         const transPl = isPortSheet ? '0.5' : '0.0';
         const solveInside = c.layer === 'waveguide' || isPortSheet ? 'True' : 'False';
-        code += `# ${c.id}: polyline trace (parametric vertices + XSection sweep)\n`;
+        const headerLabel = isPolyshape
+          ? `${c.id}: polygon-path (parametric closed 2-D sheet${isSheet ? '' : ' + thicken'})`
+          : `${c.id}: polyline trace (parametric vertices + XSection sweep)`;
+        code += `# ${headerLabel}\n`;
         code += `try:
     _delete_geom_if_exists("${id}")
     oEditor.CreatePolyline(
         ["NAME:PolylineParameters",
          "IsPolylineCovered:=", True,
-         "IsPolylineClosed:=", ${c.closed ? 'True' : 'False'},
+         "IsPolylineClosed:=", ${polyClosed ? 'True' : 'False'},
          ["NAME:PolylinePoints",
-          ${ptList}${c.closed ? `,\n          ["NAME:PLPoint", "X:=", "${vertExprs[0].xExpr}", "Y:=", "${vertExprs[0].yExpr}", "Z:=", "${pathZExpr}"]` : ''}],
+          ${ptList}${polyClosed ? `,\n          ["NAME:PLPoint", "X:=", "${vertExprs[0].xExpr}", "Y:=", "${vertExprs[0].yExpr}", "Z:=", "${pathZExpr}"]` : ''}],
          ["NAME:PolylineSegments",
           ${segList}],
          ["NAME:PolylineXSection",
@@ -1415,10 +1433,32 @@ except:
          "SolveInside:=", ${solveInside}])
 except Exception as e:
     try:
-        oDesktop.AddMessage("", "", 1, "Failed to build polyline ${id}: " + str(e))
+        oDesktop.AddMessage("", "", 1, "Failed to build ${shapeKind} ${id}: " + str(e))
     except:
         pass
 `;
+        // polyshape with non-zero layer thickness: SweepAlongVector to
+        // extrude the flat polygonal sheet upward into a 3-D box. The
+        // sweep distance is the layer's parametric thickness so HFSS
+        // sweeps of h_cond / h_wg / etc. resize the polyshape's height
+        // in lockstep with every other part on that layer.
+        if (isPolyshape && !isSheet) {
+          code += `try:
+    oEditor.SweepAlongVector(
+        ["NAME:Selections", "Selections:=", "${id}", "NewPartsModelFlag:=", "Model"],
+        ["NAME:VectorSweepParameters",
+         "DraftAngle:=", "0deg", "DraftType:=", "Round",
+         "CheckFaceFaceIntersection:=", False,
+         "SweepVectorX:=", "0um",
+         "SweepVectorY:=", "0um",
+         "SweepVectorZ:=", "${zSizeExpr}"])
+except Exception as e:
+    try:
+        oDesktop.AddMessage("", "", 1, "Failed to thicken polyshape ${id}: " + str(e))
+    except:
+        pass
+`;
+        }
         if (c.layer === 'electrode') emittedElecNames.push(id);
         else if (c.layer === 'waveguide') emittedWgNames.push(id);
         else if (c.layer === 'port') emittedPortNames.push(id);

@@ -23,7 +23,7 @@
 import { evalExpr } from './params.js';
 import { anchorLocal, anchorWorld } from './anchors.js';
 import { expandTransforms } from './transforms.js';
-import { resolvePolylineVertices, polylineBbox } from '../geometry/polyline.js';
+import { resolvePolylineVertices, polylineBbox, polyshapeBbox } from '../geometry/polyline.js';
 
 // Each snap is directional: `from` is the parent (already placed), `to` is the
 // child (placed relative to from). Snaps form a DAG. The solver settles
@@ -116,6 +116,16 @@ export function solveLayout(components, snaps, paramValues) {
     p.displayBbox = { cx: bb.cx, cy: bb.cy, w: bb.w, h: bb.h };
     return true;
   };
+  // Same bookkeeping for polyshape (closed 2-D polygon) — uses the
+  // vertex-only AABB with no width padding, since polyshapes are flat
+  // fills, not swept traces.
+  const refreshPolyshapeBbox = (p) => {
+    const verts = resolvePolylineVertices(p, byId, workingPV);
+    const bb = polyshapeBbox(verts);
+    p.w = bb.w; p.h = bb.h;
+    p.displayBbox = { cx: bb.cx, cy: bb.cy, w: bb.w, h: bb.h };
+    return true;
+  };
   const recordPlaced = (c) => {
     // For booleans, refresh bbox-derived cx/cy/w/h from operands BEFORE
     // recording, so the synthetic values reflect the actual geometry that
@@ -124,6 +134,7 @@ export function solveLayout(components, snaps, paramValues) {
     // Polylines: same idea, but bbox comes from vertex positions (plus
     // half-width padding) rather than operand AABBs.
     if (c.kind === 'polyline') refreshPolylineBbox(c);
+    if (c.kind === 'polyshape') refreshPolyshapeBbox(c);
     workingPV[`_comp_${c.id}_cx`] = c.cx;
     workingPV[`_comp_${c.id}_cy`] = c.cy;
     // Resolved width/height too. Span expressions read these so the spanning

@@ -216,10 +216,14 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         if (polylineDraft) setPolylineDraft(null);
         else if (addDrag) setAddDrag(null);
         else setAddMode(null);
-      } else if (addMode?.shape === 'polyline' && polylineDraft) {
-        // Enter / Return: commit polyline as-is. Need at least 2 vertices.
+      } else if ((addMode?.shape === 'polyline' || addMode?.shape === 'polyshape') && polylineDraft) {
+        // Enter / Return: commit polyline / polyshape as-is.
+        //  - polyline needs ≥ 2 vertices (a 1-segment trace is valid)
+        //  - polyshape needs ≥ 3 vertices (a 2-vertex "polygon" has zero
+        //    interior area; we'd silently emit nothing)
         if (e.key === 'Enter' || e.key === 'Return') {
-          if (polylineDraft.vertices.length >= 2) {
+          const minVerts = addMode.shape === 'polyshape' ? 3 : 2;
+          if (polylineDraft.vertices.length >= minVerts) {
             commitPolylineDraft(polylineDraft.vertices);
           }
           setPolylineDraft(null);
@@ -499,13 +503,16 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
   // the rest into either `rel` (with dx/dy expressions for the deltas) or
   // `snap` (component-anchor binding).
   const commitPolylineDraft = (vertices) => {
-    if (!addMode || vertices.length < 2) return;
+    if (!addMode) return;
+    // polyshape needs ≥ 3 vertices (a polygon with < 3 has no interior);
+    // polyline only needs 2 to form a valid 1-segment trace.
+    const minVerts = addMode.shape === 'polyshape' ? 3 : 2;
+    if (vertices.length < minVerts) return;
     if (typeof commitDragAdd !== 'function') return;
-    // Encode the polyline as a special drag-add spec so the existing
-    // commit pipeline handles param creation + selection updates. The
-    // spec carries the full vertex list including snap bindings.
+    // Preserve the user's chosen shape kind in the spec so the parent's
+    // commit pipeline routes to the right component-creation branch.
     commitDragAdd(
-      { ...addMode, shape: 'polyline', vertices },
+      { ...addMode, shape: addMode.shape, vertices },
       vertices[0],
       vertices[vertices.length - 1],
       vertices[0].snap || null,
@@ -692,7 +699,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     // the vertex becomes a `rel` step at the snapped position. (The
     // scene model can't currently encode "bind to instance N"; that's
     // a future enhancement.)
-    if (addMode && addMode.shape === 'polyline') {
+    if (addMode && (addMode.shape === 'polyline' || addMode.shape === 'polyshape')) {
       const wp = screenToWorld(e.clientX, e.clientY);
       const worldThresh = viewport.w * 0.012;
       const snap = findAnchorSnap(wp, worldThresh);
@@ -736,9 +743,22 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // De-duplicate identical-position consecutive clicks (e.g. accidental
         // double-click registers as both this single + dblclick handler).
         const last = polylineDraft.vertices[polylineDraft.vertices.length - 1];
+        const first = polylineDraft.vertices[0];
+        // Polyshape close-by-click: a click on (or very near) the FIRST
+        // vertex finishes the polygon. Standard CAD shortcut.
+        const isPolyshape = addMode.shape === 'polyshape';
+        const minVerts = isPolyshape ? 3 : 2;
+        const closeOnFirst = isPolyshape
+          && polylineDraft.vertices.length >= minVerts
+          && Math.abs(first.x - vx) < 1e-6 && Math.abs(first.y - vy) < 1e-6;
         if (Math.abs(last.x - vx) < 1e-6 && Math.abs(last.y - vy) < 1e-6) {
           // Same as last vertex — treat as commit signal.
-          if (polylineDraft.vertices.length >= 2) commitPolylineDraft(polylineDraft.vertices);
+          if (polylineDraft.vertices.length >= minVerts) commitPolylineDraft(polylineDraft.vertices);
+          setPolylineDraft(null);
+        } else if (closeOnFirst) {
+          // Click landed on vertex 0 — finish the polygon (the polyshape
+          // is implicitly closed; we don't push the duplicate vertex).
+          commitPolylineDraft(polylineDraft.vertices);
           setPolylineDraft(null);
         } else {
           setPolylineDraft({
@@ -1008,7 +1028,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     // the cursorSnap state is used by the canvas overlay to decide whether
     // to draw the halo (we keep it for any instance), but a parametric
     // binding only gets installed at click time for base-instance snaps.
-    if (addMode && addMode.shape === 'polyline' && polylineDraft) {
+    if (addMode && (addMode.shape === 'polyline' || addMode.shape === 'polyshape') && polylineDraft) {
       const wp = screenToWorld(e.clientX, e.clientY);
       const worldThresh = viewport.w * 0.012;
       const snap = findAnchorSnap(wp, worldThresh);
@@ -1026,6 +1046,16 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         if (Math.abs(ddx) > Math.abs(ddy)) cy_ = last.y;
         else                                cx_ = last.x;
       }
+      // Polyshape: when the cursor is near the FIRST vertex AND we have
+      // enough vertices for a polygon (≥ 3), visually snap to the first
+      // vertex so a "close the polygon" click lands exactly on it.
+      if (addMode.shape === 'polyshape' && polylineDraft.vertices.length >= 3) {
+        const first = polylineDraft.vertices[0];
+        const dx = cx_ - first.x, dy = cy_ - first.y;
+        if (Math.sqrt(dx*dx + dy*dy) < worldThresh) {
+          cx_ = first.x; cy_ = first.y;
+        }
+      }
       setPolylineDraft({
         ...polylineDraft,
         cursorPos: { x: cx_, y: cy_ },
@@ -1034,9 +1064,9 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       });
       return;
     }
-    // Polyline pre-draw hover: show snap halo before the first click,
-    // for any instance (base or transform copy).
-    if (addMode && addMode.shape === 'polyline' && !polylineDraft) {
+    // Polyline / polyshape pre-draw hover: show snap halo before the first
+    // click, for any instance (base or transform copy).
+    if (addMode && (addMode.shape === 'polyline' || addMode.shape === 'polyshape') && !polylineDraft) {
       const wp = screenToWorld(e.clientX, e.clientY);
       const worldThresh = viewport.w * 0.012;
       const snap = findAnchorSnap(wp, worldThresh);
@@ -1983,8 +2013,9 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // vertices placed up to the previous single click — the double
         // click's first event already appended a vertex, so we just
         // commit what's there).
-        if (addMode && addMode.shape === 'polyline' && polylineDraft) {
-          if (polylineDraft.vertices.length >= 2) {
+        if (addMode && (addMode.shape === 'polyline' || addMode.shape === 'polyshape') && polylineDraft) {
+          const minVerts = addMode.shape === 'polyshape' ? 3 : 2;
+          if (polylineDraft.vertices.length >= minVerts) {
             commitPolylineDraft(polylineDraft.vertices);
           }
           setPolylineDraft(null);
@@ -2876,6 +2907,25 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   } else {
                     shapeElement = null;
                   }
+                } else if (shapeKind === 'polyshape') {
+                  // Closed polygon path. The resolved vertices form the
+                  // perimeter; we emit a <path> with `Z` so the browser
+                  // fills the interior. Width is irrelevant — the layer
+                  // fill color paints the whole region.
+                  const compById_ps = Object.fromEntries(scene.components.map(cc => [cc.id, cc]));
+                  const verts = resolvePolylineVertices(c, compById_ps, paramValues, transformInstances);
+                  if (verts.length >= 3) {
+                    let d = `M ${verts[0][0]} ${-verts[0][1]}`;
+                    for (let k = 1; k < verts.length; k++) {
+                      d += ` L ${verts[k][0]} ${-verts[k][1]}`;
+                    }
+                    d += ' Z';
+                    shapeElement = (
+                      <path d={d} {...dataCompProps} />
+                    );
+                  } else {
+                    shapeElement = null;
+                  }
                 } else if (shapeKind === 'racetrack') {
                   // Racetrack waveguide: render the centerline as a closed
                   // SVG <path> stroked at the waveguide width. The browser
@@ -3569,25 +3619,50 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           guidelines through any prior vertex the cursor lines up with.
           Snap halos on the cursor mirror ruler-mode styling so the
           gesture feels consistent. */}
-      {addMode && addMode.shape === 'polyline' && polylineDraft && (() => {
+      {addMode && (addMode.shape === 'polyline' || addMode.shape === 'polyshape') && polylineDraft && (() => {
         const verts = polylineDraft.vertices;
         const cur = polylineDraft.cursorPos;
+        const isPolyshape = addMode.shape === 'polyshape';
         const widthExpr = addMode.width || `trace_w`;
-        const widthVal = evalExpr(widthExpr, paramValues) || screen(2);
+        const widthVal = isPolyshape ? 0 : (evalExpr(widthExpr, paramValues) || screen(2));
         // Build the committed path: M v0 → L v1 → ... ; then a preview
         // dashed segment from the last vertex to the cursor.
         let pathD = '';
         for (let i = 0; i < verts.length; i++) {
           pathD += i === 0 ? `M ${verts[i].x} ${-verts[i].y}` : ` L ${verts[i].x} ${-verts[i].y}`;
         }
+        // For polyshape: build the closed preview path including the
+        // cursor as a "phantom last vertex" so the user sees the polygon
+        // it would become if they finished now.
+        let previewClosedD = '';
+        if (isPolyshape && verts.length >= 1) {
+          previewClosedD = pathD;
+          if (cur) previewClosedD += ` L ${cur.x} ${-cur.y}`;
+          if (verts.length >= 2) previewClosedD += ' Z';
+        }
         return (
           <g pointerEvents="none">
-            {/* Committed segments — stroked at the trace width with
-                emerald color so the user can see the actual trace
-                they're building. */}
-            {pathD && (
+            {/* For polyshape: fill the preview polygon with a translucent
+                emerald wash so the user reads it as a closed 2-D region,
+                not a trace. The fill includes the cursor as a phantom
+                vertex so they can preview the polygon's full shape. */}
+            {isPolyshape && previewClosedD && (
+              <path d={previewClosedD} fill="#10b981" fillOpacity={0.18}
+                stroke="#10b981" strokeWidth={screen(1)} strokeOpacity={0.7}
+                strokeLinejoin="miter" strokeDasharray={`${screen(4)},${screen(2)}`} />
+            )}
+            {/* Committed segments — for polyline, stroked at the trace
+                width with emerald color so the user can see the actual
+                trace they're building. For polyshape we already filled
+                above, so skip the wide stroke and just draw a thin
+                solid outline along the committed segments. */}
+            {pathD && !isPolyshape && (
               <path d={pathD} fill="none" stroke="#10b981" strokeWidth={widthVal}
                 strokeOpacity={0.55} strokeLinejoin="miter" strokeLinecap="butt" />
+            )}
+            {isPolyshape && pathD && (
+              <path d={pathD} fill="none" stroke="#10b981" strokeWidth={screen(1.2)}
+                strokeOpacity={0.95} strokeLinejoin="miter" />
             )}
             {/* Vertex dots */}
             {verts.map((v, i) => (
@@ -3598,8 +3673,10 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                 )}
               </g>
             ))}
-            {/* Preview segment from last vertex to cursor */}
-            {verts.length > 0 && cur && (
+            {/* Preview segment from last vertex to cursor. For polyshape
+                the closed-polygon fill above already shows the edges, so
+                we skip this extra trace-style stroke. */}
+            {!isPolyshape && verts.length > 0 && cur && (
               <line
                 x1={verts[verts.length - 1].x}
                 y1={-verts[verts.length - 1].y}

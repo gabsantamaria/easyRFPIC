@@ -13,6 +13,7 @@ import { anchorLocal } from '../scene/anchors.js';
 import { solveLayout, applyMirrors } from '../scene/solver.js';
 import { shapeInstanceToRing } from '../geometry/rings.js';
 import { buildRacetrackCenterline } from '../geometry/racetrack.js';
+import { resolvePolylineVertices } from '../geometry/polyline.js';
 import { detectPortIntegrationLine } from '../scene/lumpedPort.js';
 
 // ----------------------------------------------------------------------
@@ -152,6 +153,20 @@ def build_wg(name, cx, cy, w, h):
       const ring = shapeInstanceToRing(baseInst);
       const zOrigin = c.layer === 'waveguide' ? '0' : 'h_wg';
       const ptsStr = ring.map(([x, y]) => `["${x.toFixed(3)}um", "${y.toFixed(3)}um", "${zOrigin}"]`).join(', ');
+      code += `_${id}_sheet = hfss.modeler.create_polyline(points=[${ptsStr}], cover_surface=True, close_surface=True, name="${id}", material="${layerMat}")\n`;
+      code += `hfss.modeler.thicken_sheet("${id}", thickness="${layerThk}")\n`;
+    } else if (shapeKind === 'polyshape') {
+      // Closed polygon-path: emit as a covered, closed CreatePolyline →
+      // a 2-D filled sheet, then thicken to the layer's thickness for
+      // a 3-D body. Vertices are resolved numerically (snap-bound
+      // vertices follow the target's solved position; rel vertices
+      // chain from the previous one). For parametric vertex tracking
+      // through HFSS sweeps, see the native-COM export.
+      const compById_ps = Object.fromEntries(solved.map(cc => [cc.id, cc]));
+      const verts = resolvePolylineVertices(c, compById_ps, paramValues);
+      const zOrigin = c.layer === 'waveguide' ? '0' : 'h_wg';
+      const ptsStr = verts.map(([x, y]) => `["${x.toFixed(3)}um", "${y.toFixed(3)}um", "${zOrigin}"]`).join(', ');
+      code += `# ${c.id}: polygon-path (closed 2-D polygon → thicken_sheet)\n`;
       code += `_${id}_sheet = hfss.modeler.create_polyline(points=[${ptsStr}], cover_surface=True, close_surface=True, name="${id}", material="${layerMat}")\n`;
       code += `hfss.modeler.thicken_sheet("${id}", thickness="${layerThk}")\n`;
     } else if (shapeKind === 'racetrack') {

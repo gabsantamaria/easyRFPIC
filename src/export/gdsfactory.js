@@ -33,6 +33,7 @@ import { solveLayout, applyMirrors } from '../scene/solver.js';
 import { expandTransforms } from '../scene/transforms.js';
 import { shapeInstanceToRing } from '../geometry/rings.js';
 import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/racetrack.js';
+import { resolvePolylineVertices } from '../geometry/polyline.js';
 import { computeParametricPositions } from './hfss-native.js';
 
 // ── Expression translation: HFSS-style → Python-style ────────────────
@@ -353,6 +354,31 @@ export function generateGdsfactory(scene, paramValues, options = {}) {
       const rExpr = exprToPython(c.r ?? '0');
       const nSides = parseInt(c.n, 10) || 6;
       return `${indent}c.add_polygon(_regpoly_pts(${instCxExpr}, ${instCyExpr}, ${rExpr}, ${nSides}, ${instThetaExpr}), layer=LAYERS["${layerKey}"])\n`;
+    }
+    // Closed polygon-path: resolved vertex list IS the polygon perimeter.
+    // The resolver runs at export time; per-edge dx/dy params land in
+    // the function signature so the polygon's shape sweeps under
+    // Python-side parameter overrides. Snap-bound vertices follow the
+    // target component's solved position (numerically captured here).
+    if (kind === 'polyshape') {
+      const compById_ps = Object.fromEntries(solved.map(cc => [cc.id, cc]));
+      const verts = resolvePolylineVertices(c, compById_ps, paramValues);
+      if (verts.length < 3) {
+        return `${indent}# ${c.id}: polyshape with <3 vertices — skipping\n`;
+      }
+      // Translate each vertex into the instance frame and add the
+      // parametric (cx, cy). For the BASE instance the translation
+      // delta is zero, so this just gives the world-space vertex list.
+      // Per-edge dx_<i> / dy_<i> params would let us emit a fully
+      // parametric polygon — but those params are stored on the
+      // component as expressions, not directly on the vertices array.
+      // Capturing them parametrically would require traversing the
+      // vertex chain and emitting Python recurrences; a future
+      // enhancement.
+      const ptsToPy = (pts) => '[' + pts.map(([x, y]) => `(${pyFloat(x - c.cx)} + (${instCxExpr}), ${pyFloat(y - c.cy)} + (${instCyExpr}))`).join(', ') + ']';
+      let out = `${indent}# ${c.id}: polyshape (closed polygon-path) — ${verts.length} vertices baked numerically\n`;
+      out += `${indent}c.add_polygon(${ptsToPy(verts)}, layer=LAYERS["${layerKey}"])\n`;
+      return out;
     }
     // Racetrack: tessellate at export time, emit as numeric polygon.
     if (kind === 'racetrack') {

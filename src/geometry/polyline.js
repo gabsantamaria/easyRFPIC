@@ -109,6 +109,30 @@ export function resolvePolylineVertices(c, byId, paramValues, transformInstances
   return verts;
 }
 
+// Compute AABB (cx, cy, w, h) from the resolved vertex positions of a
+// closed polygon-path component (`kind: 'polyshape'`). UNLIKE polyline
+// this does NOT add half-width padding — a polyshape is a flat filled
+// region whose visible footprint is exactly the convex hull of its
+// vertices (well, the polygon itself; the AABB is the same either way).
+export function polyshapeBbox(verts) {
+  if (!verts || verts.length === 0) return { cx: 0, cy: 0, w: 0, h: 0 };
+  let minX = +Infinity, maxX = -Infinity, minY = +Infinity, maxY = -Infinity;
+  for (const [x, y] of verts) {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  if (!Number.isFinite(minX)) return { cx: 0, cy: 0, w: 0, h: 0 };
+  return {
+    cx: (minX + maxX) / 2,
+    cy: (minY + maxY) / 2,
+    w:  (maxX - minX),
+    h:  (maxY - minY),
+  };
+}
+
 // Compute AABB (cx, cy, w, h) from a polyline's resolved vertex positions.
 // Adds half-width padding on every face so snap anchors land on the OUTER
 // edge of the swept trace, not the bare centerline.

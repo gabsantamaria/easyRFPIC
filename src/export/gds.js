@@ -18,6 +18,7 @@
 import { evalExpr } from '../scene/params.js';
 import { solveLayout, applyMirrors } from '../scene/solver.js';
 import { expandTransforms } from '../scene/transforms.js';
+import { resolvePolylineVertices } from '../geometry/polyline.js';
 import { shapeInstanceToRing } from '../geometry/rings.js';
 import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/racetrack.js';
 
@@ -170,6 +171,7 @@ export function generateGDS(scene, paramValues) {
   // subtract) are NOT applied here — the operands are emitted as separate
   // polygons on the same layer. A real polygon-clipping pass would require
   // a clipper library; out of scope for now.
+  const byIdSolved = Object.fromEntries(solved.map(c => [c.id, c]));
   for (const c of solved) {
     if (c.kind === 'boolean') continue; // booleans don't have GDS geometry of their own
     const insts = expandTransforms([c], paramValues);
@@ -182,6 +184,34 @@ export function generateGDS(scene, paramValues) {
       // for the instance's rotation and shape (rect/circle/ellipse/polygon).
       // Circles/ellipses are tessellated to CIRCLE_TESSELATION vertices —
       // sufficient for fab-friendly GDS output.
+      // For polyshape we resolve the vertex list inline (the ring builder
+      // expects `_resolvedVerts` on the instance, which expandTransforms
+      // doesn't populate). Apply the instance's rotation about its center
+      // so repeat / mirror / rotate clones land correctly.
+      if (c.kind === 'polyshape') {
+        const verts = resolvePolylineVertices(c, byIdSolved, paramValues);
+        if (verts.length >= 3) {
+          // Translate to instance frame, then apply rotation if any.
+          const dx = inst.cx - c.cx, dy = inst.cy - c.cy;
+          const rad = (inst.rotation || 0) * Math.PI / 180;
+          const ca = Math.cos(rad), sa = Math.sin(rad);
+          const sx = inst.scaleX ?? 1, sy = inst.scaleY ?? 1;
+          const pts = verts.map(([vx, vy]) => {
+            const lx = (vx - c.cx) * sx;
+            const ly = (vy - c.cy) * sy;
+            return [inst.cx + lx * ca - ly * sa, inst.cy + lx * sa + ly * ca];
+          });
+          writeNoData(BOUNDARY);
+          writeInt2(LAYER, [layer]);
+          writeInt2(DATATYPE, [0]);
+          const xys = [];
+          for (const [px, py] of pts) { xys.push(toNm(px), toNm(py)); }
+          xys.push(toNm(pts[0][0]), toNm(pts[0][1]));
+          writeInt4(XY, xys);
+          writeNoData(ENDEL);
+        }
+        continue;
+      }
       const worldPts = shapeInstanceToRing(inst);
       writeNoData(BOUNDARY);
       writeInt2(LAYER, [layer]);

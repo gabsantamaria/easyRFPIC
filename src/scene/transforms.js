@@ -75,6 +75,14 @@ export function expandTransforms(components, paramValues) {
       shapeFields.closed = !!c.closed;
       const wVal = evalExpr(c.width ?? '0', paramValues);
       shapeFields.width = Number.isFinite(wVal) ? wVal : 0;
+    } else if (kind === 'polyshape') {
+      // Polygon-path components (closed 2-D shapes). Same vertex schema
+      // as polyline, but always closed and rendered/exported as a FILLED
+      // polygon — no stroke width. Carry the vertex list through to each
+      // instance so downstream renderers can rebuild the polygon under
+      // repeat / mirror / rotate.
+      shapeFields.vertices = c.vertices || [];
+      shapeFields.closed = true; // ALWAYS closed by definition
     }
     if (!Number.isFinite(w) || !Number.isFinite(h)) {
       // Skip degenerate components — keeps render path tolerant.
@@ -287,6 +295,11 @@ export function expandTransforms(components, paramValues) {
       if (inst.L_straight !== undefined) out.L_straight = inst.L_straight;
       if (inst.p !== undefined) out.p = inst.p;
       if (inst.wgWidth !== undefined) out.wgWidth = inst.wgWidth;
+      // polyline + polyshape share the vertices field; only polyline
+      // actually uses the width scalar.
+      if (inst.vertices !== undefined) out.vertices = inst.vertices;
+      if (inst.closed !== undefined) out.closed = inst.closed;
+      if (inst.width !== undefined) out.width = inst.width;
       instances.push(out);
     });
   }

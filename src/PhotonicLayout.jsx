@@ -1361,6 +1361,7 @@ export default function App() {
       : shapeKind === 'ellipse' ? 'ell'
       : shapeKind === 'polygon' ? 'poly'
       : shapeKind === 'polyline' ? 'trace'
+      : shapeKind === 'polyshape' ? 'pshape'
       : layerPrefix;
     const idPrefix = shapeKind === 'rect' ? layerPrefix : shapePrefix;
     const baseId = `${idPrefix}${scene.components.filter(c => c.layer === layerKind).length + 1}`;
@@ -1671,6 +1672,48 @@ export default function App() {
           cutouts: [], label: id,
           ...(conductorLayerId ? { conductorLayerId } : {}),
         };
+      } else if (shapeKind === 'polyshape') {
+        // Closed polygon-path: like polyline, but no trace width (the
+        // shape is a 2-D fill, not a swept band) and always closed.
+        // The drawing UX hands us the vertex list ALREADY in commit-
+        // ready form — vertex 0's snap becomes vertices[0], every
+        // subsequent vertex becomes either { kind: 'snap', ... } or
+        // { kind: 'rel', dx: '<param>', dy: '<param>' } with fresh
+        // per-segment params so the user can later tune a single edge
+        // without breaking the rest of the polygon.
+        const polyVerts = (spec.vertices || []).map((v, i) => {
+          if (v.snap) {
+            return {
+              kind: 'snap',
+              compId: v.snap.compId,
+              anchor: v.snap.anchor,
+              ...(v.snap.instanceIdx ? { instanceIdx: v.snap.instanceIdx } : {}),
+            };
+          }
+          if (i === 0) {
+            return { kind: 'rel', dx: '0', dy: '0' };
+          }
+          const dxParam = `${id}_dx_${i}`;
+          const dyParam = `${id}_dy_${i}`;
+          const prev = spec.vertices[i - 1];
+          const dx = (v.x - prev.x);
+          const dy = (v.y - prev.y);
+          newParams[dxParam] = { expr: dx.toFixed(3), unit: 'µm', desc: `${id} edge ${i} dx` };
+          newParams[dyParam] = { expr: dy.toFixed(3), unit: 'µm', desc: `${id} edge ${i} dy` };
+          return { kind: 'rel', dx: dxParam, dy: dyParam };
+        });
+        const v0 = spec.vertices[0];
+        newComp = {
+          id, kind: 'polyshape', layer: layerKind,
+          cx: v0.x, cy: v0.y,
+          // w/h start at '0'; refreshPolyshapeBbox computes the real AABB
+          // post-solve from the resolved vertex positions.
+          w: '0', h: '0',
+          vertices: polyVerts,
+          closed: true, // ALWAYS — that's what makes it a polyshape
+          cutouts: [], label: id,
+          ...(conductorLayerId ? { conductorLayerId } : {}),
+        };
       } else {
         // Rectangle (default).
         newComp = {
@@ -1686,7 +1729,7 @@ export default function App() {
       // installation below. The vertex's `compId`/`anchor` is enough
       // for the solver + exporters to chase the parametric chain.
       const newSnaps = [];
-      if (shapeKind === 'polyline') {
+      if (shapeKind === 'polyline' || shapeKind === 'polyshape') {
         return {
           ...prev,
           params: newParams,
@@ -4280,6 +4323,22 @@ export default function App() {
                       <circle cx="21" cy="4" r="1.5" fill="currentColor" />
                     </svg>
                   </button>
+                  <button
+                    key="add-polyshape"
+                    onClick={() => toggleShape('polyshape')}
+                    className={baseBtn + (isShapeActive('polyshape') ? activeRing : '')}
+                    style={{ background: '#1e293b', color: '#e2e8f0' }}
+                    title="Polygon path (closed 2-D shape) — click each vertex; double-click, Enter, or click vertex 0 to close. Same snap halos, H/V axis guides, and shift-lock as the polyline tool — but the result is a filled polygon (not a swept band), with no trace width. HFSS export emits CreatePolyline + sweep for a polygonal sheet."
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" fillOpacity="0.35" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polygon points="4,7 12,2 20,7 18,18 6,18" />
+                      <circle cx="4" cy="7" r="1.5" fill="currentColor" />
+                      <circle cx="12" cy="2" r="1.5" fill="currentColor" />
+                      <circle cx="20" cy="7" r="1.5" fill="currentColor" />
+                      <circle cx="18" cy="18" r="1.5" fill="currentColor" />
+                      <circle cx="6" cy="18" r="1.5" fill="currentColor" />
+                    </svg>
+                  </button>
                   <div className="flex items-center gap-0.5">
                     <button
                       key="add-poly"
@@ -6097,20 +6156,27 @@ export default function App() {
                         </div>
                       );
                     }
-                    if (shapeKind === 'polyline') {
-                      // Polyline trace: surface the trace width param plus
-                      // a per-vertex editor. Each vertex is either a `rel`
-                      // step (parametric dx, dy from the previous vertex)
-                      // or a `snap` binding to another component's anchor.
-                      // Editing dx/dy expressions surfaces all the existing
-                      // expression-parser machinery (param highlighting,
-                      // auto-create on commit, etc.).
+                    if (shapeKind === 'polyline' || shapeKind === 'polyshape') {
+                      // Polyline trace (with a width param) OR polyshape
+                      // (closed 2-D polygon, no width). Both expose the
+                      // per-vertex editor below. Each vertex is either a
+                      // `rel` step (parametric dx, dy from the previous
+                      // vertex) or a `snap` binding to another component's
+                      // anchor. Editing dx/dy expressions surfaces all the
+                      // existing expression-parser machinery (param
+                      // highlighting, auto-create on commit, etc.).
                       const vertSpecs = selected.vertices || [];
+                      const isPolyshape = shapeKind === 'polyshape';
                       return (
                         <div className="space-y-2">
-                          <div className="grid grid-cols-2 gap-2">
-                            {fieldRow('width', 'trace width', selected.width ?? '5', (v) => updateComp(selected.id, { width: v }))}
-                          </div>
+                          {!isPolyshape && (
+                            <div className="grid grid-cols-2 gap-2">
+                              {fieldRow('width', 'trace width', selected.width ?? '5', (v) => updateComp(selected.id, { width: v }))}
+                            </div>
+                          )}
+                          {isPolyshape && (
+                            <p className="text-[10px] text-slate-400 italic">Closed polygon-path — vertices below trace the perimeter. Always closed; no width (filled 2-D shape).</p>
+                          )}
                           <div className="border border-slate-700 rounded p-2" style={{ background: 'rgba(15,23,42,0.5)' }}>
                             <div className="flex items-center justify-between mb-1">
                               <span className="text-[10px] uppercase tracking-wider text-slate-400">Vertices ({vertSpecs.length})</span>

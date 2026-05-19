@@ -123,6 +123,25 @@ export function shapeInstanceToRing(inst) {
     if (verts.length === 0) return [];
     return verts.map(([lx, ly]) => xform(lx - inst.cx, ly - inst.cy));
   }
+  if (kind === 'polyshape') {
+    // Closed polygon-path: the resolved vertices ARE the perimeter ring.
+    // Like polyline this uses `_resolvedVerts` (world coords) set by the
+    // canvas / exporters before calling shapeInstanceToRing. The ring
+    // is implicitly closed — we drop the last vertex if it duplicates
+    // the first so downstream consumers (GDS BOUNDARY emission etc.)
+    // get a non-degenerate edge list.
+    const verts = (inst._resolvedVerts && inst._resolvedVerts.length > 0)
+      ? inst._resolvedVerts
+      : [];
+    if (verts.length === 0) return [];
+    const out = verts.map(([lx, ly]) => xform(lx - inst.cx, ly - inst.cy));
+    if (out.length > 1) {
+      const [fx, fy] = out[0];
+      const [lx, ly] = out[out.length - 1];
+      if (Math.abs(fx - lx) < 1e-9 && Math.abs(fy - ly) < 1e-9) out.pop();
+    }
+    return out;
+  }
   if (kind === 'racetrack') {
     // The racetrack's "ring" for AABB/snap purposes is the OUTER edge of
     // the waveguide band — i.e., the centerline offset outward by half
