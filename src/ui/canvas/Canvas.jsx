@@ -2244,30 +2244,32 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             // boolean: without iterating, only the base instance ends
             // up in the mask, and all clones silently disappear from
             // the boolean's rendered footprint.
+            //
+            // Return a React fragment (no <g> wrapper) — Safari's older
+            // CSS-mask implementations occasionally drop pixels of paths
+            // wrapped in a <g> inside <mask> / <clipPath> children, while
+            // bare paths composite reliably. Fragments are also cheaper.
             const insts = instancesOf(comp, overrides);
+            const pathProps = {
+              fill: fillColor,
+              ...(dataCompId ? { 'data-comp-id': dataCompId } : {}),
+              ...(parentClip ? { clipPath: parentClip } : {}),
+            };
             if (insts.length === 1) {
               return (
-                <path
-                  key={keyBase}
-                  d={rectPathD(insts[0])}
-                  fill={fillColor}
-                  {...(dataCompId ? { 'data-comp-id': dataCompId } : {})}
-                  {...(parentClip ? { clipPath: parentClip } : {})}
-                />
+                <path key={keyBase} d={rectPathD(insts[0])} {...pathProps} />
               );
             }
             return (
-              <g key={keyBase}>
+              <React.Fragment key={keyBase}>
                 {insts.map((inst, i) => (
                   <path
                     key={`${keyBase}-i${i}`}
                     d={rectPathD(inst)}
-                    fill={fillColor}
-                    {...(dataCompId ? { 'data-comp-id': dataCompId } : {})}
-                    {...(parentClip ? { clipPath: parentClip } : {})}
+                    {...pathProps}
                   />
                 ))}
-              </g>
+              </React.Fragment>
             );
           }
           // Derived boolean operand. Resolve children components.
@@ -2354,26 +2356,25 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             // Stroke every instance of this primitive — matches the
             // multi-instance rendering done by renderInterior so the
             // visible outline traces every clone, not just the base.
+            // Same Fragment-vs-<g> rationale as the renderInterior path.
             const insts = instancesOf(comp, overrides);
+            const pathProps = {
+              fill: 'none', stroke: strokeColor, strokeWidth: strokeW,
+              pointerEvents: 'none',
+            };
             if (insts.length === 1) {
-              return (
-                <path key={keyBase} d={rectPathD(insts[0])}
-                  fill="none" stroke={strokeColor} strokeWidth={strokeW}
-                  pointerEvents="none"
-                />
-              );
+              return <path key={keyBase} d={rectPathD(insts[0])} {...pathProps} />;
             }
             return (
-              <g key={keyBase}>
+              <React.Fragment key={keyBase}>
                 {insts.map((inst, i) => (
                   <path
                     key={`${keyBase}-i${i}`}
                     d={rectPathD(inst)}
-                    fill="none" stroke={strokeColor} strokeWidth={strokeW}
-                    pointerEvents="none"
+                    {...pathProps}
                   />
                 ))}
-              </g>
+              </React.Fragment>
             );
           }
           const ops = (comp.operandIds || []).map(id => compById[id]).filter(Boolean);
