@@ -2804,9 +2804,12 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           let strokeWidth = sw * 0.5;
           if (isPrimary) { strokeColor = '#0ea5e9'; strokeWidth = HALO_W; }
           else if (isSelected) { strokeColor = '#38bdf8'; strokeWidth = HALO_W * 0.8; }
-          else if (isParent) { strokeColor = '#0ea5e9'; strokeWidth = HALO_W; }
-          else if (isChild) { strokeColor = '#22d3ee'; strokeWidth = HALO_W; }
-          else if (isMirror) { strokeColor = '#a855f7'; strokeWidth = HALO_W; }
+          // Parent/child/mirror highlight is part of the snap-network
+          // overlay — gated on showGrid alongside the grid pattern,
+          // origin axes, and snap arrows.
+          else if (showGrid && isParent) { strokeColor = '#0ea5e9'; strokeWidth = HALO_W; }
+          else if (showGrid && isChild) { strokeColor = '#22d3ee'; strokeWidth = HALO_W; }
+          else if (showGrid && isMirror) { strokeColor = '#a855f7'; strokeWidth = HALO_W; }
           // Dash pattern is also expressed in stroke-units; on a HALO_W-thick
           // line, dash and gap each scale to that thickness so the rhythm
           // stays readable rather than degrading to dots at tight zoom.
@@ -2841,7 +2844,12 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   fill: style.fill,
                   stroke: strokeColor,
                   strokeWidth,
-                  strokeDasharray: (!isSelected && (isParent || isChild || isMirror)) ? `${dashOn},${dashOff}` : undefined,
+                  // Related-component dashed outlines are tied to the
+                  // grid visibility toggle — they live alongside the
+                  // grid + axes as visual scaffolding, not part of the
+                  // figure itself. Hide them all together for a clean
+                  // canvas (and figure export).
+                  strokeDasharray: (showGrid && !isSelected && (isParent || isChild || isMirror)) ? `${dashOn},${dashOff}` : undefined,
                   opacity: instOpacity,
                   style: { cursor: 'move' },
                 };
@@ -3061,8 +3069,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   arrows (this comp is the `to`) point INTO this component
                   from the parent — drawn in sky-blue. Outgoing arrows (this
                   comp is the `from`) point OUTWARD toward the child — drawn
-                  in cyan. */}
-              {isPrimary && (() => {
+                  in cyan.
+                  Gated on showGrid alongside the rest of the snap-network
+                  overlay so the user can hide everything at once for a
+                  clean canvas / figure. */}
+              {isPrimary && showGrid && (() => {
                 const arrowLen = Math.max(viewport.w, viewport.h) * 0.04;
                 const arrowHead = arrowLen * 0.45;
                 const elements = [];

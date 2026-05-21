@@ -48,32 +48,41 @@ function cloneSvgForExport(svgEl, options = {}) {
       el.parentNode?.removeChild(el);
     }
   }
-  // Boolean masks in the canvas put an explicit black "background" rect
-  // inside each <mask> as a safety net (so areas not covered by the
-  // white base shapes render as hidden). The SVG spec ALREADY makes
-  // mask regions outside explicit content render as luminance=0 →
-  // hidden, so the explicit rect is redundant. Worse: at least one
-  // renderer downstream (specifically: Chromium when an SVG with
-  // nested <defs><mask>… is loaded as <img>) appears to leak this
-  // black rect through as a regular paint, producing a phantom black
-  // rectangle on the exported figure where the masked-out region of
-  // a boolean used to be. Removing the rect here doesn't change the
-  // mask's compositing one bit (still black-outside-white-shapes by
-  // spec default) and definitively prevents the artifact. Keep this
-  // pre-existing canvas-side rect untouched so the live render is
-  // unaffected.
-  for (const mask of Array.from(cloned.querySelectorAll('mask'))) {
-    // Iterate direct rect children. There should be exactly one
-    // canvas-emitted bg rect per mask (it's the first element).
-    for (const child of Array.from(mask.children)) {
-      if (child.tagName !== 'rect' && child.tagName !== 'RECT') continue;
-      const fill = (child.getAttribute('fill') || '').trim().toLowerCase();
-      if (fill === 'black' || fill === '#000' || fill === '#000000' || fill === 'rgb(0,0,0)' || fill === 'rgb(0, 0, 0)') {
-        // Match: this is the redundant bg rect. Strip it.
-        mask.removeChild(child);
-        break;
-      }
-    }
+  // Boolean rendering in the canvas creates many <defs><mask>…</mask></defs>
+  // wrappers nested INSIDE the rendered <g> trees (one per boolean
+  // instance × op). Per spec <defs> children are non-rendering wherever
+  // <defs> appears, but at least one renderer downstream (Chromium when
+  // an SVG with nested <defs> is loaded as <img src=blob>) leaks
+  // <mask>'s background rect through as a regular paint — first as a
+  // black phantom (from subtract masks' fill="black" bg), then as a
+  // white phantom (from union-outline masks' fill="white" bg) once the
+  // black ones were stripped. Both cases share the same root cause:
+  // the cloned <mask> isn't being honored as non-rendering content.
+  //
+  // The fix: hoist EVERY <mask> and <clipPath> in the cloned tree into
+  // a single root-level <defs> block. id="…" references work globally
+  // across the SVG so this re-parenting doesn't break the
+  // mask="url(#m1)" references in the masked <g> elements. Renderers
+  // that respect root-<defs> as non-rendering (every one we've tested)
+  // now hide all mask content reliably, eliminating both phantoms.
+  //
+  // Empty nested <defs> wrappers are dropped afterward so the tree
+  // doesn't carry dangling orphan elements.
+  const ns = 'http://www.w3.org/2000/svg';
+  let rootDefs = cloned.querySelector(':scope > defs');
+  if (!rootDefs) {
+    rootDefs = document.createElementNS(ns, 'defs');
+    cloned.insertBefore(rootDefs, cloned.firstChild);
+  }
+  for (const m of Array.from(cloned.querySelectorAll('mask, clipPath'))) {
+    if (m.parentNode === rootDefs) continue;
+    m.parentNode?.removeChild(m);
+    rootDefs.appendChild(m);
+  }
+  // Drop now-empty <defs> elements (other than the root one).
+  for (const d of Array.from(cloned.querySelectorAll('defs'))) {
+    if (d === rootDefs) continue;
+    if (d.children.length === 0) d.parentNode?.removeChild(d);
   }
   // Drop any inline width / height + style background so the export
   // sizes itself purely by the computed viewBox below.
