@@ -24,7 +24,7 @@ import { resolvePolylineVertices } from '../../geometry/polyline.js';
 // =========================================================================
 // CANVAS
 // =========================================================================
-export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelection, viewport, setViewport, snapMode, setSnapMode, gridSize, gridSnapEnabled, paramValues, addParam, updateParamExpr, rulerMode, setRulerMode, rulerMeasurements, setRulerMeasurements, rulerInProgress, setRulerInProgress, rulerSnapPoint, setRulerSnapPoint, alertDialog, setInteractionStatus, showDimensions, addMode, setAddMode, commitDragAdd, onComponentContextMenu }) {
+export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelection, viewport, setViewport, snapMode, setSnapMode, gridSize, gridSnapEnabled, showGrid = true, paramValues, addParam, updateParamExpr, rulerMode, setRulerMode, rulerMeasurements, setRulerMeasurements, rulerInProgress, setRulerInProgress, rulerSnapPoint, setRulerSnapPoint, alertDialog, setInteractionStatus, showDimensions, addMode, setAddMode, commitDragAdd, onComponentContextMenu }) {
   // Drop a single committed ruler measurement by id.
   const deleteRuler = (id) => setRulerMeasurements((prev) => prev.filter((m) => m.id !== id));
   const svgRef = useRef(null);
@@ -2057,8 +2057,19 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           <path d="M0,0 L10,5 L0,10 z" fill="#ef4444" opacity="0.85" />
         </marker>
       </defs>
-      <rect data-bg="true" x={vbX} y={vbY} width={viewport.w} height={viewport.h} fill="url(#grid)" />
-      <rect data-bg="true" x={vbX} y={vbY} width={viewport.w} height={viewport.h} fill="url(#gridMajor)" />
+      {showGrid && (
+        <>
+          <rect data-bg="true" x={vbX} y={vbY} width={viewport.w} height={viewport.h} fill="url(#grid)" />
+          <rect data-bg="true" x={vbX} y={vbY} width={viewport.w} height={viewport.h} fill="url(#gridMajor)" />
+        </>
+      )}
+      {/* When grid is hidden, we still want pointer hits on the background
+          (drag-pan, marquee-deselect, polyline draft starts, etc.) so we
+          drop in a transparent overlay rect — same data-bg="true" tag so
+          all the existing onMouseDown logic still routes correctly. */}
+      {!showGrid && (
+        <rect data-bg="true" x={vbX} y={vbY} width={viewport.w} height={viewport.h} fill="transparent" />
+      )}
 
       <line x1={vbX} y1={0} x2={vbX + viewport.w} y2={0} stroke="#475569" strokeWidth={sw * 0.7} strokeDasharray={`${sw * 3},${sw * 3}`} pointerEvents="none" />
       <line x1={0} y1={vbY} x2={0} y2={vbY + viewport.h} stroke="#475569" strokeWidth={sw * 0.7} strokeDasharray={`${sw * 3},${sw * 3}`} pointerEvents="none" />

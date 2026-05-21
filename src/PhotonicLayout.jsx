@@ -11,6 +11,7 @@ import { generateGDS } from './export/gds.js';
 import { generatePyAEDT } from './export/pyaedt.js';
 import { generateHfssNative } from './export/hfss-native.js';
 import { generateGdsfactory } from './export/gdsfactory.js';
+import { generateSVG, generatePDF } from './export/figure.js';
 import { defaultStack, normalizeScene, makeDefaultScene, makeBlankScene, paramsForStack, migrateStackCoplanarGroups } from './scene/schema.js';
 import {
   BASE_DESIGN_PREFIX, BASE_LIB_PREFIX, BASE_ARCHIVE_PREFIX, WORKSPACE_KEY,
@@ -140,6 +141,9 @@ export default function App() {
   const [future, setFuture] = useState([]); // redo stack
   const [gridSize, setGridSize] = useState(2);
   const [gridSnapEnabled, setGridSnapEnabled] = useState(true);
+  // Grid visibility is decoupled from snap behavior — users often want to
+  // keep snap on while hiding the grid for cleaner screenshots / exports.
+  const [showGrid, setShowGrid] = useState(true);
   // Dimension overlay: when on, draws engineering-style dimension arrows over
   // every parameter-bound width/height/snap-offset. Variable name is the
   // primary label; numeric value is appended only if there's room.
@@ -4091,6 +4095,57 @@ export default function App() {
   const handleExportGdsfactory = () => {
     return handleExport(`${designFileBase()}_gf.py`, generateGdsfactory, { designName: designFileBase() });
   };
+  // Figure exports — clean vector dumps of the current scene (no UI
+  // chrome). Two flavors:
+  //   - SVG: opens in any browser / Inkscape / Illustrator; tight bbox
+  //     + 5 % pad; boolean compositing preserved via <mask> elements.
+  //   - PDF: minimal native PDF 1.4 emitter (no library dep); each
+  //     instance becomes a filled path; booleans flatten to their
+  //     operands on the boolean's layer color (general PDF boolean
+  //     compositing needs polygon clipping math, deferred).
+  const handleExportSVG = async () => {
+    let content;
+    try {
+      content = generateSVG(normalizeScene(scene), paramValues, { designName });
+    } catch (e) {
+      console.error('SVG generator error:', e);
+      await alertDialog('Error generating SVG: ' + e.message, 'Export error');
+      return;
+    }
+    if (!content) { await alertDialog('Failed to generate SVG.', 'Export error'); return; }
+    const filename = `${designFileBase()}.svg`;
+    const ok = downloadFile(filename, content, 'image/svg+xml');
+    setExportPreview({ filename, content, downloaded: ok });
+  };
+  const handleExportPDF = async () => {
+    let bytes;
+    try {
+      bytes = generatePDF(normalizeScene(scene), paramValues, { designName });
+    } catch (e) {
+      console.error('PDF generator error:', e);
+      await alertDialog('Error generating PDF: ' + e.message, 'Export error');
+      return;
+    }
+    if (!bytes || !bytes.length) { await alertDialog('Failed to generate PDF.', 'Export error'); return; }
+    const filename = `${designFileBase()}.pdf`;
+    const ok = downloadFile(filename, bytes, 'application/pdf');
+    if (ok) {
+      const summary = [
+        `PDF figure: ${filename} (${bytes.length} bytes)`,
+        '',
+        'Vector format — opens in any PDF reader (Acrobat, Preview, Chrome…)',
+        'Page size auto-scaled so the longest dimension is ≤ 500 pt (~ 7 in).',
+        '',
+        'Notes:',
+        '- Booleans flatten to their operands on the boolean\'s layer color.',
+        '  For true polygon-clipping output, edit the SVG figure in Inkscape',
+        '  / Illustrator and re-export to PDF from there.',
+      ].join('\n');
+      setExportPreview({ filename, content: summary, downloaded: ok, binary: true });
+    } else {
+      await alertDialog('Failed to start PDF download.', 'Export error');
+    }
+  };
   const handleExportGDS = async () => {
     let bytes;
     try {
@@ -4407,6 +4462,9 @@ export default function App() {
                 { label: 'HFSS native', icon: Download, onClick: handleExportHfssNative, hint: 'layout_hfss.py', title: 'Native HFSS COM script (run inside HFSS via Tools -> Run Script)' },
                 { label: 'GDS-II', icon: Download, onClick: handleExportGDS, hint: 'layout.gds', title: 'Binary GDS-II layout. Layers: waveguide=1, conductors=10+ (one per stack layer), port=100. Coords in µm with 1nm database resolution.' },
                 { label: 'gdsfactory', icon: Download, onClick: handleExportGdsfactory, hint: 'layout_gf.py', title: 'Parametric @gf.cell Python function. Every scene parameter becomes a kwarg with its current value as default — call the function with overrides to sweep params in Python.' },
+                { divider: true },
+                { label: 'SVG figure', icon: Download, onClick: handleExportSVG, hint: 'layout.svg', title: 'Clean vector SVG of the current scene (no UI chrome). Tight bbox + 5% padding; boolean compositing preserved via <mask> elements. Opens in any browser, Inkscape, Illustrator.' },
+                { label: 'PDF figure', icon: Download, onClick: handleExportPDF, hint: 'layout.pdf', title: 'Vector PDF of the current scene (no UI chrome). Native PDF 1.4 emitter — no library dependency. Page sized so the longest dimension is ≤ 500 pt (~7 in). Booleans flatten to operand polygons; for true polygon-clip output, edit the SVG figure in Inkscape and re-export.' },
               ]}
             />
             <div className="w-px h-5 bg-slate-700 mx-1" />
@@ -4506,6 +4564,17 @@ export default function App() {
               </button>
             )}
             <div className="w-px h-5 bg-slate-700 mx-1" />
+            {/* Grid VISIBILITY toggle — separate concern from snap. Hide the
+                background grid for cleaner screenshots / vector exports
+                without losing snap behavior. */}
+            <button
+              onClick={() => setShowGrid(g => !g)}
+              className={`flex items-center justify-center w-7 h-7 rounded text-xs ${showGrid ? 'bg-slate-700 text-slate-200 hover:bg-slate-600' : 'bg-slate-800 text-slate-500 hover:text-slate-300 border border-slate-700'}`}
+              title={showGrid ? 'Hide background grid (snap stays unaffected)' : 'Show background grid'}
+              aria-label={showGrid ? 'Hide grid' : 'Show grid'}
+            >
+              {showGrid ? <Eye size={11} /> : <EyeOff size={11} />}
+            </button>
             <button
               onClick={() => setGridSnapEnabled(g => !g)}
               className={`flex items-center gap-1 px-2 py-1 rounded text-xs ${gridSnapEnabled ? 'bg-cyan-700 text-white' : 'bg-slate-700 text-slate-400'}`}
@@ -5740,6 +5809,7 @@ export default function App() {
             setSnapMode={setSnapMode}
             gridSize={gridSize}
             gridSnapEnabled={gridSnapEnabled}
+            showGrid={showGrid}
             paramValues={paramValues}
             addParam={addParam}
             updateParamExpr={(name, expr) => updateParam(name, { expr })}
