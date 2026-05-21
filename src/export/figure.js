@@ -48,6 +48,33 @@ function cloneSvgForExport(svgEl, options = {}) {
       el.parentNode?.removeChild(el);
     }
   }
+  // Boolean masks in the canvas put an explicit black "background" rect
+  // inside each <mask> as a safety net (so areas not covered by the
+  // white base shapes render as hidden). The SVG spec ALREADY makes
+  // mask regions outside explicit content render as luminance=0 →
+  // hidden, so the explicit rect is redundant. Worse: at least one
+  // renderer downstream (specifically: Chromium when an SVG with
+  // nested <defs><mask>… is loaded as <img>) appears to leak this
+  // black rect through as a regular paint, producing a phantom black
+  // rectangle on the exported figure where the masked-out region of
+  // a boolean used to be. Removing the rect here doesn't change the
+  // mask's compositing one bit (still black-outside-white-shapes by
+  // spec default) and definitively prevents the artifact. Keep this
+  // pre-existing canvas-side rect untouched so the live render is
+  // unaffected.
+  for (const mask of Array.from(cloned.querySelectorAll('mask'))) {
+    // Iterate direct rect children. There should be exactly one
+    // canvas-emitted bg rect per mask (it's the first element).
+    for (const child of Array.from(mask.children)) {
+      if (child.tagName !== 'rect' && child.tagName !== 'RECT') continue;
+      const fill = (child.getAttribute('fill') || '').trim().toLowerCase();
+      if (fill === 'black' || fill === '#000' || fill === '#000000' || fill === 'rgb(0,0,0)' || fill === 'rgb(0, 0, 0)') {
+        // Match: this is the redundant bg rect. Strip it.
+        mask.removeChild(child);
+        break;
+      }
+    }
+  }
   // Drop any inline width / height + style background so the export
   // sizes itself purely by the computed viewBox below.
   cloned.removeAttribute('width');
