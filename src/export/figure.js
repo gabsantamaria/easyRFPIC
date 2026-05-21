@@ -1,419 +1,297 @@
-// Figure export — SVG + PDF vector dumps of the current scene.
+// Figure export — SVG + PDF dumps of the LIVE canvas SVG element.
 //
-// Both formats are built from the same scene-walk as the other exporters
-// (solveLayout + applyMirrors + resolveBooleanBboxes + expandTransforms +
-// shapeInstanceToRing + resolvePolylineVertices). The output is a clean
-// figure — no UI chrome (selection halos, snap arrows, axis dashes,
-// anchor handles, hover tooltips) — just the geometry with each shape's
-// layer color, suitable for slides, papers, or downstream tooling.
+// Earlier this module re-walked the scene programmatically to build a
+// "clean" figure, but that approach silently dropped overlays the user
+// expected to see (dimensions toggle, ruler measurements, mirror axes,
+// snap arrows, etc.) and was missing the per-instance polish (selection
+// halos, layer-stack color tints) of the live render. The user is the
+// arbiter of "what should be in the figure": whatever they see on the
+// canvas is what should appear in the export. So we clone the live
+// <svg> element, strip a tiny set of transient interactive overlays
+// (drag previews, marquee rects, in-progress polyline drafts), crop
+// the viewBox tightly to the rendered content via getBBox(), and
+// serialize / rasterize from there.
 //
-// Booleans:
-//   - SVG uses <mask> compositing identical to the canvas (subtract /
-//     intersect / union all render the right way).
-//   - PDF emits each operand as a separate filled polygon on the
-//     boolean's resolved layer color; modern PDF readers don't all
-//     handle complex clip-path subtract compositing reliably and the
-//     reader-agnostic alternative — flattening via polygon clipping —
-//     would need a clipper library. The visual "looks right" when the
-//     boolean is a union; subtract / punch / intersect appear as the
-//     union of operands, but it's good enough for documentation.
+//   - generateSvgFromElement(svgEl, options) → string
+//   - generatePdfFromElement(svgEl, options) → Promise<Uint8Array>
 //
-// SVG output uses a tight bbox + 5 % padding so the figure crops to
-// the geometry. PDF uses the same bbox; the MediaBox is sized in PDF
-// points (1 pt = 1/72 in). We treat 1 canvas µm = 1 pt as the default
-// scale; callers can override via options.scale.
-import { evalExpr } from '../scene/params.js';
-import { solveLayout, applyMirrors, resolveBooleanBboxes } from '../scene/solver.js';
-import { expandTransforms } from '../scene/transforms.js';
-import { shapeInstanceToRing } from '../geometry/rings.js';
-import { resolvePolylineVertices } from '../geometry/polyline.js';
-import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/racetrack.js';
+// PDF: we render the cleaned SVG to a high-DPI <canvas> via Image +
+// drawImage, then embed the resulting JPEG inside a minimal PDF 1.4
+// document as a single full-page /XObject Image. Visually this matches
+// the canvas EXACTLY (since the browser does the rendering); the
+// trade-off is that the PDF is raster, not vector. For vector PDF the
+// user can take the SVG export through Inkscape / Illustrator.
 
-// ── Shared style logic — mirror Canvas.jsx's styleForComponent ───────
-const ROLE_STYLE = {
-  waveguide: { fill: '#3ec27a', stroke: '#1a5e36', opacity: 0.85 },
-  electrode: { fill: '#f4a72e', stroke: '#7a4d00', opacity: 0.90 },
-  port:      { fill: '#b91c1c', stroke: '#7f1d1d', opacity: 0.55 },
-};
-function darkenHex(hex) {
-  if (typeof hex !== 'string') return null;
-  const m = hex.match(/^#?([0-9a-fA-F]{6})$/);
-  if (!m) return null;
-  const n = parseInt(m[1], 16);
-  const r = Math.floor(((n >> 16) & 0xff) * 0.45);
-  const g = Math.floor(((n >> 8) & 0xff) * 0.45);
-  const b = Math.floor((n & 0xff) * 0.45);
-  return `#${[r,g,b].map(v => v.toString(16).padStart(2, '0')).join('')}`;
-}
-function styleForComponent(c, scene, byId) {
-  const role = c?.layer;
-  const base = ROLE_STYLE[role] || ROLE_STYLE.waveguide;
-  const resolveBound = (c2, visited = new Set()) => {
-    if (!c2 || visited.has(c2.id)) return null;
-    visited.add(c2.id);
-    if (c2.kind === 'boolean') {
-      for (const id of (c2.operandIds || [])) {
-        const r = resolveBound(byId[id], visited);
-        if (r) return r;
-      }
-      return null;
-    }
-    if (c2.layer === 'electrode' && c2.conductorLayerId) {
-      return (scene.stack || []).find(l => l.id === c2.conductorLayerId);
-    }
-    if (c2.layer === 'waveguide') {
-      return (scene.stack || []).find(l => l.role === 'waveguide');
-    }
-    return null;
-  };
-  const bound = resolveBound(c);
-  if (bound && bound.color) {
-    return { fill: bound.color, stroke: darkenHex(bound.color) || base.stroke, opacity: base.opacity };
+// Elements with `data-no-export="true"` are stripped from the cloned
+// SVG before serialization. Use this attribute on transient UI overlays
+// (drag previews, marquee rects, etc.) so they don't bleed into figures.
+const STRIP_ATTR = 'data-no-export';
+
+// Selectors for elements that should ALSO be stripped even without the
+// data-attribute. The user expects the figure to mirror what they see,
+// so by default we strip NOTHING — every visible element passes through.
+// Add specific selectors here if a transient overlay leaks into figures.
+const STRIP_SELECTORS = [];
+
+function cloneSvgForExport(svgEl, options = {}) {
+  if (!svgEl || typeof svgEl.cloneNode !== 'function') {
+    throw new Error('cloneSvgForExport: missing SVG element');
   }
-  return base;
+  const cloned = svgEl.cloneNode(true);
+  // Strip explicit no-export-marked elements.
+  for (const el of Array.from(cloned.querySelectorAll(`[${STRIP_ATTR}]`))) {
+    el.parentNode?.removeChild(el);
+  }
+  // Plus the defensive selectors above.
+  for (const sel of STRIP_SELECTORS) {
+    for (const el of Array.from(cloned.querySelectorAll(sel))) {
+      el.parentNode?.removeChild(el);
+    }
+  }
+  // Drop any inline width / height + style background so the export
+  // sizes itself purely by the computed viewBox below.
+  cloned.removeAttribute('width');
+  cloned.removeAttribute('height');
+  cloned.removeAttribute('style');
+  cloned.removeAttribute('class');
+  cloned.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  if (!cloned.getAttribute('xmlns:xlink')) {
+    cloned.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
+  }
+  return cloned;
 }
 
-// Collect the world-space ring for one instance, including transform
-// rotation/scale. Returns an array of [x, y] pairs.
-function ringForInstance(c, inst, paramValues, byId) {
-  if (c.kind === 'polyline' || c.kind === 'polyshape') {
-    // Resolve vertex chain in world space; for instance copies, shift +
-    // rotate + scale by the instance's delta from base.
-    const baseVerts = resolvePolylineVertices(c, byId, paramValues);
-    const dx = inst.cx - c.cx, dy = inst.cy - c.cy;
-    const rad = (inst.rotation || 0) * Math.PI / 180;
-    const ca = Math.cos(rad), sa = Math.sin(rad);
-    const sx = inst.scaleX ?? 1, sy = inst.scaleY ?? 1;
-    return baseVerts.map(([vx, vy]) => {
-      const lx = (vx - c.cx) * sx;
-      const ly = (vy - c.cy) * sy;
-      return [inst.cx + lx * ca - ly * sa, inst.cy + lx * sa + ly * ca];
-    });
+// Temporarily attach the cloned SVG to a hidden div so the browser can
+// compute element bboxes. We need getBBox() because the viewBox of the
+// live canvas reflects the user's zoom level — not necessarily a tight
+// crop around the content.
+function computeContentBbox(cloned) {
+  const host = document.createElement('div');
+  host.style.cssText = 'position:absolute;left:-99999px;top:-99999px;visibility:hidden;width:1px;height:1px;overflow:hidden';
+  // We need to set a SIZED viewBox so the SVG renders during getBBox.
+  // The original viewBox is fine for this — getBBox returns local-coord
+  // bounds, not screen-pixel bounds, so it's viewBox-independent.
+  document.body.appendChild(host);
+  host.appendChild(cloned);
+  let bb;
+  try {
+    bb = cloned.getBBox();
+  } finally {
+    document.body.removeChild(host);
   }
-  if (c.kind === 'racetrack') {
-    // Racetracks are bands; the perimeter is outer ring minus inner ring.
-    // For figure-export purposes we return the OUTER ring (a typical
-    // schematic shows the racetrack outline; the inner hole can be
-    // toggled later via a second polygon on datatype-1-equivalent).
-    const R = Number.isFinite(inst.R) ? inst.R : 100;
-    const L = Number.isFinite(inst.L_straight) ? inst.L_straight : 300;
-    const p = Number.isFinite(inst.p) ? inst.p : 1;
-    const wgW = Number.isFinite(inst.wgWidth) ? inst.wgWidth : 1.2;
-    const centerline = buildRacetrackCenterline(R, L, p);
-    const { outer } = offsetCenterlineToBand(centerline, wgW / 2);
-    const rad = (inst.rotation || 0) * Math.PI / 180;
-    const ca = Math.cos(rad), sa = Math.sin(rad);
-    return outer.map(([lx, ly]) => [inst.cx + lx * ca - ly * sa, inst.cy + lx * sa + ly * ca]);
-  }
-  return shapeInstanceToRing(inst);
+  return bb;
 }
 
-// Compute the scene's bbox from all visible instances. Returns
-// { minX, maxX, minY, maxY } or null when there's nothing to draw.
-function sceneBbox(scene, paramValues) {
-  const solved = resolveBooleanBboxes(
-    applyMirrors(solveLayout(scene.components, scene.snaps, paramValues), scene.mirrors),
-    paramValues
-  );
-  const byId = Object.fromEntries(solved.map(c => [c.id, c]));
-  const transformInstances = expandTransforms(solved, paramValues);
-  let minX = +Infinity, maxX = -Infinity, minY = +Infinity, maxY = -Infinity;
-  for (const inst of transformInstances) {
-    const c = byId[inst.compId];
-    if (!c || c.kind === 'boolean') continue;
-    // Consumed primitives still contribute to the bbox — they're rendered
-    // (inside a boolean's mask) and we want the figure to crop around
-    // the visible result.
-    const ring = ringForInstance(c, inst, paramValues, byId);
-    for (const [x, y] of ring) {
-      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-      if (x < minX) minX = x;
-      if (x > maxX) maxX = x;
-      if (y < minY) minY = y;
-      if (y > maxY) maxY = y;
-    }
+// Wrap the cloned SVG with a tight viewBox + optional white background
+// rect. Returns the same cloned element with attributes set.
+function fitViewBoxAndBackground(cloned, bb, options) {
+  const pad = Math.max(bb.width, bb.height) * 0.05 + 1;
+  const vbX = bb.x - pad, vbY = bb.y - pad;
+  const vbW = bb.width + 2 * pad;
+  const vbH = bb.height + 2 * pad;
+  cloned.setAttribute('viewBox', `${vbX} ${vbY} ${vbW} ${vbH}`);
+  cloned.setAttribute('width', vbW.toFixed(3));
+  cloned.setAttribute('height', vbH.toFixed(3));
+  // Opaque background that matches the live canvas (Tailwind slate-100,
+  // #f1f5f9). The live <svg> sets this via CSS `style.background` —
+  // which doesn't survive cloneNode/serialize, so we inject an explicit
+  // background <rect> sized to the new viewBox. Override via
+  // options.background; pass null to keep transparent.
+  if (options.background !== null) {
+    const ns = 'http://www.w3.org/2000/svg';
+    const bg = document.createElementNS(ns, 'rect');
+    bg.setAttribute('x', vbX);
+    bg.setAttribute('y', vbY);
+    bg.setAttribute('width', vbW);
+    bg.setAttribute('height', vbH);
+    bg.setAttribute('fill', options.background || '#f1f5f9');
+    cloned.insertBefore(bg, cloned.firstChild);
   }
-  if (!Number.isFinite(minX)) return null;
-  return { minX, maxX, minY, maxY, solved, byId, transformInstances };
+  return { vbX, vbY, vbW, vbH };
 }
 
 // ── SVG export ───────────────────────────────────────────────────────
-export function generateSVG(scene, paramValues, options = {}) {
-  const bb = sceneBbox(scene, paramValues);
-  if (!bb) return '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"></svg>';
-  const w0 = bb.maxX - bb.minX;
-  const h0 = bb.maxY - bb.minY;
-  const pad = Math.max(w0, h0) * 0.05 + 1;
-  const vbX = bb.minX - pad;
-  const vbY = -(bb.maxY + pad);   // SVG y is down, world y is up
-  const vbW = w0 + 2 * pad;
-  const vbH = h0 + 2 * pad;
-  const showBg = options.showBackground !== false; // default ON for SVG
-  const strokeW = Math.max(0.05, Math.max(w0, h0) * 0.0015);
-
-  // Each instance → an SVG path or polygon string. Group by component
-  // so the boolean compositing can wrap operands cleanly.
-  const consumedIds = new Set();
-  for (const c of bb.solved) if (c.kind === 'boolean') for (const id of (c.operandIds || [])) consumedIds.add(id);
-
-  // Build a ringByCompInst map so booleans can look up their operand
-  // rings (avoiding double-resolution).
-  const ringByInst = new Map(); // (compId, idx) → ring
-  for (const inst of bb.transformInstances) {
-    const c = bb.byId[inst.compId];
-    if (!c || c.kind === 'boolean') continue;
-    const ring = ringForInstance(c, inst, paramValues, bb.byId);
-    ringByInst.set(`${inst.compId}#${inst.idx}`, ring);
+export function generateSvgFromElement(svgEl, options = {}) {
+  const cloned = cloneSvgForExport(svgEl, options);
+  const bb = computeContentBbox(cloned);
+  if (!isFinite(bb.x) || bb.width <= 0 || bb.height <= 0) {
+    // Empty canvas — return a tiny placeholder.
+    return `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"></svg>\n`;
   }
-  const pointsAttr = (ring) => ring.map(([x, y]) => `${x.toFixed(4)},${(-y).toFixed(4)}`).join(' ');
-
-  // Standalone (non-consumed) primitive rendering — one polygon per
-  // transform instance. Skip booleans here; handled below.
-  let body = '';
-  for (const inst of bb.transformInstances) {
-    const c = bb.byId[inst.compId];
-    if (!c || c.kind === 'boolean') continue;
-    if (consumedIds.has(c.id)) continue;
-    const ring = ringByInst.get(`${inst.compId}#${inst.idx}`);
-    if (!ring || ring.length < 3) continue;
-    const style = styleForComponent(c, scene, bb.byId);
-    body += `  <polygon points="${pointsAttr(ring)}" fill="${style.fill}" fill-opacity="${style.opacity}" stroke="${style.stroke}" stroke-width="${strokeW}" />\n`;
-  }
-
-  // Boolean rendering — mask-compose like Canvas.jsx. For each boolean,
-  // build a mask: white = operand[0] interior, black = operand[1+]
-  // interior (subtract). For union we just emit every operand. For
-  // intersect we use a clip-path chain.
-  let maskDefs = '';
-  let booleanLayer = '';
-  let maskIdCounter = 0;
-  const nextMaskId = () => `tut_bool_mask_${maskIdCounter++}`;
-  // Collect all primitive operand rings under a boolean (across instances)
-  const operandRings = (b) => {
-    const out = [];
-    for (const opId of (b.operandIds || [])) {
-      const op = bb.byId[opId];
-      if (!op) continue;
-      if (op.kind === 'boolean') continue; // nested booleans — fall back to operand 0 only
-      for (const inst of bb.transformInstances) {
-        if (inst.compId !== opId) continue;
-        const r = ringByInst.get(`${inst.compId}#${inst.idx}`);
-        if (r && r.length >= 3) out.push(r);
-      }
-    }
-    return out;
-  };
-  for (const b of bb.solved) {
-    if (b.kind !== 'boolean' || b.consumedBy) continue;
-    const ops = (b.operandIds || []).map(id => bb.byId[id]).filter(Boolean);
-    if (ops.length < 2) continue;
-    const style = styleForComponent(b, scene, bb.byId);
-    const baseOpRings = ops[0] && ops[0].kind !== 'boolean'
-      ? bb.transformInstances
-          .filter(i => i.compId === ops[0].id)
-          .map(i => ringByInst.get(`${i.compId}#${i.idx}`))
-          .filter(r => r && r.length >= 3)
-      : [];
-    const toolOpRings = ops.slice(1).flatMap(op => op.kind === 'boolean' ? [] :
-      bb.transformInstances
-        .filter(i => i.compId === op.id)
-        .map(i => ringByInst.get(`${i.compId}#${i.idx}`))
-        .filter(r => r && r.length >= 3)
-    );
-    if (b.op === 'subtract' || b.op === 'punch' || b.op === 'intersect') {
-      const maskId = nextMaskId();
-      // Mask viewport — the scene bbox is large enough since the
-      // operands fit inside it; expand a tiny pad to avoid edge-pixel
-      // clipping artifacts.
-      const m_pad = Math.max(w0, h0) * 0.01;
-      const mx = vbX - m_pad, my = vbY - m_pad;
-      const mw = vbW + 2 * m_pad, mh = vbH + 2 * m_pad;
-      // For subtract / punch: white base − black tools.
-      // For intersect: black background, white tool [polygon], white base — composite via mask-fill rules.
-      // SVG mask compositing: drawn pixels' LUMINANCE multiplies underlying fill alpha. White = full, black = none.
-      if (b.op === 'subtract' || b.op === 'punch') {
-        maskDefs += `    <mask id="${maskId}" maskUnits="userSpaceOnUse" x="${mx}" y="${my}" width="${mw}" height="${mh}">\n`;
-        maskDefs += `      <rect x="${mx}" y="${my}" width="${mw}" height="${mh}" fill="black" />\n`;
-        for (const r of baseOpRings) maskDefs += `      <polygon points="${pointsAttr(r)}" fill="white" />\n`;
-        for (const r of toolOpRings) maskDefs += `      <polygon points="${pointsAttr(r)}" fill="black" />\n`;
-        maskDefs += `    </mask>\n`;
-        booleanLayer += `  <g mask="url(#${maskId})">\n`;
-        for (const r of baseOpRings) {
-          booleanLayer += `    <polygon points="${pointsAttr(r)}" fill="${style.fill}" fill-opacity="${style.opacity}" stroke="${style.stroke}" stroke-width="${strokeW}" />\n`;
-        }
-        booleanLayer += `  </g>\n`;
-      } else {
-        // intersect: paint base where ALL tool interiors overlap. Build a
-        // clip-path chain of tools.
-        const clipId = nextMaskId();
-        maskDefs += `    <clipPath id="${clipId}" clipPathUnits="userSpaceOnUse">\n`;
-        // Multiple clip-path children get UNIONed by SVG; for true
-        // intersection of multiple tools we'd need a nested chain. With
-        // 2 operands (the common case) one clip suffices.
-        for (const r of toolOpRings) maskDefs += `      <polygon points="${pointsAttr(r)}" />\n`;
-        maskDefs += `    </clipPath>\n`;
-        booleanLayer += `  <g clip-path="url(#${clipId})">\n`;
-        for (const r of baseOpRings) {
-          booleanLayer += `    <polygon points="${pointsAttr(r)}" fill="${style.fill}" fill-opacity="${style.opacity}" stroke="${style.stroke}" stroke-width="${strokeW}" />\n`;
-        }
-        booleanLayer += `  </g>\n`;
-      }
-    } else {
-      // Union: emit every operand on the boolean's layer color.
-      for (const r of [...baseOpRings, ...toolOpRings]) {
-        booleanLayer += `  <polygon points="${pointsAttr(r)}" fill="${style.fill}" fill-opacity="${style.opacity}" stroke="${style.stroke}" stroke-width="${strokeW}" />\n`;
-      }
-    }
-  }
-
-  const bg = showBg
-    ? `  <rect x="${vbX}" y="${vbY}" width="${vbW}" height="${vbH}" fill="${options.background || '#ffffff'}" />\n`
-    : '';
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vbX} ${vbY} ${vbW} ${vbH}" width="${vbW.toFixed(2)}" height="${vbH.toFixed(2)}">
-  <title>${options.designName ? `${options.designName} layout` : 'easyRFPIC layout'}</title>
-  <desc>Auto-generated vector figure from easyRFPIC.</desc>
-${maskDefs ? `  <defs>\n${maskDefs}  </defs>\n` : ''}${bg}${body}${booleanLayer}</svg>
-`;
+  fitViewBoxAndBackground(cloned, bb, options);
+  // Title / desc metadata — useful when the file is opened in editors.
+  const ns = 'http://www.w3.org/2000/svg';
+  const title = document.createElementNS(ns, 'title');
+  title.textContent = options.designName ? `${options.designName} layout` : 'easyRFPIC layout';
+  const desc = document.createElementNS(ns, 'desc');
+  desc.textContent = 'Auto-generated vector figure from easyRFPIC.';
+  cloned.insertBefore(desc, cloned.firstChild);
+  cloned.insertBefore(title, cloned.firstChild);
+  const ser = new XMLSerializer().serializeToString(cloned);
+  return `<?xml version="1.0" encoding="UTF-8"?>\n${ser}\n`;
 }
 
 // ── PDF export ───────────────────────────────────────────────────────
-// Minimal PDF 1.4 emitter. We don't depend on a PDF library — every
-// shape becomes a sequence of path operators in the page's content
-// stream. Booleans are flattened to their operands (each operand emits
-// as a separate filled polygon on the boolean's layer color) since
-// general boolean compositing in PDF requires either polygon-clipping
-// math or a complex clip-path setup that not every reader handles.
-export function generatePDF(scene, paramValues, options = {}) {
-  const bb = sceneBbox(scene, paramValues);
-  if (!bb) return new Uint8Array();
-  const w0 = bb.maxX - bb.minX;
-  const h0 = bb.maxY - bb.minY;
-  const pad = Math.max(w0, h0) * 0.05 + 1;
-  // PDF MediaBox in PDF points. Default 1 µm = 1 pt (so a 1000 µm
-  // chip becomes a 1000 pt = 13.9 in wide PDF page — too big!).
-  // Pick a default scale that keeps the page reasonable: target a
-  // longest dimension of ~500 pt (about 7 in).
-  const targetMax = 500;
-  const scale = options.scale ?? Math.min(targetMax / Math.max(w0 + 2 * pad, h0 + 2 * pad), 4);
-  const pageW = (w0 + 2 * pad) * scale;
-  const pageH = (h0 + 2 * pad) * scale;
-  // Translate world coords into PDF page coords. PDF origin is bottom-
-  // left and y goes UP — same as our world. So a single offset +
-  // uniform scale suffices.
-  const toX = (x) => ((x - bb.minX) + pad) * scale;
-  const toY = (y) => ((y - bb.minY) + pad) * scale;
-  const strokeW = Math.max(0.1, Math.max(w0, h0) * 0.0015 * scale);
-
-  // Hex-color parser → "r g b" in 0..1 PDF range
-  const hex01 = (hex) => {
-    const m = (typeof hex === 'string') ? hex.match(/^#?([0-9a-fA-F]{6})$/) : null;
-    if (!m) return '0.5 0.5 0.5';
-    const n = parseInt(m[1], 16);
-    const r = ((n >> 16) & 0xff) / 255;
-    const g = ((n >> 8) & 0xff) / 255;
-    const b = (n & 0xff) / 255;
-    return `${r.toFixed(3)} ${g.toFixed(3)} ${b.toFixed(3)}`;
-  };
-
-  // Emit each instance / boolean operand as a filled+stroked path.
-  let ops = '';
-  ops += `q\n`; // graphics state save
-  // Optional opaque background
-  if (options.showBackground !== false) {
-    ops += `${hex01(options.background || '#ffffff')} rg\n`;
-    ops += `0 0 ${pageW.toFixed(3)} ${pageH.toFixed(3)} re f\n`;
+// Renders the cleaned SVG to a high-DPI offscreen canvas, then embeds
+// the resulting JPEG bytes as a single Image XObject in a minimal PDF
+// 1.4 document. Returns a Promise<Uint8Array> because the Image load
+// is async.
+export async function generatePdfFromElement(svgEl, options = {}) {
+  const cloned = cloneSvgForExport(svgEl, options);
+  const bb = computeContentBbox(cloned);
+  if (!isFinite(bb.x) || bb.width <= 0 || bb.height <= 0) {
+    // Empty page (1×1 pt) so the PDF still opens.
+    return buildPdfWithEmptyPage();
   }
-  const emitPolygon = (ring, fillHex, strokeHex, opacity) => {
-    if (!ring || ring.length < 3) return;
-    // We approximate fill-opacity by blending toward white at the
-    // opacity level. PDF transparency would need an ExtGState — fine
-    // to add later, but blending captures the visual effect for a
-    // single-page figure.
-    let blend = fillHex;
-    if (opacity != null && opacity < 1) {
-      const m = (typeof fillHex === 'string') ? fillHex.match(/^#?([0-9a-fA-F]{6})$/) : null;
-      if (m) {
-        const n = parseInt(m[1], 16);
-        const r = ((n >> 16) & 0xff);
-        const g = ((n >> 8) & 0xff);
-        const b = (n & 0xff);
-        const a = opacity, oneMinus = 1 - opacity;
-        const br = Math.round(r * a + 255 * oneMinus);
-        const bg = Math.round(g * a + 255 * oneMinus);
-        const bb_ = Math.round(b * a + 255 * oneMinus);
-        blend = `#${[br, bg, bb_].map(v => v.toString(16).padStart(2, '0')).join('')}`;
-      }
-    }
-    ops += `${hex01(blend)} rg\n`;
-    ops += `${hex01(strokeHex)} RG\n`;
-    ops += `${strokeW.toFixed(3)} w\n`;
-    let started = false;
-    for (const [x, y] of ring) {
-      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-      ops += `${toX(x).toFixed(3)} ${toY(y).toFixed(3)} ${started ? 'l' : 'm'}\n`;
-      started = true;
-    }
-    ops += `h B\n`; // close, fill + stroke
-  };
-
-  // Non-consumed primitives first, then booleans (which re-emit their operands).
-  const consumedIds = new Set();
-  for (const c of bb.solved) if (c.kind === 'boolean') for (const id of (c.operandIds || [])) consumedIds.add(id);
-  for (const inst of bb.transformInstances) {
-    const c = bb.byId[inst.compId];
-    if (!c || c.kind === 'boolean') continue;
-    if (consumedIds.has(c.id)) continue;
-    const ring = ringForInstance(c, inst, paramValues, bb.byId);
-    const style = styleForComponent(c, scene, bb.byId);
-    emitPolygon(ring, style.fill, style.stroke, style.opacity);
+  const { vbW, vbH } = fitViewBoxAndBackground(cloned, bb, options);
+  const ser = new XMLSerializer().serializeToString(cloned);
+  const svgBlob = new Blob(['<?xml version="1.0"?>\n', ser], { type: 'image/svg+xml;charset=utf-8' });
+  const url = URL.createObjectURL(svgBlob);
+  let jpegBytes;
+  try {
+    // Load the SVG as an <img> so the browser renders it. The image's
+    // intrinsic size matches the viewBox dimensions we just set.
+    const img = await loadImage(url);
+    // Rasterize at the requested DPI (default 300 — magazine-quality).
+    const dpi = options.dpi || 300;
+    const scale = dpi / 72;            // 1 pt = 1/72 in; multiply for px
+    const cw = Math.max(1, Math.round(vbW * scale));
+    const ch = Math.max(1, Math.round(vbH * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = cw;
+    canvas.height = ch;
+    const ctx = canvas.getContext('2d');
+    // Canvas-matching underlay so any transparent SVG region renders
+    // as the live canvas tint (Tailwind slate-100 = #f1f5f9).
+    ctx.fillStyle = options.background || '#f1f5f9';
+    ctx.fillRect(0, 0, cw, ch);
+    ctx.drawImage(img, 0, 0, cw, ch);
+    // JPEG quality 0.92 — visually indistinguishable from PNG for most
+    // figures and ~3-5× smaller. The PDF Image XObject uses /DCTDecode
+    // (= JPEG) which is natively supported by every PDF reader.
+    const jpegDataUrl = canvas.toDataURL('image/jpeg', options.jpegQuality ?? 0.92);
+    jpegBytes = base64ToBytes(jpegDataUrl.split(',', 2)[1]);
+    return buildPdfWithJpegImage(jpegBytes, cw, ch, vbW, vbH);
+  } finally {
+    URL.revokeObjectURL(url);
   }
-  for (const b of bb.solved) {
-    if (b.kind !== 'boolean' || b.consumedBy) continue;
-    const style = styleForComponent(b, scene, bb.byId);
-    for (const opId of (b.operandIds || [])) {
-      const op = bb.byId[opId];
-      if (!op || op.kind === 'boolean') continue;
-      for (const inst of bb.transformInstances) {
-        if (inst.compId !== opId) continue;
-        const ring = ringForInstance(op, inst, paramValues, bb.byId);
-        emitPolygon(ring, style.fill, style.stroke, style.opacity);
-      }
-    }
-  }
-  ops += `Q\n`; // graphics state restore
+}
 
-  // Build the PDF
-  const objs = [];
-  // obj 1: Catalog
-  objs.push(`1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n`);
-  // obj 2: Pages
-  objs.push(`2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n`);
-  // obj 3: Page
-  objs.push(`3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageW.toFixed(3)} ${pageH.toFixed(3)}] /Contents 4 0 R /Resources << /ProcSet [/PDF /Text] >> >>\nendobj\n`);
-  // obj 4: Contents
-  const opsBytes = new TextEncoder().encode(ops);
-  objs.push(`4 0 obj\n<< /Length ${opsBytes.length} >>\nstream\n${ops}endstream\nendobj\n`);
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = (e) => reject(new Error('SVG → Image load failed: ' + (e?.message || e)));
+    img.src = src;
+  });
+}
 
-  // Assemble with byte offsets for xref
-  const header = `%PDF-1.4\n%\xe2\xe3\xcf\xd3\n`;
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+// ── Minimal PDF emitter (image-only page) ───────────────────────────
+// PDF 1.4. The page has one Image XObject (`Im0`) drawn at the page's
+// full extent via a `cm` scaling matrix. Image is JPEG (DCTDecode).
+function buildPdfWithJpegImage(jpegBytes, imgPxW, imgPxH, pageWpt, pageHpt) {
+  // Cap the longest page dimension at 540 pt (~7.5 in) so the PDF
+  // doesn't open absurdly large. Maintains aspect ratio.
+  const TARGET = 540;
+  const longest = Math.max(pageWpt, pageHpt);
+  const scale = longest > TARGET ? TARGET / longest : 1;
+  const pW = pageWpt * scale;
+  const pH = pageHpt * scale;
+
   const enc = new TextEncoder();
-  let buf = enc.encode(header);
+  const parts = [];
   const offsets = [];
-  for (const o of objs) {
-    offsets.push(buf.length);
-    const b = enc.encode(o);
-    const merged = new Uint8Array(buf.length + b.length);
-    merged.set(buf, 0); merged.set(b, buf.length);
-    buf = merged;
-  }
+  let cursor = 0;
+  const push = (data) => {
+    const bytes = (data instanceof Uint8Array) ? data : enc.encode(data);
+    parts.push(bytes);
+    cursor += bytes.length;
+  };
+  const startObj = (n) => {
+    offsets[n] = cursor;
+    push(`${n} 0 obj\n`);
+  };
+  const endObj = () => push(`endobj\n`);
+
+  // Header
+  push('%PDF-1.4\n%\xe2\xe3\xcf\xd3\n');
+
+  // 1: Catalog
+  startObj(1);
+  push('<< /Type /Catalog /Pages 2 0 R >>\n');
+  endObj();
+  // 2: Pages
+  startObj(2);
+  push('<< /Type /Pages /Kids [3 0 R] /Count 1 >>\n');
+  endObj();
+  // 3: Page
+  startObj(3);
+  push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pW.toFixed(3)} ${pH.toFixed(3)}] /Contents 4 0 R /Resources << /XObject << /Im0 5 0 R >> /ProcSet [/PDF /ImageC] >> >>\n`);
+  endObj();
+  // 4: Page content stream — draw Im0 at full page size
+  const cs = `q\n${pW.toFixed(3)} 0 0 ${pH.toFixed(3)} 0 0 cm\n/Im0 Do\nQ\n`;
+  const csBytes = enc.encode(cs);
+  startObj(4);
+  push(`<< /Length ${csBytes.length} >>\nstream\n`);
+  push(csBytes);
+  push('\nendstream\n');
+  endObj();
+  // 5: Image XObject (JPEG)
+  startObj(5);
+  push(`<< /Type /XObject /Subtype /Image /Width ${imgPxW} /Height ${imgPxH} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpegBytes.length} >>\nstream\n`);
+  push(jpegBytes);
+  push('\nendstream\n');
+  endObj();
+
   // xref
-  const xrefOffset = buf.length;
-  let xref = `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n`;
-  for (const off of offsets) xref += `${String(off).padStart(10, '0')} 00000 n \n`;
-  xref += `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
-  const xb = enc.encode(xref);
-  const final = new Uint8Array(buf.length + xb.length);
-  final.set(buf, 0); final.set(xb, buf.length);
-  return final;
+  const xrefOffset = cursor;
+  let xref = `xref\n0 6\n0000000000 65535 f \n`;
+  for (let i = 1; i <= 5; i++) {
+    xref += `${String(offsets[i]).padStart(10, '0')} 00000 n \n`;
+  }
+  xref += `trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+  push(xref);
+
+  // Concatenate
+  let total = 0;
+  for (const p of parts) total += p.length;
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) { out.set(p, off); off += p.length; }
+  return out;
+}
+
+function buildPdfWithEmptyPage() {
+  // A degenerate-but-valid empty PDF for the no-content case.
+  const enc = new TextEncoder();
+  const body = `%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1 1] /Resources << >> >>
+endobj
+xref
+0 4
+0000000000 65535 f
+0000000009 00000 n
+0000000056 00000 n
+0000000103 00000 n
+trailer
+<< /Size 4 /Root 1 0 R >>
+startxref
+170
+%%EOF
+`;
+  return enc.encode(body);
 }

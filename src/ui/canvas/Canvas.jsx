@@ -24,7 +24,7 @@ import { resolvePolylineVertices } from '../../geometry/polyline.js';
 // =========================================================================
 // CANVAS
 // =========================================================================
-export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelection, viewport, setViewport, snapMode, setSnapMode, gridSize, gridSnapEnabled, showGrid = true, paramValues, addParam, updateParamExpr, rulerMode, setRulerMode, rulerMeasurements, setRulerMeasurements, rulerInProgress, setRulerInProgress, rulerSnapPoint, setRulerSnapPoint, alertDialog, setInteractionStatus, showDimensions, addMode, setAddMode, commitDragAdd, onComponentContextMenu }) {
+export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelection, viewport, setViewport, snapMode, setSnapMode, gridSize, gridSnapEnabled, showGrid = true, paramValues, addParam, updateParamExpr, rulerMode, setRulerMode, rulerMeasurements, setRulerMeasurements, rulerInProgress, setRulerInProgress, rulerSnapPoint, setRulerSnapPoint, alertDialog, setInteractionStatus, showDimensions, addMode, setAddMode, commitDragAdd, onComponentContextMenu, onSvgElement }) {
   // Drop a single committed ruler measurement by id.
   const deleteRuler = (id) => setRulerMeasurements((prev) => prev.filter((m) => m.id !== id));
   const svgRef = useRef(null);
@@ -1998,7 +1998,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
 
   return (
     <svg
-      ref={svgRef}
+      ref={(el) => { svgRef.current = el; if (onSvgElement) onSvgElement(el); }}
       viewBox={`${vbX} ${vbY} ${viewport.w} ${viewport.h}`}
       preserveAspectRatio="xMidYMid meet"
       className="w-full h-full"

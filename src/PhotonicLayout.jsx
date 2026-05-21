@@ -11,7 +11,7 @@ import { generateGDS } from './export/gds.js';
 import { generatePyAEDT } from './export/pyaedt.js';
 import { generateHfssNative } from './export/hfss-native.js';
 import { generateGdsfactory } from './export/gdsfactory.js';
-import { generateSVG, generatePDF } from './export/figure.js';
+import { generateSvgFromElement, generatePdfFromElement } from './export/figure.js';
 import { defaultStack, normalizeScene, makeDefaultScene, makeBlankScene, paramsForStack, migrateStackCoplanarGroups } from './scene/schema.js';
 import {
   BASE_DESIGN_PREFIX, BASE_LIB_PREFIX, BASE_ARCHIVE_PREFIX, WORKSPACE_KEY,
@@ -150,6 +150,11 @@ export default function App() {
   const [showDimensions, setShowDimensions] = useState(false);
   // Help / tutorial overlay. Opened from the "?" button in the header.
   const [showHelp, setShowHelp] = useState(false);
+  // Reference to the canvas <svg> element. Used by the figure exporter
+  // to clone the live DOM (so SVG/PDF figures include rulers, dimension
+  // overlays, mirror axes, replications — everything the user sees on
+  // the canvas at export time, not a reconstructed scene walk).
+  const canvasSvgRef = useRef(null);
   // Add-component mode. Set by clicking a shape button in the toolbar.
   // Drives a drag-to-create interaction in Canvas: the next click+drag
   // creates a new shape of the chosen kind on the chosen layer.
@@ -4095,18 +4100,25 @@ export default function App() {
   const handleExportGdsfactory = () => {
     return handleExport(`${designFileBase()}_gf.py`, generateGdsfactory, { designName: designFileBase() });
   };
-  // Figure exports — clean vector dumps of the current scene (no UI
-  // chrome). Two flavors:
-  //   - SVG: opens in any browser / Inkscape / Illustrator; tight bbox
-  //     + 5 % pad; boolean compositing preserved via <mask> elements.
-  //   - PDF: minimal native PDF 1.4 emitter (no library dep); each
-  //     instance becomes a filled path; booleans flatten to their
-  //     operands on the boolean's layer color (general PDF boolean
-  //     compositing needs polygon clipping math, deferred).
+  // Figure exports — clone the LIVE canvas SVG and serialize it. This
+  // captures EXACTLY what the user sees: every transform replication,
+  // dimension overlay (when toggled on), ruler measurement, mirror axis
+  // line, snap arrow, selection halo — anything currently drawn on the
+  // canvas. The viewBox is re-cropped to the rendered content's bbox
+  // (+ 5 % pad) so the figure is tight even if the user is zoomed out.
+  //
+  //   SVG: full vector, opens in any browser / Inkscape / Illustrator.
+  //   PDF: the cleaned SVG is rasterized to 300 DPI JPEG and embedded
+  //        as a single Image XObject in a minimal PDF 1.4 document.
+  //        Matches the canvas EXACTLY (since the browser does the
+  //        rendering); raster, not vector — for vector PDF, take the
+  //        SVG export through Inkscape's "Save as PDF".
   const handleExportSVG = async () => {
+    const svgEl = canvasSvgRef.current;
+    if (!svgEl) { await alertDialog('Canvas not ready yet — try again in a moment.', 'Export error'); return; }
     let content;
     try {
-      content = generateSVG(normalizeScene(scene), paramValues, { designName });
+      content = generateSvgFromElement(svgEl, { designName });
     } catch (e) {
       console.error('SVG generator error:', e);
       await alertDialog('Error generating SVG: ' + e.message, 'Export error');
@@ -4118,9 +4130,11 @@ export default function App() {
     setExportPreview({ filename, content, downloaded: ok });
   };
   const handleExportPDF = async () => {
+    const svgEl = canvasSvgRef.current;
+    if (!svgEl) { await alertDialog('Canvas not ready yet — try again in a moment.', 'Export error'); return; }
     let bytes;
     try {
-      bytes = generatePDF(normalizeScene(scene), paramValues, { designName });
+      bytes = await generatePdfFromElement(svgEl, { designName, dpi: 300 });
     } catch (e) {
       console.error('PDF generator error:', e);
       await alertDialog('Error generating PDF: ' + e.message, 'Export error');
@@ -4131,15 +4145,14 @@ export default function App() {
     const ok = downloadFile(filename, bytes, 'application/pdf');
     if (ok) {
       const summary = [
-        `PDF figure: ${filename} (${bytes.length} bytes)`,
+        `PDF figure: ${filename} (${bytes.length.toLocaleString()} bytes)`,
         '',
-        'Vector format — opens in any PDF reader (Acrobat, Preview, Chrome…)',
-        'Page size auto-scaled so the longest dimension is ≤ 500 pt (~ 7 in).',
+        'Matches the canvas exactly — every shape replication, dimension',
+        'overlay (if enabled), ruler measurement, and mirror axis is in.',
         '',
-        'Notes:',
-        '- Booleans flatten to their operands on the boolean\'s layer color.',
-        '  For true polygon-clipping output, edit the SVG figure in Inkscape',
-        '  / Illustrator and re-export to PDF from there.',
+        'Format: 300 DPI JPEG embedded in a minimal PDF 1.4 document.',
+        'Page sized so the longest side is ≤ 540 pt (~7.5 in). For a',
+        'vector PDF, export as SVG and convert via Inkscape "Save as PDF".',
       ].join('\n');
       setExportPreview({ filename, content: summary, downloaded: ok, binary: true });
     } else {
@@ -5828,6 +5841,7 @@ export default function App() {
             setAddMode={setAddMode}
             commitDragAdd={commitDragAdd}
             onComponentContextMenu={openComponentContextMenu}
+            onSvgElement={(el) => { canvasSvgRef.current = el; }}
           />
           <div className="absolute top-2 left-2 px-2 py-1 rounded text-[10px] font-mono pointer-events-none" style={{ background: 'rgba(15,23,42,0.85)', color: '#e2e8f0' }}>
             wheel = zoom · drag = pan/move · ⌥/Alt+drag = marquee · ⌘+click = toggle · ⌘+drag = no grid · F = fit · ⌘Z/⇧Z = undo/redo · ⌘C/V = copy/paste · ⌘S = save
