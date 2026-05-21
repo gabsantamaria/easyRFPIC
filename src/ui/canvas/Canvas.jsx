@@ -4276,7 +4276,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         );
       })()}
 
-      {scene.snaps.map(s => {
+      {/* Persistent snap-link dashed lines connecting every snapped pair.
+          Part of the snap-network overlay — gated on showGrid alongside
+          the grid pattern, origin axes, parent/child/mirror outline
+          highlights, and snap direction arrows. */}
+      {showGrid && scene.snaps.map(s => {
         const fromComp = solved.find(c => c.id === s.from.compId);
         const toComp = solved.find(c => c.id === s.to.compId);
         if (!fromComp || !toComp) return null;
