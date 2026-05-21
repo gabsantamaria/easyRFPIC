@@ -2071,8 +2071,15 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         <rect data-bg="true" x={vbX} y={vbY} width={viewport.w} height={viewport.h} fill="transparent" />
       )}
 
-      <line x1={vbX} y1={0} x2={vbX + viewport.w} y2={0} stroke="#475569" strokeWidth={sw * 0.7} strokeDasharray={`${sw * 3},${sw * 3}`} pointerEvents="none" />
-      <line x1={0} y1={vbY} x2={0} y2={vbY + viewport.h} stroke="#475569" strokeWidth={sw * 0.7} strokeDasharray={`${sw * 3},${sw * 3}`} pointerEvents="none" />
+      {/* Origin X / Y axes — dashed reference lines through (0, 0). Tied
+          to the grid visibility toggle: when the user hides the grid for
+          a clean screenshot / vector export, these axes go too. */}
+      {showGrid && (
+        <>
+          <line x1={vbX} y1={0} x2={vbX + viewport.w} y2={0} stroke="#475569" strokeWidth={sw * 0.7} strokeDasharray={`${sw * 3},${sw * 3}`} pointerEvents="none" />
+          <line x1={0} y1={vbY} x2={0} y2={vbY + viewport.h} stroke="#475569" strokeWidth={sw * 0.7} strokeDasharray={`${sw * 3},${sw * 3}`} pointerEvents="none" />
+        </>
+      )}
 
       {/* Mirror axes */}
       {scene.mirrors.map(m => (
@@ -4122,9 +4129,26 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         const dotStrokeW = screen(0.5);
         const fontDist = screen(11);            // distance label (px)
         const fontDelta = screen(9);            // delta-x / delta-y label (px)
-        const padX1 = screen(46), padY1 = screen(14);
-        const padX2 = screen(60), padY2 = screen(13);
-        const xBtnX = mx + screen(60);
+        // The label backgrounds were previously fixed-width pills that
+        // truncated the text at higher numeric values (e.g. "1234.56um"
+        // or "Δx=123.4 Δy=567.8") because they hardcoded screen(46) /
+        // screen(60). Compute the width from the actual text length so
+        // both rects always wrap the label. The 0.62 multiplier is a
+        // safe approximation of monospace char width as a fraction of
+        // font size; we add screen(10) of horizontal padding (~5 px
+        // each side). Δ measures ≈ ASCII width in most monospace fonts
+        // we render against (JetBrains Mono / Menlo / etc.), so 0.62
+        // works for both rows.
+        const distText = `${dist.toFixed(2)}um`;
+        const deltaText = `Δx=${dx.toFixed(2)} Δy=${dy.toFixed(2)}`;
+        const padX1 = distText.length * fontDist * 0.62 + screen(10);
+        const padX2 = deltaText.length * fontDelta * 0.62 + screen(10);
+        const padY1 = screen(14);
+        const padY2 = screen(13);
+        // The X (delete) button now sits just outside the wider of the
+        // two label rects so it never overlaps the readout.
+        const halfBoxW = Math.max(padX1, padX2) / 2;
+        const xBtnX = mx + halfBoxW + screen(6);
         const xBtnY = -my - screen(11);
         return (
           <g key={m.id}>
