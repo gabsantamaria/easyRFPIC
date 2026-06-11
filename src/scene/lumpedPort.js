@@ -54,11 +54,17 @@ export function detectPortIntegrationLine(port, solved, paramValues) {
   if (!p) return { direction: null };
 
   // Expand transforms so a `repeat`/`displace` on a conductor produces
-  // copies that participate in adjacency checks.
-  const insts = expandTransforms(solved, paramValues);
-  const electrodes = insts
-    .filter(c => c.layer === 'electrode' && c.id !== port.id)
-    .map(e => instExtent(e, paramValues))
+  // copies that participate in adjacency checks. Expanded instances carry
+  // `compId` only (no layer / id) — map each back to its source component
+  // to recover those, keeping the instance's transformed cx/cy/w/h for
+  // the extent math.
+  const byId = new Map((solved || []).map(c => [c.id, c]));
+  const electrodes = expandTransforms(solved, paramValues)
+    .map(inst => {
+      const src = byId.get(inst.compId);
+      if (!src || src.layer !== 'electrode' || src.id === port.id) return null;
+      return instExtent({ ...inst, id: src.id }, paramValues);
+    })
     .filter(Boolean);
 
   // For a given port edge (at coord `c` on axis a; the other axis spans
