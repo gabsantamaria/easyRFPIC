@@ -11,42 +11,37 @@
 // for each kind plus the list of rows.
 //
 // Extracted from PhotonicLayout.jsx as Stage 4.7 of the planned refactor.
-import React from 'react';
-import { Move, RotateCw, Repeat, Trash2, Eye, EyeOff, ArrowUp, ArrowDown, FlipHorizontal, FlipVertical, Copy } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Move, RotateCw, Repeat, Trash2, Eye, EyeOff, ArrowUp, ArrowDown, FlipHorizontal, FlipVertical, Copy, GripVertical } from 'lucide-react';
 import { evalExpr } from '../../scene/params.js';
-import { DeferredTextInput } from '../DeferredTextInput.jsx';
+import { ExprField as ExprFieldBase } from './ExprField.jsx';
 
-// One labeled expression input. Hoisted to a module-level component so
-// React keeps the same DeferredTextInput identity across TransformRow
-// re-renders — defining it inside TransformRow's body created a fresh
-// function each render, which caused remounts that could wipe the
-// deferred-commit local draft mid-type.
+// One labeled expression input — the shared ExprField (canonical mono /
+// amber-param-ref / red-error styling) plus this editor's commit hook:
+// newly-auto-created identifiers default to the field's current
+// evaluated value, so renaming a literal `5` to a new var `my_pitch`
+// produces `my_pitch = 5` and the visible geometry doesn't jump.
+// Hoisted to a module-level component so React keeps the same input
+// identity across TransformRow re-renders — defining it inside
+// TransformRow's body created a fresh function each render, which
+// caused remounts that could wipe the deferred-commit draft mid-type.
 function ExprField({ label, value, onChange, fieldKey, paramValues, commitExpr, suggestions }) {
   return (
-    <div className="flex-1 min-w-0">
-      <label className="text-[9px] uppercase tracking-wider text-slate-500">{label}</label>
-      <DeferredTextInput
-        autoGrow
-        value={value ?? ''}
-        suggestions={suggestions}
-        onCommit={(v) => {
-          // Default newly-auto-created identifiers in this field to
-          // the current evaluated value, so renaming a literal `5` to
-          // a new var `my_pitch` produces `my_pitch = 5` and the
-          // visible geometry doesn't jump.
-          const prevEval = evalExpr(value, paramValues);
-          const prevDefault = Number.isFinite(prevEval) ? String(prevEval) : '0';
-          onChange(v);
-          commitExpr && commitExpr(v, prevDefault, 'µm', `Auto-created (transform.${fieldKey})`);
-        }}
-        className="w-full bg-slate-900 border border-slate-700 rounded px-1.5 py-0.5 text-[11px] font-mono text-white outline-none focus:border-cyan-400 whitespace-pre-wrap break-words leading-tight"
-        spellCheck={false}
-      />
-      <p className="text-[9px] text-slate-500 mt-0.5 font-mono">= {(() => {
-        const v = evalExpr(value, paramValues);
-        return Number.isFinite(v) ? v.toFixed(3) : 'NaN';
-      })()}</p>
-    </div>
+    <ExprFieldBase
+      label={label}
+      value={value ?? ''}
+      size="sm"
+      containerClassName="flex-1"
+      paramValues={paramValues}
+      suggestions={suggestions}
+      fmt={(v) => v.toFixed(3)}
+      onCommit={(v) => {
+        const prevEval = evalExpr(value, paramValues);
+        const prevDefault = Number.isFinite(prevEval) ? String(prevEval) : '0';
+        onChange(v);
+        commitExpr && commitExpr(v, prevDefault, 'µm', `Auto-created (transform.${fieldKey})`);
+      }}
+    />
   );
 }
 
@@ -54,6 +49,7 @@ function TransformRow({
   transform, idx, total,
   onUpdate, onToggle, onMoveUp, onMoveDown, onDelete,
   paramValues, commitExpr, isGrouped, suggestions,
+  onGripDown, onGripUp,
 }) {
   const t = transform;
   const enabled = t.enabled !== false;
@@ -69,6 +65,17 @@ function TransformRow({
   return (
     <div className={`rounded border p-1.5 mb-1 ${dimClass}`} style={{ borderColor: kindColor + '60', background: 'rgba(15,23,42,0.4)' }}>
       <div className="flex items-center gap-1 mb-1">
+        {/* Drag handle: arms the wrapper div's HTML5 `draggable` while the
+            mouse is down on it, so dragging text inside the row's inputs
+            never starts a row drag. */}
+        <span
+          className="cursor-grab text-slate-600 hover:text-slate-300 flex-shrink-0 select-none"
+          title="Drag to reorder (or use the ↑/↓ arrows)"
+          onMouseDown={onGripDown}
+          onMouseUp={onGripUp}
+        >
+          <GripVertical size={10} />
+        </span>
         <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: kindColor }}>
           {idx + 1}. {t.kind}
         </span>
@@ -248,6 +255,32 @@ export function TransformChainEditor({ component, onUpdateComp, paramValues, com
   const deleteTransform = (idx) => {
     setTransforms(transforms.filter((_, i) => i !== idx));
   };
+  // ── Drag-to-reorder (G3) ──────────────────────────────────────────
+  // `grabIdx` is armed by mousedown on a row's grip handle: only then is
+  // that row's wrapper `draggable`, so text-selection drags inside the
+  // expression inputs never start a row drag. `dragIdx` is the row being
+  // dragged; `overIdx` highlights the current drop target. The up/down
+  // arrow buttons remain as the keyboard/precision alternative.
+  const [grabIdx, setGrabIdx] = useState(null);
+  const [dragIdx, setDragIdx] = useState(null);
+  const [overIdx, setOverIdx] = useState(null);
+  // Disarm the grip if the user mouses up without dragging (the grip's
+  // own onMouseUp misses releases outside the handle).
+  useEffect(() => {
+    if (grabIdx == null) return;
+    const clear = () => setGrabIdx(null);
+    window.addEventListener('mouseup', clear);
+    return () => window.removeEventListener('mouseup', clear);
+  }, [grabIdx]);
+  const clearDrag = () => { setGrabIdx(null); setDragIdx(null); setOverIdx(null); };
+  const reorderTransform = (from, to) => {
+    if (from == null || to == null || from === to ||
+        from < 0 || to < 0 || from >= transforms.length || to >= transforms.length) return;
+    const next = transforms.slice();
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    setTransforms(next);
+  };
   return (
     <div className="border-t border-slate-700 pt-3">
       <div className="flex items-center justify-between mb-1.5">
@@ -295,21 +328,52 @@ export function TransformChainEditor({ component, onUpdateComp, paramValues, com
       ) : (
         <div>
           {transforms.map((t, i) => (
-            <TransformRow
+            <div
               key={t.id || i}
-              transform={t}
-              idx={i}
-              total={transforms.length}
-              onUpdate={(patch) => updateTransform(i, patch)}
-              onToggle={() => updateTransform(i, { enabled: t.enabled === false })}
-              onMoveUp={() => moveTransform(i, -1)}
-              onMoveDown={() => moveTransform(i, +1)}
-              onDelete={() => deleteTransform(i)}
-              paramValues={paramValues}
-              commitExpr={commitExpr}
-              isGrouped={isGrouped}
-              suggestions={suggestions}
-            />
+              draggable={grabIdx === i}
+              onDragStart={(e) => {
+                e.dataTransfer.effectAllowed = 'move';
+                try { e.dataTransfer.setData('text/plain', String(i)); } catch { /* IE/edge cases */ }
+                setDragIdx(i);
+              }}
+              onDragOver={(e) => {
+                if (dragIdx == null) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'move';
+                if (overIdx !== i) setOverIdx(i);
+              }}
+              onDragLeave={() => { if (overIdx === i) setOverIdx(null); }}
+              onDrop={(e) => {
+                if (dragIdx == null) return;
+                e.preventDefault();
+                reorderTransform(dragIdx, i);
+                clearDrag();
+              }}
+              onDragEnd={clearDrag}
+              style={{
+                opacity: dragIdx === i ? 0.4 : undefined,
+                // Cyan insertion cue on the current drop target.
+                boxShadow: overIdx === i && dragIdx != null && dragIdx !== i
+                  ? '0 -2px 0 0 #22d3ee' : undefined,
+              }}
+            >
+              <TransformRow
+                transform={t}
+                idx={i}
+                total={transforms.length}
+                onUpdate={(patch) => updateTransform(i, patch)}
+                onToggle={() => updateTransform(i, { enabled: t.enabled === false })}
+                onMoveUp={() => moveTransform(i, -1)}
+                onMoveDown={() => moveTransform(i, +1)}
+                onDelete={() => deleteTransform(i)}
+                paramValues={paramValues}
+                commitExpr={commitExpr}
+                isGrouped={isGrouped}
+                suggestions={suggestions}
+                onGripDown={() => setGrabIdx(i)}
+                onGripUp={() => setGrabIdx(null)}
+              />
+            </div>
           ))}
         </div>
       )}

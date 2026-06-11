@@ -490,6 +490,10 @@ export function normalizeScene(s) {
     // from the library overwrites both this field and `stack`.
     stackName: s.stackName || 'LTOI600_NbN_EPFL',
     simSetup,
+    // Parametric cell definitions embedded in the design (name → def,
+    // see src/scene/cells.js) so a design that uses cells stays
+    // self-contained when exported / shared. Pure passthrough.
+    cells: (s.cells && typeof s.cells === 'object' && !Array.isArray(s.cells)) ? s.cells : {},
   };
 }
 

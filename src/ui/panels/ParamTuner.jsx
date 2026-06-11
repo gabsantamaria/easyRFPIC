@@ -1,4 +1,4 @@
-// EXPERIMENTAL multiplicative parameter tuner.
+// Multiplicative parameter tuner.
 //
 // One slider per parameter row. Live-drives the parameter's expression
 // while you drag, in [1/RANGE_FACTOR, RANGE_FACTOR] times whatever the
@@ -14,11 +14,6 @@
 // literal. If the original expression referenced other parameters
 // (e.g. `h_wg + 1`), that reference is lost — undo / Cmd+Z brings
 // it back. Acceptable for a probe / "feel out the design" feature.
-//
-// To REMOVE this experiment cleanly:
-//   1. Delete this file.
-//   2. In src/ui/panels/ParamRow.jsx, remove the `import { ParamTuner }`
-//      line and the single `<ParamTuner ... />` JSX render.
 import React, { useState, useRef } from 'react';
 
 // Multiplier at the slider's right end. Left end is 1/RANGE_FACTOR.

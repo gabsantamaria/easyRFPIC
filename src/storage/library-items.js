@@ -6,13 +6,15 @@
 // per-workspace under their own prefixes.
 //
 // `exportWorkspace` / `importWorkspace` bundle the active workspace's
-// designs, library items, and archive into a single JSON blob, which is
-// what gets written to disk when a workspace is linked to a file handle.
+// designs, library items, archive, and parametric cell definitions into
+// a single JSON blob, which is what gets written to disk when a
+// workspace is linked to a file handle.
 //
 // Extracted from PhotonicLayout.jsx as Stage 3.2 of the planned refactor.
 import {
   libPrefix,
   archivePrefix,
+  cellPrefix,
   listSavedDesigns,
   loadDesign,
   saveDesign,
@@ -79,6 +81,42 @@ export async function deleteLibraryItem(workspace, name) {
 }
 export async function deleteArchivedLibraryItem(workspace, name) {
   try { await window.storage.delete(archivePrefix(workspace) + name); return true; } catch { return false; }
+}
+
+// ----- Parametric cell storage -----
+// Cell definitions (src/scene/cells.js) are stored per-workspace under
+// `cellPrefix`, exactly like library items. The default workspace's
+// list filter mirrors listLibraryItems: workspace-scoped keys share the
+// base prefix and are excluded by the nested-colon test.
+export async function listCellDefs(workspace) {
+  try {
+    const prefix = cellPrefix(workspace);
+    const result = await window.storage.list(prefix);
+    if (!result || !result.keys) return [];
+    return result.keys
+      .filter(k => {
+        if (workspace) return true;
+        const suffix = k.slice(prefix.length);
+        return !suffix.includes(':');
+      })
+      .map(k => k.slice(prefix.length));
+  } catch { return []; }
+}
+export async function loadCellDef(workspace, name) {
+  try {
+    const r = await window.storage.get(cellPrefix(workspace) + name);
+    if (!r) return null;
+    return JSON.parse(r.value);
+  } catch { return null; }
+}
+export async function saveCellDef(workspace, name, payload) {
+  try {
+    await window.storage.set(cellPrefix(workspace) + name, JSON.stringify(payload));
+    return true;
+  } catch { return false; }
+}
+export async function deleteCellDef(workspace, name) {
+  try { await window.storage.delete(cellPrefix(workspace) + name); return true; } catch { return false; }
 }
 
 // ----- Bulk export / import -----
@@ -158,6 +196,11 @@ export async function exportWorkspace(workspace) {
     const d = await loadArchivedLibraryItem(workspace, n);
     if (d) archive[n] = d;
   }
+  const cells = {};
+  for (const n of await listCellDefs(workspace)) {
+    const d = await loadCellDef(workspace, n);
+    if (d) cells[n] = d;
+  }
   return {
     format: 'photonic_layout_workspace',
     version: 1,
@@ -166,6 +209,7 @@ export async function exportWorkspace(workspace) {
     designs,
     library: lib,
     libraryArchive: archive,
+    cells,
   };
 }
 
@@ -175,15 +219,17 @@ export async function importWorkspace(workspace, bundle, mode) {
   if (!bundle || bundle.format !== 'photonic_layout_workspace') {
     throw new Error('Not a workspace bundle (missing or wrong "format" field)');
   }
-  const counts = { designs: 0, library: 0, archive: 0, skipped: [] };
+  const counts = { designs: 0, library: 0, archive: 0, cells: 0, skipped: [] };
   if (mode === 'replace') {
     for (const n of await listSavedDesigns(workspace)) await deleteDesignStored(workspace, n);
     for (const n of await listLibraryItems(workspace)) await deleteLibraryItem(workspace, n);
     for (const n of await listArchivedLibraryItems(workspace)) await deleteArchivedLibraryItem(workspace, n);
+    for (const n of await listCellDefs(workspace)) await deleteCellDef(workspace, n);
   }
   const existingDesigns = new Set(await listSavedDesigns(workspace));
   const existingLib = new Set(await listLibraryItems(workspace));
   const existingArch = new Set(await listArchivedLibraryItems(workspace));
+  const existingCells = new Set(await listCellDefs(workspace));
   for (const [n, payload] of Object.entries(bundle.designs || {})) {
     if (mode === 'merge' && existingDesigns.has(n)) { counts.skipped.push(`design:${n}`); continue; }
     if (await saveDesign(workspace, n, payload)) counts.designs++;
@@ -195,6 +241,10 @@ export async function importWorkspace(workspace, bundle, mode) {
   for (const [n, payload] of Object.entries(bundle.libraryArchive || {})) {
     if (mode === 'merge' && existingArch.has(n)) { counts.skipped.push(`archive:${n}`); continue; }
     if (await saveArchivedLibraryItem(workspace, n, payload)) counts.archive++;
+  }
+  for (const [n, payload] of Object.entries(bundle.cells || {})) {
+    if (mode === 'merge' && existingCells.has(n)) { counts.skipped.push(`cell:${n}`); continue; }
+    if (await saveCellDef(workspace, n, payload)) counts.cells++;
   }
   return counts;
 }

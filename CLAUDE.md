@@ -29,6 +29,8 @@ scene = {
   mirrors,      // mirror operations: axis, source compIds, target compIds
   groups,       // { id, memberIds, aliases, name }
   stack,        // layer stack: substrate, waveguide, conductor(s), cladding
+  cells,        // { name: def } — parametric cell masters embedded in the
+                // design (see "Parametric cells"); normalizeScene passthrough
   booleans      // LEGACY empty array; booleans now live in `components`
 }
 ```
@@ -194,6 +196,18 @@ For non-rect shapes, `expandTransforms` propagates shape-specific fields (r, rx,
 
 **Anchor flash** (C10): clicking a from/to anchor label in the SNAPS panel (or inspector snap rows) flashes that anchor dot on the canvas — `flashAnchor = { compId, anchor, nonce }` state; Canvas keys its timeout on the nonce so re-clicks re-flash.
 
+**ExprField** (`src/ui/panels/ExprField.jsx`): THE unified parametric-expression input. Wraps `DeferredTextInput` (draft → commit on Enter/blur, Esc reverts, identifier-prefix autocomplete) with the canonical styling convention: white = literal/multi-term expression, amber = lone param reference ("edits-by-reference"), red border/text = non-evaluating expression (failing expr in the tooltip); optional mini-label above and `= value` readout below; size presets `xs` (snap rows) / `sm` (transform rows) / `md` (Inspector dimension fields). Presentation only — commit semantics and auto-create-param (`commitExpr`) stay caller-owned. Used by the Inspector's `fieldRow`, `SnapConnectionRow`, and `TransformChainEditor`. (`ParamTuner`, the ±multiplicative param slider in ParamRow, is now a permanent feature, no longer EXPERIMENTAL.)
+
+## Canvas spatial indexes (perf)
+
+Hover snap-point lookup and alt-drag candidate search used to be full scans over every instance × anchor per mousemove; they now go through uniform-grid spatial indexes (pure helpers exported from `Canvas.jsx` for tests):
+
+- `buildUniformGrid` / `gridInsert` / `gridQuery` — uniform grid over WORLD coordinates. Cell size from `pickGridCellSize` (≈2× median indexed shape size, clamped) is viewport-independent, so zoom never forces a rebuild. Items insert into every cell their AABB overlaps; queries dedupe by identity and may return a SUPERSET of true matches — callers re-gate with their own exact distance/overlap checks, which is the equivalence contract with the old scans. NaN-bounded items are dropped (matches the old NaN-poisoned comparisons). Huge query boxes (zoomed way out) fall back to scanning occupied cells, bounding the worst case at O(N).
+- `buildAnchorSnapIndex` / `queryAnchorSnapIndex` — anchor dots + edge projections (repeats, rotation, boolean operand cells with `instanceIdx`); preserves the old tie order (fixed anchor beats same-distance edge; first-in-enumeration wins).
+- `buildAltDragTargetIndex` / `findAltDragSnapCandidate` — alt-drag snap-candidate search with the same rank penalties, cluster/consumed exclusions, and `currentBest` hysteresis input.
+
+Equivalence with the old full scans is enforced by `tests/canvas-perf-helpers.test.js` (probe sweeps + seeded fuzz vs scan oracles). If you touch candidate enumeration, update the oracle in that test too.
+
 ## Templates
 
 `src/templates/index.js` exports `BUILTIN_TEMPLATES` — modules of shape `{ id, name, description, insert(prev, { viewport }) => nextScene }`. Insertion adds id-prefixed params + components + snaps to the scene (positions via SNAPS, not literals, so HFSS sweeps stay parametric). The library panel's "Save as built-in template" generates the module source (`_codify.js`); user payload insertion goes through `_library-insert.js`. Current built-ins:
@@ -203,6 +217,16 @@ For non-rect shapes, `expandTransforms` propagates shape-specific fields (r, rx,
 - `builtin_cpw_gsg` — **CPW (G-S-G)**: signal + 2 grounds; `<id>_gap` sweeps both grounds symmetrically via snap dy
 - `builtin_gsg_probe_pads` — **GSG probe pads + tapers**: 3 pads + 3 TAPERED polyline tapers (per-segment parametric corner exprs in HFSS) + stubs
 - `builtin_idc_comb` — **Interdigitated capacitor**: 2 bus bars + finger combs via parametric `repeat` (HFSS DuplicateAlongLine)
+
+## Parametric cells
+
+Define once, instantiate many, update all (`src/scene/cells.js`):
+
+- **Definition** (`makeCellFromSelection(scene, selectedIds, name)`): a self-contained scene fragment — selected components + INTERNAL snaps (both endpoints inside) + the transitive param closure of every referenced expression. The params ARE the cell's interface (exprs = defaults; closure-only params listed in `internalParamNames`). Positions are normalized so the def is centered on (0, 0). Anything crossing the selection boundary (snaps, `consumedBy`, boolean operands, snap-pinned vertices) is stripped and reported in `warnings`.
+- **Instantiation** (`instantiateCell(def, prefix, overrides, atX, atY)`): every def-local identifier — param names AND component ids, including the synthetic `_comp_<id>_*` params — is renamed to `<prefix>_<name>` via `renameIdentInScene` (expression strings) plus a structural id remap (ids, `consumedBy`, `operandIds`, snap endpoints, snap-pinned vertices). Instance knobs become ORDINARY scene params (`<prefix>_*`), which is why HFSS parametricity is free: exporters see plain parametric components and emit one `set_var` per instance param. Override exprs are applied AFTER the prefix walk, verbatim (destination-namespace). Components carry a provenance tag `cellInstance: { cell, inst }`.
+- **Update** (`updateInstancesFromCell(scene, def)`): for each tagged instance prefix — capture current `<prefix>_*` exprs (the user's overrides) + bbox center, remove the instance (components, internal snaps, ALL prefixed params), re-instantiate the new def in place re-applying captured exprs where the param survives. Orphaned params and dangling external snaps are dropped; everything is reported in the returned `summary` (drives the confirm dialog). Also writes the def into `scene.cells`.
+- **Storage**: defs persist per-workspace under `cellPrefix` (`src/storage/workspace.js`: `listCellDefs`/`loadCellDef`/`saveCellDef`/`deleteCellDef`, bundled into workspace export/import via `library-items.js`) AND embed into `scene.cells` (normalizeScene passthrough) so a shared design brings its cells along. The app overlays `scene.cells` over workspace defs for display.
+- **UI**: CELLS section in the library panel — save selection as cell (warnings surfaced), insert instance (prompted prefix, auto-suggested `u<n>`, post-insert hint pointing at the `<prefix>_*` params), update instances (per-instance change summary confirm).
 
 ## Rendering
 
@@ -300,6 +324,13 @@ npx vitest run
 #   tests/keyboard-dup-params.test.js — nudge cluster expansion, cloneSnapsForDuplicate rules,
 #                                       groupParamPrefixes param-section grouping
 #   tests/posexpr-pivot.test.js       — cxExpr/cyExpr solver + export behavior, custom rotate pivots
+#   tests/cells.test.js               — parametric cells: selection→def (warnings, param closure),
+#                                       prefix instantiation, two-instance coexistence + HFSS set_var
+#                                       parametricity, update-from-master, workspace storage round-trip
+#   tests/canvas-perf-helpers.test.js — uniform-grid spatial index + anchor-snap / alt-drag index
+#                                       EQUIVALENCE vs the old full-scan oracles (probe sweeps +
+#                                       seeded fuzz), boolean-operand cells, tie-order preservation
+# (plus per-module unit files: anchors, geometry, params, schema, solver, transforms, versions)
 
 # Production build
 npm run build

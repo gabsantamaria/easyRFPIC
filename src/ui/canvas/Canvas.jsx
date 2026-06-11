@@ -247,6 +247,485 @@ export function alignAxis(dragVals, targets, thresh) {
 }
 
 // =========================================================================
+// F1 — uniform-grid spatial index: pure helpers (exported for tests)
+// =========================================================================
+// A uniform grid over WORLD coordinates. Cell size derives from the indexed
+// geometry (viewport-independent), so zoom changes never force a rebuild.
+// Items are inserted into every cell their AABB overlaps; queries visit each
+// item at most once (identity dedupe) and may return a SUPERSET of true
+// matches — callers re-gate with their own exact distance / overlap checks,
+// which is what preserves behavioral equivalence with the old full scans.
+export function buildUniformGrid(cellSize) {
+  return { cellSize: Number.isFinite(cellSize) && cellSize > 0 ? cellSize : 1, cells: new Map() };
+}
+
+export function gridInsert(grid, minX, minY, maxX, maxY, item) {
+  const cs = grid.cellSize;
+  const ix0 = Math.floor(minX / cs), ix1 = Math.floor(maxX / cs);
+  const iy0 = Math.floor(minY / cs), iy1 = Math.floor(maxY / cs);
+  // NaN bounds: the old scans rejected such candidates via NaN-poisoned
+  // distance comparisons; dropping them from the index is equivalent.
+  if (!Number.isFinite(ix0) || !Number.isFinite(ix1) || !Number.isFinite(iy0) || !Number.isFinite(iy1)) return;
+  for (let ix = ix0; ix <= ix1; ix++) {
+    for (let iy = iy0; iy <= iy1; iy++) {
+      const k = `${ix},${iy}`;
+      let arr = grid.cells.get(k);
+      if (!arr) { arr = []; grid.cells.set(k, arr); }
+      arr.push(item);
+    }
+  }
+}
+
+// Visit every item whose insertion AABB overlaps the query box. When the
+// box covers more cells than are occupied (zoomed way out → huge world
+// threshold), scan the occupied cells directly instead — bounds the worst
+// case at O(N) rather than O(cells in range).
+export function gridQuery(grid, minX, minY, maxX, maxY, visit) {
+  const cs = grid.cellSize;
+  const ix0 = Math.floor(minX / cs), ix1 = Math.floor(maxX / cs);
+  const iy0 = Math.floor(minY / cs), iy1 = Math.floor(maxY / cs);
+  if (!Number.isFinite(ix0) || !Number.isFinite(ix1) || !Number.isFinite(iy0) || !Number.isFinite(iy1)) return;
+  const seen = new Set();
+  const scan = (arr) => {
+    for (const item of arr) {
+      if (!seen.has(item)) { seen.add(item); visit(item); }
+    }
+  };
+  const nCells = (ix1 - ix0 + 1) * (iy1 - iy0 + 1);
+  if (!Number.isFinite(nCells) || nCells >= grid.cells.size) {
+    for (const arr of grid.cells.values()) scan(arr);
+    return;
+  }
+  for (let ix = ix0; ix <= ix1; ix++) {
+    for (let iy = iy0; iy <= iy1; iy++) {
+      const arr = grid.cells.get(`${ix},${iy}`);
+      if (arr) scan(arr);
+    }
+  }
+}
+
+// Cell size heuristic: a couple × the median indexed shape size ("a few ×
+// typical anchor spacing" — anchors sit half a shape apart). Derived purely
+// from world-space geometry so the index is viewport-independent.
+export function pickGridCellSize(sizes, fallback = 10) {
+  const vals = [];
+  for (const v of sizes || []) if (Number.isFinite(v) && v > 0) vals.push(v);
+  if (vals.length === 0) return fallback;
+  vals.sort((a, b) => a - b);
+  return Math.max(1e-3, vals[Math.floor(vals.length / 2)] * 2);
+}
+
+// -------------------------------------------------------------------------
+// Anchor / ruler snap index. One index serves findRulerSnap AND
+// findAnchorSnap: it carries every candidate the old exhaustive scans
+// enumerated, in two families:
+//   - anchor grid:  the 9 ROTATED fixed-anchor world points per "source"
+//   - rect grid:    one record per source for the parametric edge-projection
+//                   pass (a projection is a function of the cursor, so it
+//                   can't be a point lookup — nearby sources are found via
+//                   their world AABB, then the EXACT original projection
+//                   math runs on each)
+// Sources are (in this order, which fixes tie-breaking):
+//   1. every transform instance with finite positive w/h (base + repeat /
+//      mirror copies, including boolean outer AABBs) — anchors and edge
+//      projections both live in the instance's rotated local frame;
+//   2. per-operand cells of TRANSFORMED boolean instances (idx > 0):
+//      anchors rotate by chain + base rotation, edge projections stay
+//      axis-aligned — exactly the approximation the old code used.
+// Each source owns a block of 13 sequence slots (9 anchors, then T, B, L, R
+// projections) matching the old consider() call order; queries pick the
+// lexicographic (distance, seq) minimum, which reproduces the old scans'
+// nearest-wins / first-wins-on-tie selection EXACTLY.
+export function buildAnchorSnapIndex(transformInstances, solved) {
+  const sources = [];
+  // (1) transform-expanded instances.
+  for (const inst of transformInstances) {
+    const w = inst.w, h = inst.h;
+    if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) continue;
+    const rot = inst.rotation || 0;
+    sources.push({
+      cx: inst.cx, cy: inst.cy, w, h,
+      anchorRot: rot, projRot: rot,
+      compId: inst.compId, instanceIdx: inst.idx,
+      // excludeKey: the id findAnchorSnap's excludeCompId filter tests.
+      excludeKey: inst.compId,
+    });
+  }
+  // (2) boolean operand cells at idx > 0 — same translate → mirror → rotate
+  // composition the boolean cluster renderer uses (see
+  // buildBoolOverridesForInstance).
+  const solvedById = new Map(solved.map(c => [c.id, c]));
+  const baseInstByCompId = new Map();
+  for (const ii of transformInstances) {
+    if (ii.idx === 0 && !baseInstByCompId.has(ii.compId)) baseInstByCompId.set(ii.compId, ii);
+  }
+  for (const inst of transformInstances) {
+    if (inst.kind !== 'boolean' || inst.idx === 0) continue;
+    const b = solvedById.get(inst.compId);
+    if (!b) continue;
+    const dx = inst.cx - b.cx;
+    const dy = inst.cy - b.cy;
+    const rot = inst.rotation || 0;
+    const bSx = inst.scaleX ?? 1;
+    const bSy = inst.scaleY ?? 1;
+    if (!dx && !dy && !rot && bSx === 1 && bSy === 1) continue;
+    const rad = rot * Math.PI / 180;
+    const ca = Math.cos(rad), sa = Math.sin(rad);
+    const visitOp = (cid) => {
+      const op = solvedById.get(cid);
+      if (!op) return;
+      if (op.kind === 'boolean') {
+        for (const childId of (op.operandIds || [])) visitOp(childId);
+        return;
+      }
+      const baseInst = baseInstByCompId.get(op.id);
+      if (!baseInst) return;
+      const opW = baseInst.w, opH = baseInst.h;
+      if (!Number.isFinite(opW) || !Number.isFinite(opH) || opW <= 0 || opH <= 0) return;
+      let tx = baseInst.cx + dx;
+      let ty = baseInst.cy + dy;
+      if (bSx === -1) tx = 2 * inst.cx - tx;
+      if (bSy === -1) ty = 2 * inst.cy - ty;
+      const rxC = tx - inst.cx;
+      const ryC = ty - inst.cy;
+      const newCx = rot ? inst.cx + rxC * ca - ryC * sa : tx;
+      const newCy = rot ? inst.cy + rxC * sa + ryC * ca : ty;
+      sources.push({
+        cx: newCx, cy: newCy, w: opW, h: opH,
+        anchorRot: rot + (baseInst.rotation || 0),
+        projRot: 0, // operand-cell edge projections stay axis-aligned
+        compId: op.id, instanceIdx: inst.idx,
+        // The old scan excluded operand-cell candidates when the BOOLEAN
+        // was the excluded component (not the operand).
+        excludeKey: inst.compId,
+      });
+    };
+    for (const opid of (b.operandIds || [])) visitOp(opid);
+  }
+  const cellSize = pickGridCellSize(sources.map(s => Math.max(s.w, s.h)));
+  const anchorGrid = buildUniformGrid(cellSize);
+  const rectGrid = buildUniformGrid(cellSize);
+  let seqBase = 0;
+  for (const s of sources) {
+    for (let ai = 0; ai < ANCHORS.length; ai++) {
+      const lp = anchorLocalRotated(ANCHORS[ai], s.w, s.h, s.anchorRot);
+      const x = s.cx + lp.x, y = s.cy + lp.y;
+      gridInsert(anchorGrid, x, y, x, y, {
+        x, y, compId: s.compId, anchor: ANCHORS[ai],
+        instanceIdx: s.instanceIdx, excludeKey: s.excludeKey,
+        seq: seqBase + ai,
+      });
+    }
+    // World AABB of the (projRot-rotated) rect — every edge-projection
+    // point lies inside it, so a disc-bbox query can never miss a source
+    // that the old scan would have produced a candidate from.
+    const rad = s.projRot * Math.PI / 180;
+    const ca = Math.abs(Math.cos(rad)), sa = Math.abs(Math.sin(rad));
+    const hw = (s.w / 2) * ca + (s.h / 2) * sa;
+    const hh = (s.w / 2) * sa + (s.h / 2) * ca;
+    gridInsert(rectGrid, s.cx - hw, s.cy - hh, s.cx + hw, s.cy + hh, { ...s, seqBase });
+    seqBase += 13;
+  }
+  return { anchorGrid, rectGrid, cellSize };
+}
+
+// Query the anchor snap index for the best candidate within `worldThresh`
+// of wp. Returns null or
+//   { kind: 'anchor', x, y, compId, anchor, instanceIdx, d, seq }
+//   { kind: 'edge',   x, y, compId, side: 'T'|'B'|'L'|'R', t, instanceIdx, d, seq }
+// Selection = lexicographic (d, seq) minimum — identical to the old scans'
+// encounter-order strict-< tie-breaking.
+export function queryAnchorSnapIndex(index, wp, worldThresh, excludeCompId = null) {
+  if (!index) return null;
+  let best = null;
+  const better = (d, seq) => !best || d < best.d || (d === best.d && seq < best.seq);
+  const minX = wp.x - worldThresh, maxX = wp.x + worldThresh;
+  const minY = wp.y - worldThresh, maxY = wp.y + worldThresh;
+  // Fixed anchors.
+  gridQuery(index.anchorGrid, minX, minY, maxX, maxY, (pt) => {
+    if (excludeCompId && pt.excludeKey === excludeCompId) return;
+    const d = Math.sqrt((wp.x - pt.x) * (wp.x - pt.x) + (wp.y - pt.y) * (wp.y - pt.y));
+    if (d <= worldThresh && better(d, pt.seq)) {
+      best = {
+        kind: 'anchor', x: pt.x, y: pt.y, compId: pt.compId,
+        anchor: pt.anchor, instanceIdx: pt.instanceIdx, d, seq: pt.seq,
+      };
+    }
+  });
+  // Parametric edge projections on nearby sources — the EXACT local-frame
+  // math the old scans ran on every instance, here only on sources whose
+  // world AABB intersects the query disc's bbox.
+  gridQuery(index.rectGrid, minX, minY, maxX, maxY, (r) => {
+    if (excludeCompId && r.excludeKey === excludeCompId) return;
+    const rad = r.projRot * Math.PI / 180;
+    const ca = Math.cos(rad), sa = Math.sin(rad);
+    const lwx = (wp.x - r.cx) * ca + (wp.y - r.cy) * sa;
+    const lwy = -(wp.x - r.cx) * sa + (wp.y - r.cy) * ca;
+    const x0 = -r.w / 2, x1 = r.w / 2;
+    const y0 = -r.h / 2, y1 = r.h / 2;
+    const toWorld = (lx, ly) => ({ x: r.cx + lx * ca - ly * sa, y: r.cy + lx * sa + ly * ca });
+    const tryProj = (p, side, t, slot) => {
+      const d = Math.sqrt((wp.x - p.x) * (wp.x - p.x) + (wp.y - p.y) * (wp.y - p.y));
+      const seq = r.seqBase + slot;
+      if (d <= worldThresh && better(d, seq)) {
+        best = {
+          kind: 'edge', x: p.x, y: p.y, compId: r.compId,
+          side, t, instanceIdx: r.instanceIdx, d, seq,
+        };
+      }
+    };
+    if (lwx >= x0 - worldThresh && lwx <= x1 + worldThresh) {
+      const projX = Math.max(x0, Math.min(x1, lwx));
+      const tX = (projX - x0) / (x1 - x0);
+      tryProj(toWorld(projX, y1), 'T', tX, 9);
+      tryProj(toWorld(projX, y0), 'B', tX, 10);
+    }
+    if (lwy >= y0 - worldThresh && lwy <= y1 + worldThresh) {
+      const projY = Math.max(y0, Math.min(y1, lwy));
+      const tY = (projY - y0) / (y1 - y0);
+      tryProj(toWorld(x0, projY), 'L', tY, 11);
+      tryProj(toWorld(x1, projY), 'R', tY, 12);
+    }
+  });
+  return best;
+}
+
+// Ruler labels for edge-projection hits (matches the old findRulerSnap
+// label strings exactly).
+const RULER_EDGE_LABEL = { T: 'top', B: 'bot', L: 'left', R: 'right' };
+
+// -------------------------------------------------------------------------
+// Alt-drag target index: 9 rotated anchors + the axis-aligned bbox per
+// SOLVED component (skipping consumed operands — same gate the old per-tick
+// scan applied). clusterSet exclusion is drag-specific and happens at query
+// time. Each component owns a 99-slot sequence block (81 anchor pairs +
+// 9 h-edge + 9 v-edge candidates) reproducing the old enumeration order.
+export function buildAltDragTargetIndex(solved, paramValues, dimsByCompId) {
+  const recs = [];
+  for (let k = 0; k < solved.length; k++) {
+    const oc = solved[k];
+    if (oc.consumedBy) continue;
+    const dims = (dimsByCompId && dimsByCompId[oc.id]) || {
+      w: evalExpr(oc.w, paramValues), h: evalExpr(oc.h, paramValues),
+    };
+    const ow = dims.w, oh = dims.h;
+    if (!Number.isFinite(ow) || !Number.isFinite(oh) || ow <= 0 || oh <= 0) continue;
+    recs.push({ oc, ocIdx: k, ow, oh, rot: compRotationDeg(oc, paramValues) });
+  }
+  const cellSize = pickGridCellSize(recs.map(r => Math.max(r.ow, r.oh)));
+  const anchorGrid = buildUniformGrid(cellSize);
+  const rectGrid = buildUniformGrid(cellSize);
+  for (const r of recs) {
+    for (let ai = 0; ai < ANCHORS.length; ai++) {
+      const lp = anchorLocalRotated(ANCHORS[ai], r.ow, r.oh, r.rot);
+      const x = r.oc.cx + lp.x, y = r.oc.cy + lp.y;
+      gridInsert(anchorGrid, x, y, x, y, {
+        x, y, compId: r.oc.id, anchor: ANCHORS[ai], anchorIdx: ai, ocIdx: r.ocIdx,
+      });
+    }
+    gridInsert(
+      rectGrid,
+      r.oc.cx - r.ow / 2, r.oc.cy - r.oh / 2,
+      r.oc.cx + r.ow / 2, r.oc.cy + r.oh / 2,
+      r
+    );
+  }
+  return { anchorGrid, rectGrid, cellSize };
+}
+
+// The alt-drag candidate-pair search, index-backed. Returns
+// { best, currentBest } with candidate objects shaped EXACTLY like the old
+// inline scan produced:
+//   anchor: { kind:'anchor', dist, dAnchor, target: { x, y, compId, anchor } }
+//   edge:   { kind:'edge', dist, rawDist, axis, targetCompId, targetSide,
+//             dSide, edgeVal, x, y }
+// `currentBest` is the candidate matching the prior tick's moveSnapHover
+// (for the caller's hysteresis), tracked only when within threshold — same
+// as before. Tie-breaking uses per-component sequence blocks so the winner
+// matches the old solved-order scan exactly.
+export function findAltDragSnapCandidate(index, {
+  proposedCx, proposedCy, dw, dh, dragRotationDeg = 0,
+  clusterSet = null, worldThresh, moveSnapHover = null,
+}) {
+  let best = null;
+  let bestSeq = Infinity;
+  let currentBest = null;
+  const better = (dist, seq) => !best || dist < best.dist || (dist === best.dist && seq < bestSeq);
+  const SEQ_BLOCK = 99;
+  const dxMin = proposedCx - dw / 2, dxMax = proposedCx + dw / 2;
+  const dyMin = proposedCy - dh / 2, dyMax = proposedCy + dh / 2;
+  // -----------------------------------------------------------
+  // (1) Anchor-pair candidates: for each of the dragged cluster's
+  //     9 (rotation-aware) anchors, pull target anchors within
+  //     threshold from the index instead of scanning every
+  //     component × 81 pairs.
+  // -----------------------------------------------------------
+  for (let dj = 0; dj < ANCHORS.length; dj++) {
+    const da = ANCHORS[dj];
+    const dlp = anchorLocalRotated(da, dw, dh, dragRotationDeg);
+    const dax = proposedCx + dlp.x;
+    const day = proposedCy + dlp.y;
+    gridQuery(
+      index.anchorGrid,
+      dax - worldThresh, day - worldThresh, dax + worldThresh, day + worldThresh,
+      (pt) => {
+        if (clusterSet && clusterSet.has(pt.compId)) return;
+        const dist = Math.hypot(pt.x - dax, pt.y - day);
+        if (dist <= worldThresh) {
+          const cand = {
+            kind: 'anchor',
+            dist,
+            dAnchor: da,
+            target: { x: pt.x, y: pt.y, compId: pt.compId, anchor: pt.anchor },
+          };
+          const seq = pt.ocIdx * SEQ_BLOCK + pt.anchorIdx * 9 + dj;
+          if (better(dist, seq)) { best = cand; bestSeq = seq; }
+          if (moveSnapHover && moveSnapHover.kind === 'anchor' &&
+              moveSnapHover.compId === pt.compId &&
+              moveSnapHover.anchor === pt.anchor &&
+              moveSnapHover.dAnchor === da) {
+            currentBest = cand;
+          }
+        }
+      }
+    );
+  }
+  // -----------------------------------------------------------
+  // (2) Edge-pair candidates on components whose bbox is within
+  //     threshold of the dragged cluster bbox (a bbox query can't
+  //     miss any: an edge candidate needs strict overlap on one
+  //     axis and a ≤ threshold edge offset on the other). The
+  //     per-component logic below is byte-for-byte the old pass.
+  // -----------------------------------------------------------
+  gridQuery(
+    index.rectGrid,
+    dxMin - worldThresh, dyMin - worldThresh, dxMax + worldThresh, dyMax + worldThresh,
+    (r) => {
+      const oc = r.oc;
+      if (clusterSet && clusterSet.has(oc.id)) return;
+      const ow = r.ow, oh = r.oh;
+      const oxMin = oc.cx - ow / 2, oxMax = oc.cx + ow / 2;
+      const oyMin = oc.cy - oh / 2, oyMax = oc.cy + oh / 2;
+      const xOverlap = Math.min(oxMax, dxMax) - Math.max(oxMin, dxMin);
+      const yOverlap = Math.min(oyMax, dyMax) - Math.max(oyMin, dyMin);
+      // Edge candidates get a constant ranking penalty on top of their raw
+      // 1-D distance so the closest anchor pair wins when the user is
+      // clearly aiming at a corner / midpoint (see the original rationale
+      // in the alt-drag handler). Threshold gating is unchanged.
+      const EDGE_RANK_PENALTY = worldThresh * 0.4;
+      const tryEdge = (axis, dSide, dEdgeVal, tSide, tEdgeVal, midX, midY, slot) => {
+        const rawDist = Math.abs(dEdgeVal - tEdgeVal);
+        if (rawDist > worldThresh) return;
+        const cand = {
+          kind: 'edge',
+          dist: rawDist + EDGE_RANK_PENALTY,
+          rawDist,
+          axis,
+          targetCompId: oc.id,
+          targetSide: tSide,
+          dSide,
+          edgeVal: tEdgeVal,
+          x: midX, y: midY,
+        };
+        const seq = r.ocIdx * SEQ_BLOCK + 81 + slot;
+        if (better(cand.dist, seq)) { best = cand; bestSeq = seq; }
+        if (moveSnapHover && moveSnapHover.kind === 'edge' &&
+            moveSnapHover.axis === axis &&
+            moveSnapHover.targetCompId === oc.id &&
+            moveSnapHover.targetSide === tSide &&
+            moveSnapHover.dSide === dSide) {
+          currentBest = cand;
+        }
+      };
+      if (xOverlap > 0) {
+        const midX = (Math.max(oxMin, dxMin) + Math.min(oxMax, dxMax)) / 2;
+        const dSidesY = [['top', dyMax], ['bottom', dyMin], ['centerY', proposedCy]];
+        const tSidesY = [['top', oyMax], ['bottom', oyMin], ['centerY', oc.cy]];
+        for (let di = 0; di < dSidesY.length; di++) {
+          for (let ti = 0; ti < tSidesY.length; ti++) {
+            tryEdge('h', dSidesY[di][0], dSidesY[di][1], tSidesY[ti][0], tSidesY[ti][1], midX, tSidesY[ti][1], di * 3 + ti);
+          }
+        }
+      }
+      if (yOverlap > 0) {
+        const midY = (Math.max(oyMin, dyMin) + Math.min(oyMax, dyMax)) / 2;
+        const dSidesX = [['right', dxMax], ['left', dxMin], ['centerX', proposedCx]];
+        const tSidesX = [['right', oxMax], ['left', oxMin], ['centerX', oc.cx]];
+        for (let di = 0; di < dSidesX.length; di++) {
+          for (let ti = 0; ti < tSidesX.length; ti++) {
+            tryEdge('v', dSidesX[di][0], dSidesX[di][1], tSidesX[ti][0], tSidesX[ti][1], tSidesX[ti][1], midY, 9 + di * 3 + ti);
+          }
+        }
+      }
+    }
+  );
+  return { best, currentBest };
+}
+
+// =========================================================================
+// F3 — boolean per-instance operand overrides: pure builder (exported for
+// tests). Composes a boolean instance's transform (translate → mirror →
+// rotate about the instance centroid) onto each PRIMITIVE operand's base
+// instance, recursively through nested booleans. Returns a map
+// compId → synthetic instance, or null when the instance carries no
+// transform. `compById` maps SCENE components; `baseInstOf(c)` returns the
+// operand's own base (idx 0) transform instance.
+// =========================================================================
+export function buildBoolOverridesForInstance(b, bInst, bBaseCx, bBaseCy, compById, baseInstOf) {
+  const dx = bInst.cx - bBaseCx;
+  const dy = bInst.cy - bBaseCy;
+  const rot = bInst.rotation || 0;
+  const bSx = bInst.scaleX ?? 1;
+  const bSy = bInst.scaleY ?? 1;
+  if (!dx && !dy && !rot && bSx === 1 && bSy === 1) return null;
+  const rad = rot * Math.PI / 180;
+  const ca = Math.cos(rad), sa = Math.sin(rad);
+  const overrides = {};
+  // Walk the boolean's operand tree, transforming each PRIMITIVE operand it
+  // finds. Nested booleans' operands also get transformed; the parent
+  // boolean's transform applies uniformly to every descendant.
+  const visit = (c) => {
+    if (!c) return;
+    if (c.kind === 'boolean') {
+      for (const id of (c.operandIds || [])) visit(compById[id]);
+      return;
+    }
+    // Take the operand's base (un-transformed-by-the-boolean) instance.
+    const base = baseInstOf(c);
+    // Step 1: translate the operand by (dx, dy) so its position is
+    // expressed in the post-translation frame around bInst.
+    const tx = base.cx + dx;
+    const ty = base.cy + dy;
+    // Step 2: if the boolean carries a mirror, reflect the operand about
+    // the boolean's instance center along the appropriate axis. This flips
+    // the operand's position AND toggles its own scale flags so the
+    // operand's shape renders mirrored, not just repositioned.
+    let mx = tx, my = ty;
+    let opSx = base.scaleX ?? 1, opSy = base.scaleY ?? 1;
+    if (bSx === -1) { mx = 2 * bInst.cx - tx; opSx = -opSx; }
+    if (bSy === -1) { my = 2 * bInst.cy - ty; opSy = -opSy; }
+    // Step 3: rotate the (translated-then-mirrored) point about the
+    // boolean's instance center. expandTransforms already negated rotation
+    // when a mirror fired, so the recorded `rot` is correct for the final
+    // orientation.
+    const rx = mx - bInst.cx;
+    const ry = my - bInst.cy;
+    const newCx = rot ? bInst.cx + rx * ca - ry * sa : mx;
+    const newCy = rot ? bInst.cy + rx * sa + ry * ca : my;
+    overrides[c.id] = {
+      ...base,
+      cx: newCx,
+      cy: newCy,
+      rotation: (base.rotation || 0) + rot,
+      scaleX: opSx,
+      scaleY: opSy,
+    };
+  };
+  visit(b);
+  return overrides;
+}
+
+// =========================================================================
 // CANVAS
 // =========================================================================
 export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelection, viewport, setViewport, snapMode, setSnapMode, gridSize, gridSnapEnabled, showGrid = true, paramValues, addParam, updateParamExpr, rulerMode, setRulerMode, rulerMeasurements, setRulerMeasurements, rulerInProgress, setRulerInProgress, rulerSnapPoint, setRulerSnapPoint, alertDialog, setInteractionStatus, showDimensions, addMode, setAddMode, commitDragAdd, onComponentContextMenu, onSvgElement, flashAnchor = null }) {
@@ -278,6 +757,38 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     }
     return m;
   }, [transformInstances]);
+
+  // [F2] Evaluated dims per SOLVED component. evalExpr passes numbers
+  // through unchanged, so this matches both the bare evalExpr(c.w) sites
+  // and the `typeof c.w === 'string' ? evalExpr(...) : c.w` sites it
+  // replaces (solved primitives carry expression strings; solved booleans
+  // carry numerics written by resolveBooleanBboxes).
+  const dimsByCompId = useMemo(() => {
+    const m = {};
+    for (const c of solved) {
+      m[c.id] = { w: evalExpr(c.w, paramValues), h: evalExpr(c.h, paramValues) };
+    }
+    return m;
+  }, [solved, paramValues]);
+
+  // [F1] Spatial index over every anchor candidate findRulerSnap /
+  // findAnchorSnap used to enumerate per call (9 rotated anchors per
+  // transform instance + boolean operand cells + edge-projection rects).
+  // Stable across mousemoves — the heavy consumers (ruler hover, polyline
+  // draft, add-drag) don't mutate the scene while probing.
+  const anchorSnapIndex = useMemo(
+    () => buildAnchorSnapIndex(transformInstances, solved),
+    [transformInstances, solved]
+  );
+
+  // [F1] Alt-drag target index (9 rotated anchors + bbox per solved,
+  // non-consumed component). Rebuilds when the solve changes — during an
+  // alt-drag that's once per committed move, still far cheaper than the
+  // old per-tick solved × 81 anchor-pair scan.
+  const altDragTargetIndex = useMemo(
+    () => buildAltDragTargetIndex(solved, paramValues, dimsByCompId),
+    [solved, paramValues, dimsByCompId]
+  );
 
   // Related components: anything snapped to or from the selected component, plus mirror partners
   const relatedIds = useMemo(() => {
@@ -700,133 +1211,21 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
   // Find the closest snappable feature within `worldThresh` units of (wp.x, wp.y).
   // Checks 9 fixed anchors per component first, then nearest point on each edge.
   // Returns { x, y, label } or null. `label` is a short description for the UI.
+  //
+  // [F1] Index-backed: the memoized anchorSnapIndex carries every candidate
+  // the old exhaustive scan enumerated — 9 rotated anchors per transform
+  // instance (base + repeat / mirror copies, booleans' outer AABBs), the
+  // edge-projection rects, AND the per-operand cells of transformed boolean
+  // instances — with sequence numbers reproducing the old enumeration
+  // order, so nearest-wins + first-wins-on-tie selection is unchanged.
   const findRulerSnap = (wp, worldThresh) => {
-    let best = null;
-    const consider = (x, y, label) => {
-      const dx = wp.x - x, dy = wp.y - y;
-      const d = Math.sqrt(dx * dx + dy * dy);
-      if (d <= worldThresh && (!best || d < best.d)) best = { x, y, label, d };
-    };
-    // Iterate transform-expanded instances rather than the base solved
-    // list. This makes the ruler snap to EVERY rendered shape — the
-    // parent at idx=0 AND every child copy produced by a `repeat` /
-    // `duplicate_mirror`. For booleans the per-instance cx/cy/w/h
-    // describes the cluster's AABB at that copy's position, so the
-    // user can snap to corners / edges of each repeated cell, not just
-    // the base one. Iterating `solved` (the previous behavior) only saw
-    // the base position and silently ignored child cells.
-    for (const inst of transformInstances) {
-      const w = inst.w;
-      const h = inst.h;
-      if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) continue;
-      const cx = inst.cx, cy = inst.cy;
-      const tag = inst.idx > 0 ? `${inst.compId}#${inst.idx}` : inst.compId;
-      // Rotation (first-class `rotation` field + transform-chain rotates,
-      // both already composed into inst.rotation). Anchors and edge
-      // projections live in the SHAPE's local frame so the snap points
-      // sit on the rotated shape's actual corners/edges.
-      const rot = inst.rotation || 0;
-      const rad = rot * Math.PI / 180;
-      const ca = Math.cos(rad), sa = Math.sin(rad);
-      const toWorld = (lx, ly) => ({ x: cx + lx * ca - ly * sa, y: cy + lx * sa + ly * ca });
-      // 9 fixed anchors
-      for (const a of ANCHORS) {
-        const lp = anchorLocalRotated(a, w, h, rot);
-        consider(cx + lp.x, cy + lp.y, `${tag} ${a}`);
-      }
-      // Nearest point on each edge (parametric snap): project the cursor
-      // in the shape's LOCAL frame, then map back to world.
-      const lwx = (wp.x - cx) * ca + (wp.y - cy) * sa;
-      const lwy = -(wp.x - cx) * sa + (wp.y - cy) * ca;
-      const x0 = -w / 2, x1 = w / 2;
-      const y0 = -h / 2, y1 = h / 2;
-      // Top/bottom edges (local y = ±h/2)
-      if (lwx >= x0 - worldThresh && lwx <= x1 + worldThresh) {
-        const xProj = Math.max(x0, Math.min(x1, lwx));
-        const pT = toWorld(xProj, y1);
-        const pB = toWorld(xProj, y0);
-        consider(pT.x, pT.y, `${tag} top`);
-        consider(pB.x, pB.y, `${tag} bot`);
-      }
-      // Left/right edges (local x = ±w/2)
-      if (lwy >= y0 - worldThresh && lwy <= y1 + worldThresh) {
-        const yProj = Math.max(y0, Math.min(y1, lwy));
-        const pL = toWorld(x0, yProj);
-        const pR = toWorld(x1, yProj);
-        consider(pL.x, pL.y, `${tag} left`);
-        consider(pR.x, pR.y, `${tag} right`);
-      }
-    }
-    // For BOOLEAN INSTANCES at idx > 0 (repeats / mirror copies of a
-    // unioned cluster like the meander), also walk the cluster's
-    // operands and emit anchor points at each operand's TRANSFORMED
-    // position — same translate/rotate/mirror composition the canvas
-    // uses to render the child cell. Without this, snapping inside a
-    // repeated cell only finds the outer AABB; with it, you can hover
-    // any rail/frame/connector edge in any cell. The math mirrors
-    // `buildBoolInstanceOverrides` in the boolean renderer below.
-    for (const inst of transformInstances) {
-      if (inst.kind !== 'boolean' || inst.idx === 0) continue;
-      const b = solved.find(c => c.id === inst.compId);
-      if (!b) continue;
-      const dx = inst.cx - b.cx;
-      const dy = inst.cy - b.cy;
-      const rot = inst.rotation || 0;
-      const bSx = inst.scaleX ?? 1;
-      const bSy = inst.scaleY ?? 1;
-      if (!dx && !dy && !rot && bSx === 1 && bSy === 1) continue;
-      const rad = rot * Math.PI / 180;
-      const ca = Math.cos(rad), sa = Math.sin(rad);
-      const visitOp = (cid) => {
-        const op = solved.find(c => c.id === cid);
-        if (!op) return;
-        if (op.kind === 'boolean') {
-          for (const childId of (op.operandIds || [])) visitOp(childId);
-          return;
-        }
-        // Look up the operand's base instance for its w/h (already
-        // numeric in transformInstances) and base cx/cy.
-        const baseInst = transformInstances.find(ii => ii.compId === op.id && ii.idx === 0);
-        if (!baseInst) return;
-        const opW = baseInst.w, opH = baseInst.h;
-        if (!Number.isFinite(opW) || !Number.isFinite(opH) || opW <= 0 || opH <= 0) return;
-        // Compose translate → mirror → rotate, same as buildBoolInstanceOverrides
-        let tx = baseInst.cx + dx;
-        let ty = baseInst.cy + dy;
-        if (bSx === -1) tx = 2 * inst.cx - tx;
-        if (bSy === -1) ty = 2 * inst.cy - ty;
-        const rxC = tx - inst.cx;
-        const ryC = ty - inst.cy;
-        const newCx = rot ? inst.cx + rxC * ca - ryC * sa : tx;
-        const newCy = rot ? inst.cy + rxC * sa + ryC * ca : ty;
-        const tagOp = `${op.id}#${inst.idx}`;
-        // Operand anchors rotate by the operand's own visible rotation
-        // (its first-class base rotation, already seeded into its base
-        // instance) composed with the cluster's chain rotation. Edge
-        // projections below stay axis-aligned — an approximation that's
-        // exact for rot=0 (the vast majority of meander / lattice use
-        // cases).
-        const opVisRot = rot + (baseInst.rotation || 0);
-        for (const a of ANCHORS) {
-          const lp = anchorLocalRotated(a, opW, opH, opVisRot);
-          consider(newCx + lp.x, newCy + lp.y, `${tagOp} ${a}`);
-        }
-        const ox0 = newCx - opW / 2, ox1 = newCx + opW / 2;
-        const oy0 = newCy - opH / 2, oy1 = newCy + opH / 2;
-        if (wp.x >= ox0 - worldThresh && wp.x <= ox1 + worldThresh) {
-          const xProj = Math.max(ox0, Math.min(ox1, wp.x));
-          consider(xProj, oy1, `${tagOp} top`);
-          consider(xProj, oy0, `${tagOp} bot`);
-        }
-        if (wp.y >= oy0 - worldThresh && wp.y <= oy1 + worldThresh) {
-          const yProj = Math.max(oy0, Math.min(oy1, wp.y));
-          consider(ox0, yProj, `${tagOp} left`);
-          consider(ox1, yProj, `${tagOp} right`);
-        }
-      };
-      for (const opid of (b.operandIds || [])) visitOp(opid);
-    }
-    return best;
+    const hit = queryAnchorSnapIndex(anchorSnapIndex, wp, worldThresh);
+    if (!hit) return null;
+    const tag = hit.instanceIdx > 0 ? `${hit.compId}#${hit.instanceIdx}` : hit.compId;
+    const label = hit.kind === 'anchor'
+      ? `${tag} ${hit.anchor}`
+      : `${tag} ${RULER_EDGE_LABEL[hit.side]}`;
+    return { x: hit.x, y: hit.y, label, d: hit.d };
   };
 
   // Like findRulerSnap, but also reports WHICH component and WHICH anchor the
@@ -902,130 +1301,25 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     );
   };
 
+  // [F1] Index-backed (see findRulerSnap). The result records the candidate
+  // AND the instance index it came from. `instanceIdx === 0` = base
+  // component (parametric snap bindings are safe to install);
+  // `instanceIdx > 0` = a child copy produced by a transform (visual snap
+  // only — the scene model can't currently express "bind to instance N"
+  // parametrically, so the caller should treat it as a free position).
+  // Edge hits become parametric edge anchors tagged T:t / B:t / L:t / R:t,
+  // t ∈ [0, 1] — same strings the old inline scan produced.
   const findAnchorSnap = (wp, worldThresh, excludeCompId = null) => {
-    let best = null;
-    // Each consider() records the candidate AND the instance index it
-    // came from. `instanceIdx === 0` = base component (parametric snap
-    // bindings are safe to install); `instanceIdx > 0` = a child copy
-    // produced by a transform (visual snap only — the scene model
-    // can't currently express "bind to instance N" parametrically, so
-    // the caller should treat it as a free position).
-    const consider = (x, y, compId, anchor, instanceIdx = 0) => {
-      const dx = wp.x - x, dy = wp.y - y;
-      const d = Math.sqrt(dx * dx + dy * dy);
-      if (d <= worldThresh && (!best || d < best.d)) {
-        best = { x, y, compId, anchor, instanceIdx, d };
-      }
+    const hit = queryAnchorSnapIndex(anchorSnapIndex, wp, worldThresh, excludeCompId);
+    if (!hit) return null;
+    return {
+      x: hit.x,
+      y: hit.y,
+      compId: hit.compId,
+      anchor: hit.kind === 'anchor' ? hit.anchor : `${hit.side}:${hit.t.toFixed(4)}`,
+      instanceIdx: hit.instanceIdx,
+      d: hit.d,
     };
-    // Iterate transform-expanded INSTANCES instead of just solved
-    // (which only carries the base position). This mirrors what the
-    // ruler does — every rendered copy of a shape exposes its 9 fixed
-    // anchors + parametric edge points, so the polyline-draw cursor
-    // hover-snaps to repeats / duplicate_mirror copies of any shape,
-    // not just the base.
-    for (const inst of transformInstances) {
-      if (excludeCompId && inst.compId === excludeCompId) continue;
-      const w = inst.w, h = inst.h;
-      if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) continue;
-      const cx = inst.cx, cy = inst.cy;
-      // First-class rotation + transform-chain rotates (composed into
-      // inst.rotation): anchors and edge projections live in the shape's
-      // LOCAL frame so the candidates sit on the rotated geometry.
-      const rot = inst.rotation || 0;
-      const rad = rot * Math.PI / 180;
-      const ca = Math.cos(rad), sa = Math.sin(rad);
-      const toWorld = (lx, ly) => ({ x: cx + lx * ca - ly * sa, y: cy + lx * sa + ly * ca });
-      // 9 fixed anchors — preferred over parametric edge points.
-      for (const a of ANCHORS) {
-        const lp = anchorLocalRotated(a, w, h, rot);
-        consider(cx + lp.x, cy + lp.y, inst.compId, a, inst.idx);
-      }
-      // Parametric edge anchors. Project the cursor in LOCAL coords onto
-      // each edge and tag with T:t / B:t / L:t / R:t, t ∈ [0, 1].
-      const lwx = (wp.x - cx) * ca + (wp.y - cy) * sa;
-      const lwy = -(wp.x - cx) * sa + (wp.y - cy) * ca;
-      const x0 = -w / 2, x1 = w / 2;
-      const y0 = -h / 2, y1 = h / 2;
-      if (lwx >= x0 - worldThresh && lwx <= x1 + worldThresh) {
-        const projX = Math.max(x0, Math.min(x1, lwx));
-        const tX = (projX - x0) / (x1 - x0);
-        const pT = toWorld(projX, y1);
-        const pB = toWorld(projX, y0);
-        consider(pT.x, pT.y, inst.compId, `T:${tX.toFixed(4)}`, inst.idx);
-        consider(pB.x, pB.y, inst.compId, `B:${tX.toFixed(4)}`, inst.idx);
-      }
-      if (lwy >= y0 - worldThresh && lwy <= y1 + worldThresh) {
-        const projY = Math.max(y0, Math.min(y1, lwy));
-        const tY = (projY - y0) / (y1 - y0);
-        const pL = toWorld(x0, projY);
-        const pR = toWorld(x1, projY);
-        consider(pL.x, pL.y, inst.compId, `L:${tY.toFixed(4)}`, inst.idx);
-        consider(pR.x, pR.y, inst.compId, `R:${tY.toFixed(4)}`, inst.idx);
-      }
-    }
-    // For boolean instances at idx > 0, also walk the cluster's
-    // operands and expose anchor points at each operand's TRANSFORMED
-    // position — same translate/rotate/mirror composition the canvas
-    // uses to render the child cell. Lets the user hover-snap any
-    // rail / frame / connector edge in a repeated meander cell, not
-    // just the outer AABB. (Mirrors the matching block in findRulerSnap.)
-    for (const inst of transformInstances) {
-      if (inst.kind !== 'boolean' || inst.idx === 0) continue;
-      if (excludeCompId && inst.compId === excludeCompId) continue;
-      const b = solved.find(c => c.id === inst.compId);
-      if (!b) continue;
-      const dx = inst.cx - b.cx;
-      const dy = inst.cy - b.cy;
-      const rot = inst.rotation || 0;
-      const bSx = inst.scaleX ?? 1;
-      const bSy = inst.scaleY ?? 1;
-      if (!dx && !dy && !rot && bSx === 1 && bSy === 1) continue;
-      const rad = rot * Math.PI / 180;
-      const ca = Math.cos(rad), sa = Math.sin(rad);
-      const visitOp = (cid) => {
-        const op = solved.find(c => c.id === cid);
-        if (!op) return;
-        if (op.kind === 'boolean') {
-          for (const childId of (op.operandIds || [])) visitOp(childId);
-          return;
-        }
-        const baseInst = transformInstances.find(ii => ii.compId === op.id && ii.idx === 0);
-        if (!baseInst) return;
-        const opW = baseInst.w, opH = baseInst.h;
-        if (!Number.isFinite(opW) || !Number.isFinite(opH) || opW <= 0 || opH <= 0) return;
-        let tx = baseInst.cx + dx;
-        let ty = baseInst.cy + dy;
-        if (bSx === -1) tx = 2 * inst.cx - tx;
-        if (bSy === -1) ty = 2 * inst.cy - ty;
-        const rxC = tx - inst.cx;
-        const ryC = ty - inst.cy;
-        const newCx = rot ? inst.cx + rxC * ca - ryC * sa : tx;
-        const newCy = rot ? inst.cy + rxC * sa + ryC * ca : ty;
-        // Operand anchors rotate by base rotation + cluster rotation
-        // (see the matching comment in findRulerSnap).
-        const opVisRot = rot + (baseInst.rotation || 0);
-        for (const a of ANCHORS) {
-          const lp = anchorLocalRotated(a, opW, opH, opVisRot);
-          consider(newCx + lp.x, newCy + lp.y, op.id, a, inst.idx);
-        }
-        const ox0 = newCx - opW / 2, ox1 = newCx + opW / 2;
-        const oy0 = newCy - opH / 2, oy1 = newCy + opH / 2;
-        if (wp.x >= ox0 - worldThresh && wp.x <= ox1 + worldThresh) {
-          const xProj = Math.max(ox0, Math.min(ox1, wp.x));
-          const tX = (xProj - ox0) / (ox1 - ox0);
-          consider(xProj, oy1, op.id, `T:${tX.toFixed(4)}`, inst.idx);
-          consider(xProj, oy0, op.id, `B:${tX.toFixed(4)}`, inst.idx);
-        }
-        if (wp.y >= oy0 - worldThresh && wp.y <= oy1 + worldThresh) {
-          const yProj = Math.max(oy0, Math.min(oy1, wp.y));
-          const tY = (yProj - oy0) / (oy1 - oy0);
-          consider(ox0, yProj, op.id, `L:${tY.toFixed(4)}`, inst.idx);
-          consider(ox1, yProj, op.id, `R:${tY.toFixed(4)}`, inst.idx);
-        }
-      };
-      for (const opid of (b.operandIds || [])) visitOp(opid);
-    }
-    return best;
   };
 
   // Scene-component map for polyline vertex resolution (snap-vertex targets
@@ -1035,6 +1329,44 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     () => Object.fromEntries(scene.components.map(c => [c.id, c])),
     [scene.components]
   );
+
+  // [F3] Memoized boolean per-instance operand overrides:
+  // boolId → Map<instanceObject, overridesOrNull>. Keyed by the INSTANCE
+  // OBJECT (instances come from the instancesByCompId memo, so identity is
+  // stable across the render) — every canonical call site (cluster path,
+  // renderInterior / renderOutline multi-instance branches, collectBbox's
+  // boolean visit) passes one of those objects, so lookups hit. Synthetic
+  // fallback instances (defensive paths only) miss and recompute via the
+  // same pure helper, preserving behavior exactly. Only canonical
+  // (boolean, own-instance, solved-base) computations are cached — the
+  // nested-boolean recursion always reaches this cache through canonical
+  // keys because buildBoolOverridesForInstance reads operand BASE
+  // instances regardless of the override context in effect.
+  const boolInstanceOverridesCache = useMemo(() => {
+    const cache = new Map();
+    const baseInstOf = (c) => {
+      const list = instancesByCompId[c.id] || [];
+      return list[0] || {
+        compId: c.id, idx: 0, cx: c.cx, cy: c.cy,
+        w: evalExpr(c.w, paramValues), h: evalExpr(c.h, paramValues),
+        rotation: 0,
+      };
+    };
+    const solvedById = new Map(solved.map(c => [c.id, c]));
+    for (const b of booleanClusters.allBooleanComps) {
+      const insts = instancesByCompId[b.id];
+      if (!insts || insts.length === 0) continue;
+      const s = solvedById.get(b.id);
+      const baseCx = s ? s.cx : b.cx;
+      const baseCy = s ? s.cy : b.cy;
+      const perInst = new Map();
+      for (const inst of insts) {
+        perInst.set(inst, buildBoolOverridesForInstance(b, inst, baseCx, baseCy, sceneCompById, baseInstOf));
+      }
+      cache.set(b.id, perInst);
+    }
+    return cache;
+  }, [booleanClusters, instancesByCompId, solved, sceneCompById, paramValues]);
 
   // C3: resolved vertex positions (one per vertex spec — index-stable) for a
   // polyline / polyshape, from the SOLVED component so solver-positioned
@@ -1271,8 +1603,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       const comp = solved.find(c => c.id === compId);
       if (comp) {
         const wp = screenToWorld(e.clientX, e.clientY);
-        const w = evalExpr(comp.w, paramValues);
-        const h = evalExpr(comp.h, paramValues);
+        const { w, h } = dimsByCompId[comp.id]; // [F2]
         setDrag({
           kind: 'resize',
           compId,
@@ -1446,8 +1777,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       for (const m of coMovers) {
         const c = solved.find(cc => cc.id === m.id);
         if (!c) continue;
-        const cw = typeof c.w === 'number' ? c.w : evalExpr(c.w, paramValues);
-        const ch = typeof c.h === 'number' ? c.h : evalExpr(c.h, paramValues);
+        const { w: cw, h: ch } = dimsByCompId[c.id]; // [F2]
         if (!Number.isFinite(cw) || !Number.isFinite(ch)) continue;
         const x0 = m.startCx - cw / 2, x1 = m.startCx + cw / 2;
         const y0 = m.startCy - ch / 2, y1 = m.startCy + ch / 2;
@@ -1670,137 +2000,23 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             // many sibling anchors create many near-equidistant candidates,
             // and the user perceives the cluster jumping around.
             const stickThresh = worldThresh * 0.5; // candidate must beat current by this margin
-            let best = null;
-            let currentBest = null; // the candidate matching the existing moveSnapHover, if any
-            // Cluster bbox bounds at the proposed position (used by the
-            // edge-pair pass below).
-            const dxMin = proposedCx - dw / 2, dxMax = proposedCx + dw / 2;
-            const dyMin = proposedCy - dh / 2, dyMax = proposedCy + dh / 2;
-            for (const oc of solved) {
-              if (drag.clusterSet && drag.clusterSet.has(oc.id)) continue;
-              if (oc.consumedBy) continue;
-              const ow = typeof oc.w === 'string' ? evalExpr(oc.w, paramValues) : oc.w;
-              const oh = typeof oc.h === 'string' ? evalExpr(oc.h, paramValues) : oc.h;
-              if (!Number.isFinite(ow) || !Number.isFinite(oh) || ow <= 0 || oh <= 0) continue;
-              // -----------------------------------------------------------
-              // (1) Anchor-pair candidates: every (dragged anchor, target
-              //     anchor) pair across the 9-point grids. Distance is the
-              //     2D distance between the two anchors at the dragged
-              //     cluster's current proposed position; snap commits both
-              //     axes when this kind wins. First-class rotation on
-              //     either side rotates the anchor offsets so candidates
-              //     sit on the rotated shapes' actual corners/edges —
-              //     matching the solver's rotation-aware anchor math on
-              //     commit.
-              // -----------------------------------------------------------
-              const ocRot = compRotationDeg(oc, paramValues);
-              const dRot = drag.dragRotationDeg || 0;
-              for (const ta of ANCHORS) {
-                const tlp = anchorLocalRotated(ta, ow, oh, ocRot);
-                const tx = oc.cx + tlp.x;
-                const ty = oc.cy + tlp.y;
-                for (const da of ANCHORS) {
-                  const dlp = anchorLocalRotated(da, dw, dh, dRot);
-                  const dax = proposedCx + dlp.x;
-                  const day = proposedCy + dlp.y;
-                  const dist = Math.hypot(tx - dax, ty - day);
-                  if (dist <= worldThresh) {
-                    const cand = {
-                      kind: 'anchor',
-                      dist,
-                      dAnchor: da,
-                      target: { x: tx, y: ty, compId: oc.id, anchor: ta },
-                    };
-                    if (!best || dist < best.dist) best = cand;
-                    if (moveSnapHover && moveSnapHover.kind === 'anchor' &&
-                        moveSnapHover.compId === oc.id &&
-                        moveSnapHover.anchor === ta &&
-                        moveSnapHover.dAnchor === da) {
-                      currentBest = cand;
-                    }
-                  }
-                }
-              }
-              // -----------------------------------------------------------
-              // (2) Edge-pair candidates: align a horizontal (or vertical)
-              //     edge of the dragged cluster with a horizontal (or
-              //     vertical) edge of the target, when the two bboxes
-              //     overlap on the ORTHOGONAL axis. Distance is the 1-D
-              //     offset between the two edges; only the snapped axis
-              //     is constrained on placement — the other axis tracks
-              //     the cursor — and no scene-level snap is created on
-              //     release. Useful for "align bottoms" / "align tops"
-              //     gestures where you want edge co-linearity but don't
-              //     care about exact x positioning.
-              // -----------------------------------------------------------
-              const oxMin = oc.cx - ow / 2, oxMax = oc.cx + ow / 2;
-              const oyMin = oc.cy - oh / 2, oyMax = oc.cy + oh / 2;
-              const xOverlap = Math.min(oxMax, dxMax) - Math.max(oxMin, dxMin);
-              const yOverlap = Math.min(oyMax, dyMax) - Math.max(oyMin, dyMin);
-              // Edge candidates get a constant ranking penalty on top
-              // of their raw 1-D distance. Without this, an edge pair
-              // would always beat an anchor pair whenever they exist
-              // together (the 2-D anchor distance is, by construction,
-              // at least the 1-D edge distance). The penalty makes the
-              // closest anchor pair win when it's within roughly half
-              // a snap-threshold of the target — i.e. when the user
-              // is clearly aiming at a corner / midpoint — and lets
-              // edge alignment take over only when the cursor's
-              // orthogonal offset is too big for any anchor to win.
-              // Doesn't affect the threshold gate: an edge candidate
-              // still has to be within worldThresh of the target
-              // before being considered at all.
-              const EDGE_RANK_PENALTY = worldThresh * 0.4;
-              const tryEdge = (axis, dSide, dEdgeVal, tSide, tEdgeVal, midX, midY) => {
-                const rawDist = Math.abs(dEdgeVal - tEdgeVal);
-                if (rawDist > worldThresh) return;
-                const cand = {
-                  kind: 'edge',
-                  dist: rawDist + EDGE_RANK_PENALTY,
-                  rawDist,
-                  axis,                  // 'h' = horizontal edges, snap Y
-                  targetCompId: oc.id,
-                  targetSide: tSide,     // 'top'/'bottom'/'centerY' or 'left'/'right'/'centerX'
-                  dSide,                 // dragged-side equivalent
-                  edgeVal: tEdgeVal,     // axis-aligned coord to snap to
-                  x: midX, y: midY,      // representative point for the hover marker
-                };
-                if (!best || cand.dist < best.dist) best = cand;
-                if (moveSnapHover && moveSnapHover.kind === 'edge' &&
-                    moveSnapHover.axis === axis &&
-                    moveSnapHover.targetCompId === oc.id &&
-                    moveSnapHover.targetSide === tSide &&
-                    moveSnapHover.dSide === dSide) {
-                  currentBest = cand;
-                }
-              };
-              if (xOverlap > 0) {
-                const midX = (Math.max(oxMin, dxMin) + Math.min(oxMax, dxMax)) / 2;
-                // Each axis exposes both edge candidates and a CENTER
-                // candidate (the mid-line through the bbox center). The
-                // center maps to the C anchor on commit, so snaps like
-                // target.C → dragged.C with dx=offset, dy=0 give an
-                // axis-locked center-line constraint that survives a
-                // parametric sweep on either component's size.
-                const dSidesY = [['top', dyMax], ['bottom', dyMin], ['centerY', proposedCy]];
-                const tSidesY = [['top', oyMax], ['bottom', oyMin], ['centerY', oc.cy]];
-                for (const [dSide, dY] of dSidesY) {
-                  for (const [tSide, tY] of tSidesY) {
-                    tryEdge('h', dSide, dY, tSide, tY, midX, tY);
-                  }
-                }
-              }
-              if (yOverlap > 0) {
-                const midY = (Math.max(oyMin, dyMin) + Math.min(oyMax, dyMax)) / 2;
-                const dSidesX = [['right', dxMax], ['left', dxMin], ['centerX', proposedCx]];
-                const tSidesX = [['right', oxMax], ['left', oxMin], ['centerX', oc.cx]];
-                for (const [dSide, dX] of dSidesX) {
-                  for (const [tSide, tX] of tSidesX) {
-                    tryEdge('v', dSide, dX, tSide, tX, tX, midY);
-                  }
-                }
-              }
-            }
+            // [F1] The exhaustive solved × 81 anchor-pair scan (plus the
+            // per-target edge-pair pass) is replaced by queries against
+            // the memoized altDragTargetIndex. findAltDragSnapCandidate
+            // preserves the original selection semantics exactly: same
+            // candidate set, same threshold gates, same first-wins
+            // tie-break order (per-component sequence blocks), same
+            // rotation-aware anchor math on both sides, and the same
+            // currentBest tracking that feeds the hysteresis below.
+            const search = findAltDragSnapCandidate(altDragTargetIndex, {
+              proposedCx, proposedCy, dw, dh,
+              dragRotationDeg: drag.dragRotationDeg || 0,
+              clusterSet: drag.clusterSet,
+              worldThresh,
+              moveSnapHover,
+            });
+            let best = search.best;
+            const currentBest = search.currentBest; // candidate matching the existing moveSnapHover, if any
             // If we have a current target and it's still valid (within
             // threshold), only swap to a different one if the new candidate
             // is meaningfully closer. This stops single-pixel mouse jitter
@@ -1863,8 +2079,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
               if (tAnchorList.length && dAnchorList.length && ctxTargetCompId) {
                 const oc = solved.find(c => c.id === ctxTargetCompId);
                 if (oc) {
-                  const ow = typeof oc.w === 'string' ? evalExpr(oc.w, paramValues) : oc.w;
-                  const oh = typeof oc.h === 'string' ? evalExpr(oc.h, paramValues) : oc.h;
+                  const { w: ow, h: oh } = dimsByCompId[oc.id]; // [F2]
                   if (Number.isFinite(ow) && Number.isFinite(oh) && ow > 0 && oh > 0) {
                     // STICKY is scaled to the target's free-axis edge
                     // length so the sticky zone is a visible fraction of
@@ -2236,8 +2451,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       // Only commit if user dragged at least a tiny amount
       if (x2 - x1 > 0.001 || y2 - y1 > 0.001) {
         const hits = solved.filter(c => {
-          const w = evalExpr(c.w, paramValues);
-          const h = evalExpr(c.h, paramValues);
+          const { w, h } = dimsByCompId[c.id]; // [F2]
           // intersection test (component bbox vs marquee bbox)
           const cx1 = c.cx - w / 2, cx2 = c.cx + w / 2;
           const cy1 = c.cy - h / 2, cy2 = c.cy + h / 2;
@@ -2855,71 +3069,16 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // Returns a map compId -> synthetic instance for every operand
         // (recursively, through nested booleans), or null if the boolean has
         // no transforms.
+        //
+        // [F3] The actual math lives in the module-level pure helper
+        // buildBoolOverridesForInstance; results for canonical instances
+        // are precomputed in boolInstanceOverridesCache (memoized) and
+        // looked up by instance-object identity. Non-canonical / synthetic
+        // instances (defensive fallbacks) compute fresh — same output.
         const buildBoolInstanceOverrides = (b, bInst, bBaseCx, bBaseCy) => {
-          const dx = bInst.cx - bBaseCx;
-          const dy = bInst.cy - bBaseCy;
-          const rot = bInst.rotation || 0;
-          const bSx = bInst.scaleX ?? 1;
-          const bSy = bInst.scaleY ?? 1;
-          if (!dx && !dy && !rot && bSx === 1 && bSy === 1) return null;
-          const rad = rot * Math.PI / 180;
-          const ca = Math.cos(rad), sa = Math.sin(rad);
-          const overrides = {};
-          // Walk the boolean's operand tree, transforming each PRIMITIVE
-          // operand it finds. Nested booleans' operands also get
-          // transformed; the parent boolean's transform applies uniformly
-          // to every descendant.
-          const visit = (c) => {
-            if (!c) return;
-            if (c.kind === 'boolean') {
-              for (const id of (c.operandIds || [])) visit(compById[id]);
-              return;
-            }
-            // Take the operand's base (un-transformed-by-the-boolean)
-            // instance. Note this is the operand's OWN first instance
-            // (which already accounts for the operand's own transforms,
-            // if any — though operands consumed by a boolean typically
-            // have no transforms of their own).
-            const base = instOf(c);
-            // Translate by (dx, dy), then rotate by `rot` about the
-            // instance centroid (which equals bInst.cx, bInst.cy after
-            // translation). This matches expandTransforms' semantics: for
-            // pivot='C' on a cluster, each instance's cx,cy already lives
-            // in world-space at the rotated location, so rotating the
-            // operand cluster about that same point reproduces the rotated
-            // cluster.
-            // Step 1: translate the operand by (dx, dy) so its position is
-            // expressed in the post-translation frame around bInst.
-            const tx = base.cx + dx;
-            const ty = base.cy + dy;
-            // Step 2: if the boolean carries a mirror, reflect the operand
-            // about the boolean's instance center along the appropriate
-            // axis. This flips the operand's position AND toggles its own
-            // scale flags so the operand's shape (rect corners, polygon
-            // vertices, …) renders mirrored, not just repositioned.
-            let mx = tx, my = ty;
-            let opSx = base.scaleX ?? 1, opSy = base.scaleY ?? 1;
-            if (bSx === -1) { mx = 2 * bInst.cx - tx; opSx = -opSx; }
-            if (bSy === -1) { my = 2 * bInst.cy - ty; opSy = -opSy; }
-            // Step 3: rotate the (translated-then-mirrored) point about
-            // the boolean's instance center. expandTransforms already
-            // negated rotation when a mirror fired, so the recorded `rot`
-            // is correct for the final orientation.
-            const rx = mx - bInst.cx;
-            const ry = my - bInst.cy;
-            const newCx = rot ? bInst.cx + rx * ca - ry * sa : mx;
-            const newCy = rot ? bInst.cy + rx * sa + ry * ca : my;
-            overrides[c.id] = {
-              ...base,
-              cx: newCx,
-              cy: newCy,
-              rotation: (base.rotation || 0) + rot,
-              scaleX: opSx,
-              scaleY: opSy,
-            };
-          };
-          visit(b);
-          return overrides;
+          const perInst = boolInstanceOverridesCache.get(b.id);
+          if (perInst && perInst.has(bInst)) return perInst.get(bInst);
+          return buildBoolOverridesForInstance(b, bInst, bBaseCx, bBaseCy, compById, (cc) => instOf(cc));
         };
 
         // Recursively render an object's INTERIOR as SVG. The output is a
@@ -3413,8 +3572,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           .sort((a, b) => stackPriority(a) - stackPriority(b));
         const ordered = [...pass1, ...pass2];
         return ordered.map(c => {
-          const w = evalExpr(c.w, paramValues);
-          const h = evalExpr(c.h, paramValues);
+          const { w, h } = dimsByCompId[c.id]; // [F2]
           const style = styleForComponent(c);
           const isSelected = selectedIds.has(c.id);
           const isPrimary = c.id === selectedId;
@@ -3804,8 +3962,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   // direction (which can be diagonal when the snap is
                   // corner-to-corner) or the local-anchor outward normal
                   // (which is also diagonal for corner anchors).
-                  const ow = evalExpr(otherComp.w, paramValues);
-                  const oh = evalExpr(otherComp.h, paramValues);
+                  const { w: ow, h: oh } = dimsByCompId[otherComp.id]; // [F2]
                   const myL = c.cx - w / 2,    myR = c.cx + w / 2;
                   const myB = c.cy - h / 2,    myT = c.cy + h / 2;
                   const oL = otherComp.cx - ow / 2, oR = otherComp.cx + ow / 2;
@@ -4047,8 +4204,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         const dims = [];
         // Component widths and heights
         for (const c of solved) {
-          const w = evalExpr(c.w, paramValues);
-          const h = evalExpr(c.h, paramValues);
+          const { w, h } = dimsByCompId[c.id]; // [F2]
           if (!Number.isFinite(w) || !Number.isFinite(h)) continue;
           if (hasParam(c.w)) {
             dims.push({
@@ -4532,9 +4688,9 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         const dragged = solved.find((c) => c.id === dragId);
         if (!dragged) return null;
         const dw = (drag.clusterBboxW && drag.clusterBboxW > 0) ? drag.clusterBboxW
-          : (typeof dragged.w === 'string' ? evalExpr(dragged.w, paramValues) : dragged.w);
+          : dimsByCompId[dragged.id].w; // [F2]
         const dh = (drag.clusterBboxH && drag.clusterBboxH > 0) ? drag.clusterBboxH
-          : (typeof dragged.h === 'string' ? evalExpr(dragged.h, paramValues) : dragged.h);
+          : dimsByCompId[dragged.id].h; // [F2]
         if (!Number.isFinite(dw) || !Number.isFinite(dh)) return null;
         const dxMin = dragged.cx - dw / 2, dxMax = dragged.cx + dw / 2;
         const dyMin = dragged.cy - dh / 2, dyMax = dragged.cy + dh / 2;
@@ -4543,8 +4699,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           if (oc.id === dragId) continue;
           if (drag.clusterSet && drag.clusterSet.has(oc.id)) continue;
           if (oc.consumedBy) continue;
-          const ow = typeof oc.w === 'string' ? evalExpr(oc.w, paramValues) : oc.w;
-          const oh = typeof oc.h === 'string' ? evalExpr(oc.h, paramValues) : oc.h;
+          const { w: ow, h: oh } = dimsByCompId[oc.id]; // [F2]
           if (!Number.isFinite(ow) || !Number.isFinite(oh) || ow <= 0 || oh <= 0) continue;
           const oxMin = oc.cx - ow / 2, oxMax = oc.cx + ow / 2;
           const oyMin = oc.cy - oh / 2, oyMax = oc.cy + oh / 2;
@@ -4614,8 +4769,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           {moveSnapHover.kind === 'edge' && (() => {
             const tc = solved.find(c => c.id === moveSnapHover.targetCompId);
             if (!tc) return null;
-            const tw = typeof tc.w === 'string' ? evalExpr(tc.w, paramValues) : tc.w;
-            const th = typeof tc.h === 'string' ? evalExpr(tc.h, paramValues) : tc.h;
+            const { w: tw, h: th } = dimsByCompId[tc.id]; // [F2]
             if (!Number.isFinite(tw) || !Number.isFinite(th)) return null;
             const tx0 = tc.cx - tw / 2, tx1 = tc.cx + tw / 2;
             const ty0 = tc.cy - th / 2, ty1 = tc.cy + th / 2;
@@ -4628,8 +4782,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             const dragId = drag.clickedId || drag.rootId;
             const dc = solved.find(c => c.id === dragId);
             if (!dc) return null;
-            const dw2 = typeof dc.w === 'string' ? evalExpr(dc.w, paramValues) : dc.w;
-            const dh2 = typeof dc.h === 'string' ? evalExpr(dc.h, paramValues) : dc.h;
+            const { w: dw2, h: dh2 } = dimsByCompId[dc.id]; // [F2]
             const dx0 = dc.cx - dw2 / 2, dx1 = dc.cx + dw2 / 2;
             const dy0 = dc.cy - dh2 / 2, dy1 = dc.cy + dh2 / 2;
             const stroke = '#67e8f9';

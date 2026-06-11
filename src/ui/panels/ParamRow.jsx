@@ -12,7 +12,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Trash2, AlertTriangle } from 'lucide-react';
 import { RESERVED_IDENTS } from '../../scene/params.js';
 import { HoverTooltip } from '../HoverTooltip.jsx';
-import { ParamTuner } from './ParamTuner.jsx'; // EXPERIMENTAL — see ParamTuner.jsx for removal instructions
+import { ParamTuner } from './ParamTuner.jsx';
 import { DeferredTextInput } from '../DeferredTextInput.jsx';
 
 export function ParamRow({ name, p, onRename, onUpdateExpr, onCommitExpr, onUpdateUnit, onUpdateDesc, onUpdateSweep, onDelete, value, error, isUnused, isInvolved, autoFocus, onAutoFocusDone, suggestions }) {
@@ -144,8 +144,8 @@ export function ParamRow({ name, p, onRename, onUpdateExpr, onCommitExpr, onUpda
         </button>
         <button onClick={onDelete} className="text-slate-600 hover:text-red-400"><Trash2 size={10} /></button>
       </div>
-      {/* EXPERIMENTAL — ± 20 % tuner. Remove this single line plus the
-          ParamTuner import to drop the experiment. */}
+      {/* Multiplicative tuner slider — see ParamTuner.jsx for the
+          range/anchoring semantics. */}
       <ParamTuner value={value} onUpdateExpr={onUpdateExpr} />
       {expanded && (
         <>

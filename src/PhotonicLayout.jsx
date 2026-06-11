@@ -55,9 +55,11 @@ import {
   loadLibraryItem, loadArchivedLibraryItem,
   saveLibraryItem, saveArchivedLibraryItem,
   deleteLibraryItem, deleteArchivedLibraryItem,
+  listCellDefs, loadCellDef, saveCellDef, deleteCellDef,
   exportWorkspace, importWorkspace,
   exportDesign, importDesign,
 } from './storage/library-items.js';
+import { makeCellFromSelection, instantiateCell, updateInstancesFromCell } from './scene/cells.js';
 import {
   fsAccessAPIPresent, openHandleDB,
   getWorkspaceHandle, setWorkspaceHandle as persistWorkspaceHandle,
@@ -73,6 +75,7 @@ import { HelpTutorial } from './ui/HelpTutorial.jsx';
 import { WorkspaceCreateRow, LibraryItemRow } from './ui/panels/LibraryPanelRows.jsx';
 import { ParamRow } from './ui/panels/ParamRow.jsx';
 import { SnapAxisField, SnapConnectionRow } from './ui/panels/SnapConnectionRow.jsx';
+import { ExprField } from './ui/panels/ExprField.jsx';
 import { TransformChainEditor } from './ui/panels/TransformChainEditor.jsx';
 import { GroupTreeItem } from './ui/panels/GroupTreeItem.jsx';
 import { LayerCard, LevelGroup } from './ui/panels/LayersPanel.jsx';
@@ -462,10 +465,24 @@ export default function App() {
   const [libraryItems, setLibraryItems] = useState([]); // names
   const [archivedLibraryItems, setArchivedLibraryItems] = useState([]); // names
   const [showArchive, setShowArchive] = useState(false);
+  // Parametric cell definitions stored in the workspace (name → def).
+  // Scene-embedded defs (scene.cells) overlay these for display, so a
+  // shared design brings its cells along even in a fresh workspace.
+  const [workspaceCells, setWorkspaceCells] = useState({});
   const refreshLibrary = useCallback(async () => {
-    const [active, archived] = await Promise.all([listLibraryItems(workspace), listArchivedLibraryItems(workspace)]);
+    const [active, archived, cellNames] = await Promise.all([
+      listLibraryItems(workspace),
+      listArchivedLibraryItems(workspace),
+      listCellDefs(workspace),
+    ]);
     setLibraryItems(active.sort());
     setArchivedLibraryItems(archived.sort());
+    const defs = {};
+    for (const n of cellNames) {
+      const d = await loadCellDef(workspace, n);
+      if (d) defs[n] = d;
+    }
+    setWorkspaceCells(defs);
   }, [workspace]);
   useEffect(() => { refreshLibrary(); }, [refreshLibrary]);
 
@@ -2804,6 +2821,163 @@ export default function App() {
     if (!item) { await alertDialog('Failed to load library item.', 'Error'); return; }
 
     updateScene((prev) => insertLibraryPayload(prev, { viewport, paramValues }, item));
+  };
+
+  // ----- Parametric cells -----
+  // Define once, instantiate many, update all (src/scene/cells.js).
+  // Defs live in the workspace (cellPrefix storage) AND in scene.cells
+  // so the design stays self-contained; scene-local defs win on display.
+  const cellDefs = useMemo(
+    () => ({ ...workspaceCells, ...(scene.cells || {}) }),
+    [workspaceCells, scene.cells]
+  );
+  const cellNames = useMemo(() => Object.keys(cellDefs).sort(), [cellDefs]);
+  // cell name → Set of instance prefixes present in the current design.
+  const cellInstanceCounts = useMemo(() => {
+    const counts = {};
+    for (const c of scene.components) {
+      const t = c.cellInstance;
+      if (!t || !t.cell || !t.inst) continue;
+      (counts[t.cell] ||= new Set()).add(t.inst);
+    }
+    return counts;
+  }, [scene.components]);
+  // Post-insert hint shown in the CELLS section ("knobs live in PARAMS").
+  const [cellInsertHint, setCellInsertHint] = useState('');
+
+  // Save the current selection as a (new or overwritten) cell master.
+  // Overwriting IS the edit-the-master flow: tweak an instance (or any
+  // geometry), save under the same name, then "update instances".
+  const saveSelectionAsCell = async () => {
+    if (selectedIds.size === 0) {
+      await alertDialog('Select components first.', 'No selection');
+      return;
+    }
+    const name = await promptDialog(
+      'Name for this cell (identifier). Instances are inserted as fully prefixed copies:',
+      '', 'Save selection as cell'
+    );
+    if (!name || !name.trim()) return;
+    const trimmed = name.trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmed)) {
+      await alertDialog('Name must be a valid identifier (letters, digits, underscore; starting with letter/underscore).', 'Invalid name');
+      return;
+    }
+    if (cellDefs[trimmed]) {
+      const ok = await confirmDialog(
+        `Cell "${trimmed}" already exists. Overwrite the master definition?\n\nExisting instances keep their current geometry until you run "update instances".`,
+        'Overwrite cell'
+      );
+      if (!ok) return;
+    }
+    const { def, warnings } = makeCellFromSelection(scene, selectedIds, trimmed);
+    if (!def) {
+      await alertDialog(warnings.join('\n') || 'Nothing to save.', 'Cell not saved');
+      return;
+    }
+    const ok = await saveCellDef(workspace, trimmed, def);
+    if (!ok) { await alertDialog('Save failed.', 'Error'); return; }
+    updateScene(prev => ({ ...prev, cells: { ...(prev.cells || {}), [trimmed]: def } }));
+    await refreshLibrary();
+    if (warnings.length > 0) {
+      await alertDialog(
+        `Cell "${trimmed}" saved with warnings:\n\n• ${warnings.join('\n• ')}`,
+        'Cell saved'
+      );
+    }
+  };
+
+  // Insert one instance of a cell at the viewport center. The prefix
+  // becomes the instance id: every def param / component id lands in
+  // the scene as `<prefix>_<name>` — overrides are simply those
+  // prefixed params in the PARAMS panel.
+  const insertCell = async (name) => {
+    const def = cellDefs[name] || await loadCellDef(workspace, name);
+    if (!def) { await alertDialog(`Cell "${name}" failed to load.`, 'Error'); return; }
+    const usedInsts = new Set();
+    for (const c of scene.components) {
+      if (c.cellInstance?.cell) usedInsts.add(c.cellInstance.inst);
+    }
+    const prefixTaken = (p) =>
+      usedInsts.has(p) ||
+      scene.components.some(c => c.id === p || c.id.startsWith(p + '_')) ||
+      Object.keys(scene.params).some(k => k.startsWith(p + '_'));
+    let n = (cellInstanceCounts[name]?.size || 0) + 1;
+    let suggested = `${name}${n}`;
+    while (prefixTaken(suggested)) suggested = `${name}${++n}`;
+    const raw = await promptDialog(
+      'Instance prefix — every cell param and component id becomes "<prefix>_<name>":',
+      suggested, `Insert cell "${name}"`
+    );
+    if (!raw || !raw.trim()) return;
+    const prefix = raw.trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(prefix)) {
+      await alertDialog('Prefix must be a valid identifier.', 'Invalid prefix');
+      return;
+    }
+    if (prefixTaken(prefix)) {
+      await alertDialog(`Prefix "${prefix}" collides with existing components or params. Pick another.`, 'Prefix in use');
+      return;
+    }
+    const inst = instantiateCell(def, prefix, {}, viewport.x, viewport.y);
+    // One updateScene call = one undo step.
+    updateScene(prev => ({
+      ...prev,
+      params: { ...prev.params, ...inst.params },
+      components: [...prev.components, ...inst.components],
+      snaps: [...prev.snaps, ...inst.snaps],
+      cells: { ...(prev.cells || {}), [name]: def },
+    }));
+    setCellInsertHint(`Inserted "${prefix}" — its knobs are the ${prefix}_* parameters in PARAMS (overrides = edit those exprs).`);
+  };
+
+  // Re-stamp every instance of a cell from the (new) master definition.
+  // Per-instance param overrides and centers are preserved; the change
+  // summary is shown in a confirm dialog before anything is applied.
+  const updateCellInstances = async (name) => {
+    const def = cellDefs[name] || await loadCellDef(workspace, name);
+    if (!def) { await alertDialog(`Cell "${name}" failed to load.`, 'Error'); return; }
+    const { scene: next, summary } = updateInstancesFromCell(scene, def);
+    if (summary.instances.length === 0) {
+      await alertDialog(`No instances of "${name}" in this design.`, 'Nothing to update');
+      return;
+    }
+    const lines = summary.instances.map(i =>
+      `• ${i.inst}: ${i.components} component(s) rebuilt at (${i.center.x.toFixed(1)}, ${i.center.y.toFixed(1)})` +
+      `, ${i.keptOverrides.length} param expr(s) kept` +
+      (i.addedParams.length > 0 ? `, new: ${i.addedParams.join(', ')}` : '') +
+      (i.removedParams.length > 0 ? `, dropped: ${i.removedParams.join(', ')}` : '') +
+      (i.droppedExternalSnaps > 0 ? `, ${i.droppedExternalSnaps} external snap(s) dropped` : '')
+    );
+    const ok = await confirmDialog(
+      `Update ${summary.instances.length} instance(s) of "${name}" from the master definition?\n\n${lines.join('\n')}`,
+      'Update instances'
+    );
+    if (!ok) return;
+    updateScene(() => next);
+  };
+
+  // Delete a cell definition from workspace + scene. Instances stay in
+  // the design as ordinary components (provenance tags are harmless and
+  // kept — re-saving a cell under the same name re-links them).
+  const deleteCell = async (name) => {
+    const instCount = cellInstanceCounts[name]?.size || 0;
+    const ok = await confirmDialog(
+      `Delete cell "${name}"?` +
+      (instCount > 0
+        ? `\n\n${instCount} instance(s) remain in this design as plain components.`
+        : ''),
+      'Delete cell',
+      { confirmLabel: 'Delete', confirmTone: 'danger' }
+    );
+    if (!ok) return;
+    await deleteCellDef(workspace, name);
+    updateScene(prev => {
+      const cells = { ...(prev.cells || {}) };
+      delete cells[name];
+      return { ...prev, cells };
+    });
+    await refreshLibrary();
   };
 
   // "Save as built-in template": generate a JS module from the library
@@ -5785,8 +5959,17 @@ export default function App() {
                         {isExpanded ? '▾' : '▸'}
                       </button>
                       <span className="font-mono font-bold text-[11px] truncate flex-shrink-0" style={{ color: accent }}>
-                        {c.id}
+                        {c.label || c.id}
                       </span>
+                      {/* When the display label differs from the component id,
+                          show the id in a small muted mono chip — expressions,
+                          snaps and exports all reference the id, so it must
+                          stay visible even on renamed/labeled rows. */}
+                      {c.label && c.label !== c.id && (
+                        <span className="text-[9px] font-mono text-slate-500 truncate flex-shrink min-w-0" title={`component id: ${c.id}`}>
+                          {c.id}
+                        </span>
+                      )}
                       {isBoolean && (
                         <span className="text-[9px] uppercase font-bold tracking-wider flex-shrink-0" style={{ color: accent + 'cc' }}>
                           {c.op}
@@ -6100,6 +6283,77 @@ export default function App() {
                       </div>
                     ))}
                   </div>
+                </div>
+
+                {/* CELLS — parametric cell definitions: define once,
+                    instantiate many, update all. Defs live per-workspace
+                    (like library items) AND in scene.cells so shared
+                    designs stay self-contained. An instance is a fully
+                    prefixed copy: its knobs are the <prefix>_* params. */}
+                <div className="border-t border-slate-800 pt-2 mt-2">
+                  <p className="text-[10px] uppercase tracking-wider text-slate-500 px-1 mb-1">Cells</p>
+                  <button
+                    onClick={saveSelectionAsCell}
+                    disabled={selectedIds.size === 0}
+                    className="w-full flex items-center justify-center gap-1 px-2 py-1 mb-1 rounded text-xs border border-dashed border-slate-600 hover:border-violet-400 disabled:opacity-30 disabled:cursor-not-allowed text-slate-300"
+                    title={selectedIds.size === 0
+                      ? 'Select components first'
+                      : `Save ${selectedIds.size} component${selectedIds.size === 1 ? '' : 's'} as a parametric cell (overwrite an existing name to edit its master)`}
+                  >
+                    <Save size={11} /> save selection as cell… ({selectedIds.size})
+                  </button>
+                  {cellNames.length === 0 && (
+                    <p className="text-[10px] text-slate-500 italic px-1">No cells yet. Select components and save them as a cell to stamp reusable, parametric instances.</p>
+                  )}
+                  <div className="space-y-1">
+                    {cellNames.map(name => {
+                      const def = cellDefs[name];
+                      const nParams = Object.keys(def?.params || {}).length;
+                      const nInst = cellInstanceCounts[name]?.size || 0;
+                      return (
+                        <div
+                          key={name}
+                          className="rounded border border-slate-800 px-2 py-1.5 flex items-center gap-2"
+                          style={{ background: 'rgba(30,41,59,0.5)' }}
+                        >
+                          <Boxes size={11} className="text-violet-400 flex-shrink-0" />
+                          <div className="flex-1 min-w-0">
+                            <p className="font-mono text-xs text-violet-300 truncate">{name}</p>
+                            <p className="text-[9px] text-slate-500 truncate">
+                              {nParams} param{nParams === 1 ? '' : 's'} · {nInst} instance{nInst === 1 ? '' : 's'} in design
+                            </p>
+                          </div>
+                          <button
+                            onClick={() => insertCell(name)}
+                            className="text-[10px] px-2 py-0.5 rounded border border-violet-700 text-violet-300 hover:bg-violet-900/40"
+                            title="Insert a new instance at the viewport center (prompts for an instance prefix)"
+                          >
+                            insert
+                          </button>
+                          <button
+                            onClick={() => updateCellInstances(name)}
+                            disabled={nInst === 0}
+                            className="text-[10px] px-2 py-0.5 rounded border border-slate-600 text-slate-300 hover:bg-slate-800 disabled:opacity-30 disabled:cursor-not-allowed"
+                            title={nInst === 0
+                              ? 'No instances of this cell in the current design'
+                              : 'Rebuild every instance from the master definition (param overrides + positions preserved; shows a change summary first)'}
+                          >
+                            update
+                          </button>
+                          <button
+                            onClick={() => deleteCell(name)}
+                            className="text-slate-500 hover:text-red-400"
+                            title="Delete this cell definition (instances stay as plain components)"
+                          >
+                            <Trash2 size={10} />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {cellInsertHint && (
+                    <p className="text-[9px] text-emerald-400 px-1 mt-1 leading-snug">{cellInsertHint}</p>
+                  )}
                 </div>
 
                 {!showArchive && (
@@ -6612,6 +6866,19 @@ export default function App() {
                     setSelection({ ids: newSet, primary: newId });
                   }} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-cyan-300 outline-none focus:border-cyan-400" />
                 </div>
+                {/* Cell-instance provenance chip (read-only). Stamped by
+                    instantiateCell; "update instances" in the LIBRARY
+                    panel uses it to find and rebuild this instance. */}
+                {selected.cellInstance && selected.cellInstance.cell && (
+                  <div>
+                    <span
+                      className="inline-block text-[9px] px-1.5 py-0.5 rounded-full border border-violet-700 bg-violet-900/30 text-violet-300 font-mono"
+                      title={`Instance "${selected.cellInstance.inst}" of cell "${selected.cellInstance.cell}". Knobs: the ${selected.cellInstance.inst}_* params in PARAMS. Rebuilt by "update instances" in the LIBRARY panel.`}
+                    >
+                      cell: {selected.cellInstance.cell} ({selected.cellInstance.inst})
+                    </span>
+                  </div>
+                )}
                 <div>
                   <label className="text-[10px] uppercase tracking-wider text-slate-500">Layer</label>
                   <select value={selected.layer} onChange={(e) => updateComp(selected.id, { layer: e.target.value })} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-white outline-none">
@@ -6742,9 +7009,21 @@ export default function App() {
                       }}>derived · {selected.op}</span>
                     </div>
                     <p className="text-[10px] text-slate-400 font-mono leading-snug">
-                      {(selected.op === 'subtract' || selected.op === 'punch')
-                        ? <>{(selected.operandIds || [])[0]}{(selected.operandIds || []).slice(1).map((id, i) => <span key={i}> − {id}</span>)}</>
-                        : (selected.operandIds || []).join(selected.op === 'union' ? ' + ' : ' ∩ ')}
+                      {/* Derivation formula with op-colored operator glyphs:
+                          union → emerald +, intersect → cyan ∩,
+                          subtract/punch → amber −. */}
+                      {(() => {
+                        const ids = selected.operandIds || [];
+                        const isSub = selected.op === 'subtract' || selected.op === 'punch';
+                        const sym = isSub ? '−' : (selected.op === 'union' ? '+' : '∩');
+                        const symColor = isSub ? '#f59e0b' : (selected.op === 'union' ? '#10b981' : '#22d3ee');
+                        return ids.map((id, i) => (
+                          <React.Fragment key={`${id}_${i}`}>
+                            {i > 0 && <span className="font-bold px-0.5" style={{ color: symColor }}>{sym}</span>}
+                            <span>{id}</span>
+                          </React.Fragment>
+                        ));
+                      })()}
                     </p>
                     <p className="text-[9px] text-slate-500 mt-1 italic">
                       {selected.op === 'punch'
@@ -6763,32 +7042,27 @@ export default function App() {
                   (() => {
                     const shapeKind = selected.kind || 'rect';
                     const fieldRow = (key, label, value, onChange, parse = null) => (
-                      <div>
-                        <label className="text-[10px] uppercase tracking-wider text-slate-500">{label}</label>
-                        <DeferredTextInput
-                          autoGrow
-                          value={value}
-                          suggestions={paramNames}
-                          onCommit={(v) => {
-                            // Snapshot the field's CURRENT evaluated value
-                            // before the commit fires; any new parameter
-                            // auto-created from the new expression should
-                            // default to that value instead of a generic
-                            // '1' — so renaming `5` to `my_w` makes
-                            // `my_w = 5` (preserves the visual size).
-                            const prevEval = evalExpr(value, paramValues);
-                            const prevDefault = Number.isFinite(prevEval) ? String(prevEval) : '1';
-                            onChange(v);
-                            commitExpr(v, prevDefault, 'µm', `Auto-created (${selected.id}.${key})`);
-                          }}
-                          className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-white outline-none focus:border-cyan-400 whitespace-pre-wrap break-words leading-tight"
-                          spellCheck={false}
-                        />
-                        <p className="text-[9px] text-slate-500 mt-0.5 font-mono">= {(() => {
-                          const v = evalExpr(value, paramValues);
-                          return Number.isFinite(v) ? (parse ? parse(v) : v.toFixed(2)) : '—';
-                        })()}</p>
-                      </div>
+                      <ExprField
+                        label={label}
+                        value={value}
+                        size="md"
+                        params={scene.params}
+                        paramValues={paramValues}
+                        suggestions={paramNames}
+                        fmt={(v) => (parse ? parse(v) : v.toFixed(2))}
+                        onCommit={(v) => {
+                          // Snapshot the field's CURRENT evaluated value
+                          // before the commit fires; any new parameter
+                          // auto-created from the new expression should
+                          // default to that value instead of a generic
+                          // '1' — so renaming `5` to `my_w` makes
+                          // `my_w = 5` (preserves the visual size).
+                          const prevEval = evalExpr(value, paramValues);
+                          const prevDefault = Number.isFinite(prevEval) ? String(prevEval) : '1';
+                          onChange(v);
+                          commitExpr(v, prevDefault, 'µm', `Auto-created (${selected.id}.${key})`);
+                        }}
+                      />
                     );
                     if (shapeKind === 'circle') {
                       return (

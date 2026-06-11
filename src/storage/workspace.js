@@ -14,12 +14,16 @@
 export const BASE_DESIGN_PREFIX  = 'photonic_layout:';
 export const BASE_LIB_PREFIX     = 'photonic_layout_lib:';
 export const BASE_ARCHIVE_PREFIX = 'photonic_layout_lib_archive:';
+// Parametric cell definitions (define once / instantiate many) — stored
+// per-workspace exactly like library items.
+export const BASE_CELL_PREFIX    = 'photonic_layout_cells:';
 // Where we remember the user's currently selected workspace.
 export const WORKSPACE_KEY = 'photonic_layout::workspace';
 
 export function designPrefix(workspace)  { return workspace ? `${BASE_DESIGN_PREFIX}${workspace}:`  : BASE_DESIGN_PREFIX; }
 export function libPrefix(workspace)     { return workspace ? `${BASE_LIB_PREFIX}${workspace}:`     : BASE_LIB_PREFIX; }
 export function archivePrefix(workspace) { return workspace ? `${BASE_ARCHIVE_PREFIX}${workspace}:` : BASE_ARCHIVE_PREFIX; }
+export function cellPrefix(workspace)    { return workspace ? `${BASE_CELL_PREFIX}${workspace}:`    : BASE_CELL_PREFIX; }
 export function activeDesignKey(workspace) { return designPrefix(workspace) + '_active'; }
 
 export async function listSavedDesigns(workspace) {
@@ -90,7 +94,7 @@ export async function setStoredWorkspace(name) {
 export async function discoverWorkspaces() {
   const ws = new Set();
   let hasDefault = false;
-  for (const base of [BASE_DESIGN_PREFIX, BASE_LIB_PREFIX, BASE_ARCHIVE_PREFIX]) {
+  for (const base of [BASE_DESIGN_PREFIX, BASE_LIB_PREFIX, BASE_ARCHIVE_PREFIX, BASE_CELL_PREFIX]) {
     try {
       const r = await window.storage.list(base);
       if (!r || !r.keys) continue;

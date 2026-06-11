@@ -14,27 +14,20 @@
 import React, { useState } from 'react';
 import { Link2Off } from 'lucide-react';
 import { evalExpr } from '../../scene/params.js';
+import { ExprField } from './ExprField.jsx';
 
 export function SnapAxisField({ axis, exprValue, params, paramValues, onUpdateSnap, onUpdateParam, onPromote, commitExpr }) {
   // Detect if exprValue is a single parameter reference
   const isParamRef = typeof exprValue === 'string' && /^[A-Za-z_][\w]*$/.test(exprValue.trim()) && !!params[exprValue.trim()];
   const paramName = isParamRef ? exprValue.trim() : null;
 
-  // Two edit buffers: one for the snap field, one for the bound parameter (when expanded)
-  const [snapEdit, setSnapEdit] = useState(null);
+  // Edit buffer for the bound parameter's inline editor (when expanded).
+  // The snap field itself drafts inside ExprField/DeferredTextInput.
   const [paramEditing, setParamEditing] = useState(false);
   const [paramEdit, setParamEdit] = useState(null);
 
-  const snapDisplay = snapEdit !== null ? snapEdit : (exprValue ?? '0');
   const paramDisplay = paramEdit !== null ? paramEdit : (isParamRef ? params[paramName].expr : '');
   const computedValue = evalExpr(exprValue, paramValues);
-
-  const commitSnap = () => {
-    if (snapEdit === null) return;
-    onUpdateSnap({ [axis]: snapEdit });
-    if (commitExpr) commitExpr(snapEdit, '0', 'µm', `Auto-created (snap ${axis})`);
-    setSnapEdit(null);
-  };
 
   const commitParam = () => {
     if (paramEdit === null || !isParamRef) return;
@@ -47,16 +40,21 @@ export function SnapAxisField({ axis, exprValue, params, paramValues, onUpdateSn
     <div>
       <div className="flex items-center gap-1">
         <span className="text-[9px] text-slate-500 w-3">{axis}</span>
-        <input
-          value={snapDisplay}
-          onChange={(e) => setSnapEdit(e.target.value)}
-          onBlur={commitSnap}
-          onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); if (e.key === 'Escape') { setSnapEdit(null); e.target.blur(); } }}
-          className={`flex-1 min-w-0 bg-slate-900 border rounded px-1 py-0.5 text-[10px] font-mono outline-none ${isParamRef ? 'border-amber-700/60 text-amber-200 focus:border-amber-400' : 'border-slate-700 text-white focus:border-cyan-400'}`}
+        <ExprField
+          value={exprValue ?? '0'}
+          onCommit={(v) => {
+            onUpdateSnap({ [axis]: v });
+            if (commitExpr) commitExpr(v, '0', 'µm', `Auto-created (snap ${axis})`);
+          }}
+          params={params}
+          paramValues={paramValues}
+          size="xs"
+          autoGrow={false}
+          showReadout={false}
+          containerClassName="flex-1"
           title={isParamRef
             ? `References parameter "${paramName}". Type a literal (e.g. 0.5) or another expression to override.`
             : 'Literal/expression — only this snap is affected. Click ⇪ to promote to a new parameter.'}
-          spellCheck={false}
         />
         {isParamRef ? (
           <button
