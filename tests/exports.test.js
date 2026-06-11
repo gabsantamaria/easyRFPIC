@@ -326,3 +326,198 @@ describe('generateHfssNative', () => {
     expect(new Set(names).size).toBe(names.length);
   });
 });
+
+describe('generateHfssNative — analysis setup, frequency sweep, Optimetrics', () => {
+  // Helper: clone the default scene with a simSetup / params override.
+  const sceneWith = (overrides) => ({ ...scene, ...overrides });
+  const pyParses = (code, name) => {
+    mkdirSync('tests/out', { recursive: true });
+    writeFileSync(`tests/out/${name}.py`, code);
+    expect(() => execSync(
+      `python3 -c "import ast; ast.parse(open('tests/out/${name}.py').read())"`,
+      { stdio: 'pipe' }
+    )).not.toThrow();
+  };
+
+  it('honors simSetup solve frequency, passes, deltaS and emits the frequency sweep', () => {
+    const s = sceneWith({
+      simSetup: {
+        ...scene.simSetup,
+        solveFreq: '12', maxPasses: '20', maxDeltaS: '0.01',
+        sweepEnabled: true, sweepStart: '1', sweepStop: '40',
+        sweepPoints: '391', sweepType: 'Interpolating',
+      },
+    });
+    const out = generateHfssNative(s, values);
+    expect(out).toContain('Frequency:=", "12GHz"');
+    expect(out).toContain('MaximumPasses:=", 20');
+    expect(out).toContain('MaxDeltaS:=", 0.01');
+    expect(out).toContain('InsertFrequencySweep');
+    expect(out).toContain('RangeStart:=", "1GHz"');
+    expect(out).toContain('RangeEnd:=", "40GHz"');
+    expect(out).toContain('RangeCount:=", 391');
+    expect(out).toContain('Type:=", "Interpolating"');
+    // Interpolating extras present for Interpolating sweeps.
+    expect(out).toContain('InterpTolerance:=');
+    // Still valid Python (IronPython 2.7-safe subset of py3 grammar).
+    pyParses(out, 'vitest_hfss_setup');
+  });
+
+  it('falls back to fnominal when solveFreq is empty', () => {
+    const s = sceneWith({
+      simSetup: { ...scene.simSetup, fnominal: '7', solveFreq: '' },
+    });
+    const out = generateHfssNative(s, values);
+    expect(out).toContain('Frequency:=", "7GHz"');
+  });
+
+  it('omits InsertFrequencySweep when sweepEnabled is false', () => {
+    const s = sceneWith({
+      simSetup: { ...scene.simSetup, sweepEnabled: false },
+    });
+    const out = generateHfssNative(s, values);
+    expect(out).not.toContain('InsertFrequencySweep');
+    // The adaptive setup itself must still be there.
+    expect(out).toContain('InsertSetup("HfssDriven"');
+  });
+
+  it('emits an Optimetrics parametric setup for sweep-flagged params (and only then)', () => {
+    // No params flagged → no Optimetrics block.
+    const baseline = generateHfssNative(scene, values);
+    expect(baseline).not.toContain('InsertSetup("OptiParametric"');
+
+    // Flag one µm param → one SweepDefinition with um-tagged LIN range.
+    const params = {
+      ...scene.params,
+      sweep_gap: {
+        expr: '3', unit: 'µm', desc: 'sweep test param',
+        sweep: { enabled: true, start: '1', stop: '5', step: '0.5' },
+      },
+    };
+    const s = sceneWith({ params });
+    const { values: pv } = resolveParams(params);
+    const out = generateHfssNative(s, pv);
+    expect(out).toContain('InsertSetup("OptiParametric"');
+    expect(out).toContain('"Variable:=", "sweep_gap"');
+    expect(out).toContain('LIN 1um 5um 0.5um');
+    // Audit comment listing the swept param.
+    expect(out).toMatch(/#\s+sweep_gap: LIN 1um 5um 0\.5um/);
+    pyParses(out, 'vitest_hfss_optimetrics');
+  });
+
+  it('emits set_var("<id>_cx") with the snap-chain param for a circle snapped to a rect', () => {
+    // [B3a] Non-rect native primitives (circle / ellipse / polygon) must
+    // get the same parametric-center treatment as rects: a per-shape
+    // HFSS variable carrying the FULL snap-chain expression, referenced
+    // by the create call. Sweeping the snap gap in HFSS then moves the
+    // circle without a re-export.
+    const s = {
+      params: {
+        gap_x: { expr: '5', unit: 'µm', desc: 'snap gap' },
+        circ1_r: { expr: '3', unit: 'µm', desc: 'circle radius' },
+      },
+      components: [
+        { id: 'base', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: '10', h: '10', cutouts: [], transforms: [] },
+        { id: 'circ1', kind: 'circle', layer: 'electrode', cx: 13, cy: 0,
+          r: 'circ1_r', w: '2*circ1_r', h: '2*circ1_r', cutouts: [], transforms: [] },
+      ],
+      snaps: [
+        { id: 's1', from: { compId: 'base', anchor: 'E' }, to: { compId: 'circ1', anchor: 'W' }, dx: 'gap_x', dy: '0' },
+      ],
+      mirrors: [], groups: [], booleans: [],
+      stack: scene.stack, stackName: scene.stackName, simSetup: scene.simSetup,
+    };
+    const { values: pv } = resolveParams(s.params);
+    const out = generateHfssNative(s, pv);
+    // The center variable's VALUE carries the snap-chain param.
+    const setVarCx = out.match(/set_var\("circ1_cx", "([^"]+)"\)/);
+    expect(setVarCx).not.toBeNull();
+    expect(setVarCx[1]).toContain('gap_x');
+    expect(out).toMatch(/set_var\("circ1_cy", "[^"]+"\)/);
+    // The CreateCircle call references the variables, not numerics.
+    const circleIdx = out.indexOf('oEditor.CreateCircle');
+    expect(circleIdx).toBeGreaterThan(0);
+    const circleCall = out.slice(circleIdx, circleIdx + 600);
+    expect(circleCall).toContain('"XCenter:=", "(circ1_cx)"');
+    expect(circleCall).toContain('"YCenter:=", "(circ1_cy)"');
+    // Radius stays parametric too.
+    expect(circleCall).toContain('circ1_r');
+    pyParses(out, 'vitest_hfss_circle_param');
+  });
+
+  it('emits a rect mirror target parametrically as 2*axis - (source chain)', () => {
+    // [B3b] A locked mirror target whose source has a parametric chain
+    // and whose shape is reflection-symmetric (rect) must be emitted as
+    // the parametric reflection 2*axisCoord - cx_src, so chain-variable
+    // sweeps in HFSS move source and mirror copy in lockstep.
+    const s = {
+      params: { off_x: { expr: '12', unit: 'µm', desc: 'snap offset' } },
+      components: [
+        { id: 'anchor0', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: '10', h: '10', cutouts: [], transforms: [] },
+        { id: 'src', kind: 'rect', layer: 'electrode', cx: 19, cy: 0, w: '4', h: '4', cutouts: [], transforms: [] },
+        { id: 'src_mir', kind: 'rect', layer: 'electrode', cx: -19, cy: 0, w: '4', h: '4', cutouts: [], transforms: [] },
+      ],
+      snaps: [
+        { id: 's1', from: { compId: 'anchor0', anchor: 'E' }, to: { compId: 'src', anchor: 'W' }, dx: 'off_x', dy: '0' },
+      ],
+      mirrors: [
+        { id: 'mir1', axis: 'vertical', axisCoord: 0,
+          members: [{ srcId: 'src', mirrorId: 'src_mir', locked: true }] },
+      ],
+      groups: [], booleans: [],
+      stack: scene.stack, stackName: scene.stackName, simSetup: scene.simSetup,
+    };
+    const { values: pv } = resolveParams(s.params);
+    const out = generateHfssNative(s, pv);
+    // Locate the create call for the mirror target and grab its X
+    // position expression (XStart for sheets, XPosition for boxes).
+    const nameIdx = out.indexOf('"Name:=", "src_mir"');
+    expect(nameIdx).toBeGreaterThan(0);
+    const blockStart = out.lastIndexOf('safe_create_', nameIdx);
+    expect(blockStart).toBeGreaterThan(0);
+    const block = out.slice(blockStart, nameIdx);
+    const xMatch = block.match(/"X(?:Start|Position):=", "([^"]+)"/);
+    expect(xMatch).not.toBeNull();
+    // The reflection form: 2*<axis literal> - (<source chain with off_x>).
+    expect(xMatch[1]).toContain('2*');
+    expect(xMatch[1]).toContain('off_x');
+    // And the safety report classifies the target as parametric-by-
+    // reflection, not frozen.
+    expect(out).toMatch(/#\s+- src_mir: pos \(mirror reflection of src\)/);
+    pyParses(out, 'vitest_hfss_mirror_param');
+  });
+
+  it('includes the PARAMETRIC-SWEEP SAFETY REPORT near the top of the script', () => {
+    // [B6] The boxed report block must sit in the header (before any
+    // executable code) and list both classifications.
+    const out = generateHfssNative(scene, values);
+    const reportIdx = out.indexOf('PARAMETRIC-SWEEP SAFETY REPORT');
+    expect(reportIdx).toBeGreaterThan(0);
+    expect(reportIdx).toBeLessThan(out.indexOf('import ScriptEnv'));
+    expect(out).toContain('# Fully parametric (tracks HFSS variable changes):');
+    expect(out).toContain('# FROZEN at export values (re-export after changing related params):');
+    // The placeholder must be fully consumed.
+    expect(out).not.toContain('__PARAMETRIC_REPORT__');
+    pyParses(out, 'vitest_hfss_report');
+  });
+
+  it('warns in the script when a repeat exceeds 500 instances', () => {
+    const condLayerId = scene.stack.find(l => l.role === 'conductor')?.id;
+    const params = { h_cond: { expr: '0.5' }, h_wg: { expr: '0.3' } };
+    const s = {
+      params,
+      components: [
+        { id: 'A', kind: 'rect', layer: 'electrode', conductorLayerId: condLayerId,
+          cx: 0, cy: 0, w: 5, h: 5, cutouts: [],
+          transforms: [{ id: 't1', kind: 'repeat', enabled: true, n: 600, dx: 10, dy: 0, includeOriginal: true }] },
+      ],
+      snaps: [], mirrors: [], groups: [], booleans: [],
+      stack: scene.stack, stackName: scene.stackName, simSetup: scene.simSetup,
+    };
+    const { values: pv } = resolveParams(params);
+    const out = generateHfssNative(s, pv);
+    expect(out).toContain('# WARNING: repeat n=600 creates 601 instances');
+    // The DuplicateAlongLine call is still emitted.
+    expect(out).toContain('DuplicateAlongLine');
+  });
+});

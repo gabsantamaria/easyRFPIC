@@ -15,7 +15,7 @@ import { HoverTooltip } from '../HoverTooltip.jsx';
 import { ParamTuner } from './ParamTuner.jsx'; // EXPERIMENTAL — see ParamTuner.jsx for removal instructions
 import { DeferredTextInput } from '../DeferredTextInput.jsx';
 
-export function ParamRow({ name, p, onRename, onUpdateExpr, onCommitExpr, onUpdateUnit, onUpdateDesc, onDelete, value, error, isUnused, isInvolved, autoFocus, onAutoFocusDone, suggestions }) {
+export function ParamRow({ name, p, onRename, onUpdateExpr, onCommitExpr, onUpdateUnit, onUpdateDesc, onUpdateSweep, onDelete, value, error, isUnused, isInvolved, autoFocus, onAutoFocusDone, suggestions }) {
   const [editingName, setEditingName] = useState(name);
   const [expanded, setExpanded] = useState(false);
   const inputRef = useRef(null);
@@ -52,6 +52,25 @@ export function ParamRow({ name, p, onRename, onUpdateExpr, onCommitExpr, onUpda
   // case where the input is too narrow for long identifiers like
   // "cap_sep_outer_signal_finger") plus any description.
   const nameTooltip = p.desc ? `${name}\n${p.desc}` : name;
+
+  // HFSS Optimetrics sweep metadata for this param (optional object:
+  // { enabled, start, stop, step } — values in the param's own unit).
+  // Edits are committed through onUpdateSweep(sweepObjOrNull); passing
+  // null drops the metadata entirely (never-configured sweep).
+  const sweep = p.sweep || null;
+  const sweepEnabled = !!(sweep && sweep.enabled);
+  const patchSweep = (patch) => {
+    const base = sweep || { enabled: false, start: '', stop: '', step: '' };
+    onUpdateSweep?.({ ...base, ...patch });
+  };
+  const toggleSweep = (checked) => {
+    if (!checked && sweep && !sweep.start && !sweep.stop && !sweep.step) {
+      // Unchecking a never-filled sweep — drop the metadata.
+      onUpdateSweep?.(null);
+      return;
+    }
+    patchSweep({ enabled: checked });
+  };
   // Tooltip on the value/expr: error if any, otherwise resolved value + unit
   // and the full expression (in case the input truncates it visually).
   const exprTooltip = error
@@ -87,6 +106,14 @@ export function ParamRow({ name, p, onRename, onUpdateExpr, onCommitExpr, onUpda
             spellCheck={false}
           />
         </HoverTooltip>
+        {sweepEnabled && (
+          <span
+            className="shrink-0 px-1 rounded text-[8px] font-mono font-bold bg-cyan-900/60 text-cyan-300 border border-cyan-700/60 cursor-help"
+            title={`Sweeps ${sweep.start || '?'}→${sweep.stop || '?'} step ${sweep.step || '?'} ${p.unit || ''} in HFSS Optimetrics`.trim()}
+          >
+            swp
+          </span>
+        )}
         {/* Expression field with draft-then-commit semantics + optional
             identifier-prefix autocomplete (when the caller passes
             `suggestions`). DeferredTextInput auto-grows to a textarea on
@@ -121,21 +148,59 @@ export function ParamRow({ name, p, onRename, onUpdateExpr, onCommitExpr, onUpda
           ParamTuner import to drop the experiment. */}
       <ParamTuner value={value} onUpdateExpr={onUpdateExpr} />
       {expanded && (
-        <div className="flex items-center gap-1 px-1.5 pb-1 pt-0">
-          <input
-            value={p.unit || ''}
-            onChange={(e) => onUpdateUnit(e.target.value)}
-            className="bg-slate-900 border border-slate-700 rounded px-1 py-0 text-[10px] text-slate-400 w-12 text-center outline-none"
-            placeholder="unit"
-          />
-          <input
-            type="text" placeholder="description"
-            value={p.desc || ''}
-            onChange={(e) => onUpdateDesc(e.target.value)}
-            className="flex-1 bg-slate-900 border border-slate-700 rounded px-1.5 py-0 text-[10px] text-slate-300 outline-none focus:border-cyan-400"
-            title={p.desc || ''}
-          />
-        </div>
+        <>
+          <div className="flex items-center gap-1 px-1.5 pb-1 pt-0">
+            <input
+              value={p.unit || ''}
+              onChange={(e) => onUpdateUnit(e.target.value)}
+              className="bg-slate-900 border border-slate-700 rounded px-1 py-0 text-[10px] text-slate-400 w-12 text-center outline-none"
+              placeholder="unit"
+            />
+            <input
+              type="text" placeholder="description"
+              value={p.desc || ''}
+              onChange={(e) => onUpdateDesc(e.target.value)}
+              className="flex-1 bg-slate-900 border border-slate-700 rounded px-1.5 py-0 text-[10px] text-slate-300 outline-none focus:border-cyan-400"
+              title={p.desc || ''}
+            />
+          </div>
+          {/* HFSS Optimetrics sweep micro-row: enable + start/stop/step
+              (values in this param's own unit). */}
+          <div className="flex items-center gap-1 px-1.5 pb-1 pt-0">
+            <label className="flex items-center gap-1 text-[10px] text-slate-400 cursor-pointer shrink-0" title="Sweep this parameter in HFSS Optimetrics">
+              <input
+                type="checkbox"
+                checked={sweepEnabled}
+                onChange={(e) => toggleSweep(e.target.checked)}
+              />
+              sweep
+            </label>
+            <input
+              type="text"
+              value={sweep?.start ?? ''}
+              onChange={(e) => patchSweep({ start: e.target.value })}
+              placeholder={`start${p.unit ? ' ' + p.unit : ''}`}
+              disabled={!sweepEnabled}
+              className="flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded px-1 py-0 text-[10px] font-mono text-slate-300 outline-none focus:border-cyan-400 disabled:opacity-40"
+            />
+            <input
+              type="text"
+              value={sweep?.stop ?? ''}
+              onChange={(e) => patchSweep({ stop: e.target.value })}
+              placeholder={`stop${p.unit ? ' ' + p.unit : ''}`}
+              disabled={!sweepEnabled}
+              className="flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded px-1 py-0 text-[10px] font-mono text-slate-300 outline-none focus:border-cyan-400 disabled:opacity-40"
+            />
+            <input
+              type="text"
+              value={sweep?.step ?? ''}
+              onChange={(e) => patchSweep({ step: e.target.value })}
+              placeholder={`step${p.unit ? ' ' + p.unit : ''}`}
+              disabled={!sweepEnabled}
+              className="flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded px-1 py-0 text-[10px] font-mono text-slate-300 outline-none focus:border-cyan-400 disabled:opacity-40"
+            />
+          </div>
+        </>
       )}
     </div>
   );

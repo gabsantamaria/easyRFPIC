@@ -417,6 +417,69 @@ export function generateHfssNative(scene, paramValues, options = {}) {
     }
   }
 
+  // ── PARAMETRIC-SWEEP SAFETY REPORT collectors ───────────────────────
+  // Every emission site classifies what it emitted: PARAMETRIC entries
+  // track HFSS variable changes end-to-end; FROZEN entries were baked
+  // at export-time numerics and need a re-export after changing any
+  // related parameter. The collected lists are spliced into the script
+  // header (see the `#__PARAMETRIC_REPORT__` placeholder) at the end of
+  // generation, so the user can audit sweep-safety before solving.
+  const reportParametric = [];
+  const reportFrozen = [];
+  const reportSeen = new Set();
+  const notePara = (id, tracks) => {
+    const k = `P:${id}`;
+    if (reportSeen.has(k)) return;
+    reportSeen.add(k);
+    reportParametric.push({ id, tracks });
+  };
+  const noteFrozen = (id, reason) => {
+    const k = `F:${id}:${reason}`;
+    if (reportSeen.has(k)) return;
+    reportSeen.add(k);
+    reportFrozen.push({ id, reason });
+  };
+
+  // ── Mirror-target parametric reflection ─────────────────────────────
+  // applyMirrors (solver.js) overwrites each locked mirror target with
+  // the NUMERIC reflection of its source:
+  //   axis 'horizontal': tgt.cy = 2*axisCoord - src.cy ; tgt.cx = src.cx
+  //   axis 'vertical'  : tgt.cx = 2*axisCoord - src.cx ; tgt.cy = src.cy
+  // For shapes that are reflection-symmetric about their own center
+  // axes (rect / circle / ellipse) the reflected SHAPE equals the
+  // translated shape, so we can emit the same math as an HFSS
+  // expression on top of the source's parametric chain — sweeping any
+  // snap-chain variable then moves the mirror copy in lockstep.
+  // Polygons / racetracks / polylines are NOT symmetric in general
+  // (the reflected outline differs from a translated one), so they
+  // keep the numeric fallback and land in the FROZEN report.
+  // The axis position itself is numeric in the scene model; interpolate
+  // it as a um-tagged literal.
+  const mirrorInfoByTarget = new Map(); // tgtId -> { srcId, axis, axisCoord }
+  for (const m of mirrors || []) {
+    for (const mem of (m.members || [])) {
+      if (mem.locked && mem.mirrorId) {
+        mirrorInfoByTarget.set(mem.mirrorId, { srcId: mem.srcId, axis: m.axis, axisCoord: m.axisCoord });
+      }
+    }
+  }
+  const MIRROR_SYMMETRIC_KINDS = new Set(['rect', 'circle', 'ellipse']);
+  const mirrorReflectedPos = (c) => {
+    const info = mirrorInfoByTarget.get(c.id);
+    if (!info) return null;
+    if (!MIRROR_SYMMETRIC_KINDS.has(c.kind || 'rect')) return null;
+    const srcPp = parametricPos[info.srcId];
+    if (!srcPp) return null;
+    const axisNum = Number.isFinite(info.axisCoord)
+      ? info.axisCoord
+      : (parseFloat(info.axisCoord) || 0);
+    const axisUm = `${axisNum.toFixed(4)}um`;
+    if (info.axis === 'horizontal') {
+      return { srcId: info.srcId, cxExpr: srcPp.cxExpr, cyExpr: `2*${axisUm} - (${srcPp.cyExpr})` };
+    }
+    return { srcId: info.srcId, cxExpr: `2*${axisUm} - (${srcPp.cxExpr})`, cyExpr: srcPp.cyExpr };
+  };
+
   // ASCII sanitizer for safety
   const ascii = (s) => {
     if (typeof s !== 'string') return s;
@@ -427,6 +490,8 @@ export function generateHfssNative(scene, paramValues, options = {}) {
       .replace(/[‘’]/g, "'")
       .replace(/×/g, 'x')
       .replace(/°/g, 'deg')
+      .replace(/λ/g, 'lambda')
+      .replace(/≈/g, '~=')
       .replace(/[^\x00-\x7F]/g, '?');
   };
   const unitFor = (u) => {
@@ -762,6 +827,8 @@ export function generateHfssNative(scene, paramValues, options = {}) {
 # Auto-generated HFSS native script
 # Photonic IC RF layout
 # Run via HFSS: Tools -> Run Script... (Python 2.7 inside HFSS)
+#
+#__PARAMETRIC_REPORT__
 ${dimWarnings.length > 0 ? `#
 # !!! WARNING: ${dimWarnings.length} dimension(s) are zero or invalid:
 ${dimWarnings.map(w => `#   ${w}`).join('\n')}
@@ -1229,9 +1296,18 @@ except:
       if (shapeKind === 'polyline' || shapeKind === 'polyshape') {
         const isPolyshape = shapeKind === 'polyshape';
         const widthExprUm = isPolyshape ? '0um' : exprWithUm(c.width ?? '0');
+        // Sweep-safety bookkeeping: flips true whenever any vertex (or
+        // the base position) has to fall back to a baked numeric — the
+        // polyline then lands in the FROZEN report instead of the
+        // fully-parametric list.
+        let polyHasFrozenVertex = false;
         // Build the parametric per-vertex (xExpr, yExpr) chain.
         const baseCxExpr = ppShape ? exprWithUm(ppShape.cxExpr) : `(${cx.toFixed(4)})um`;
         const baseCyExpr = ppShape ? exprWithUm(ppShape.cyExpr) : `(${cy.toFixed(4)})um`;
+        if (!ppShape) {
+          polyHasFrozenVertex = true;
+          noteFrozen(c.id, `${shapeKind} base position (no parametric snap chain)`);
+        }
         let curXExpr = baseCxExpr;
         let curYExpr = baseCyExpr;
         const vertExprs = [];
@@ -1300,6 +1376,8 @@ except:
                 // Fall back to the NUMERIC instance position from
                 // transformInstances — visually correct, no parametric
                 // tie to that specific instance.
+                polyHasFrozenVertex = true;
+                noteFrozen(c.id, `polyline vertex bound to transformed instance ${v.instanceIdx} of ${v.compId} (mirror/rotate chain - instance offset baked numerically)`);
                 const inst = transformInstancesAll.find(ii => ii.compId === owner.id && ii.idx === ownerInstanceIdx);
                 const opBase = transformInstancesAll.find(ii => ii.compId === v.compId && ii.idx === 0);
                 if (inst && opBase) {
@@ -1316,6 +1394,8 @@ except:
                 curYExpr = `(${tgtPp.cyExpr}) + (${off.yOff})`;
               }
             } else if (tgtComp) {
+              polyHasFrozenVertex = true;
+              noteFrozen(c.id, `polyline vertex snapped to ${v.compId} (target has no parametric chain - anchor baked numerically)`);
               const tw = typeof tgtComp.w === 'number' ? tgtComp.w : (evalExpr(tgtComp.w, paramValues) || 0);
               const th = typeof tgtComp.h === 'number' ? tgtComp.h : (evalExpr(tgtComp.h, paramValues) || 0);
               const off = anchorOffsetParam(v.anchor, `${tw}um`, `${th}um`);
@@ -1466,12 +1546,45 @@ except Exception as e:
         if (isSheet && c.layer === 'electrode') {
           zeroThicknessSheets.push(id);
         }
+        if (!polyHasFrozenVertex) {
+          notePara(c.id, 'pos, vertices, width');
+        }
         continue; // skip the tessellated-polyline path below
       }
 
       if (isNativeShape) {
-        const cxShape = ppShape ? exprWithUm(ppShape.cxExpr) : `${cx.toFixed(4)}um`;
-        const cyShape = ppShape ? exprWithUm(ppShape.cyExpr) : `${cy.toFixed(4)}um`;
+        // Parametric center via per-shape HFSS variables, mirroring the
+        // port-sheet idiom: set_var("<id>_cx", <full snap-chain expr>)
+        // then reference "(<id>_cx)" in the create call, so HFSS-side
+        // sweeps over any chain variable move the shape. Mirror targets
+        // can't use their own chain (applyMirrors repositioned them
+        // numerically); reflection-symmetric shapes (circle / ellipse)
+        // instead get the parametric reflection of their SOURCE chain.
+        // Regular polygons are not reflection-symmetric in general
+        // (vertex phase flips), so mirrored polygons freeze at the
+        // solved numerics and land in the FROZEN report.
+        const isMirrorTgtShape = mirrorTargetIds.has(c.id);
+        const mppShape = isMirrorTgtShape ? mirrorReflectedPos(c) : null;
+        let cxValExpr, cyValExpr;
+        if (!isMirrorTgtShape && ppShape) {
+          cxValExpr = spaceHyphens(exprWithUm(ppShape.cxExpr));
+          cyValExpr = spaceHyphens(exprWithUm(ppShape.cyExpr));
+          notePara(c.id, 'pos, size');
+        } else if (mppShape && shapeKind !== 'polygon') {
+          cxValExpr = spaceHyphens(exprWithUm(mppShape.cxExpr));
+          cyValExpr = spaceHyphens(exprWithUm(mppShape.cyExpr));
+          notePara(c.id, `pos (mirror reflection of ${mppShape.srcId}), size`);
+        } else {
+          cxValExpr = `${cx.toFixed(4)}um`;
+          cyValExpr = `${cy.toFixed(4)}um`;
+          noteFrozen(c.id, isMirrorTgtShape
+            ? 'mirror target (asymmetric shape or source without chain) - position baked numerically'
+            : 'position not derivable from snap chain - baked numerically');
+        }
+        const cxShapeVar = `${id}_cx`;
+        const cyShapeVar = `${id}_cy`;
+        const cxShape = `(${cxShapeVar})`;
+        const cyShape = `(${cyShapeVar})`;
         const colorShape = isPortSheet ? '(255 100 100)' : '(200 200 200)';
         const transShape  = isPortSheet ? '0.5' : '0.0';
         const solveInside = c.layer === 'waveguide' || isPortSheet ? 'True' : 'False';
@@ -1567,6 +1680,10 @@ except Exception as e:
          "SolveInside:=", ${solveInside}])`;
         }
         code += `# ${c.id}: ${shapeKind} as native HFSS primitive (parametric)\n`;
+        code += `# Center variables carry the full snap-chain expression so HFSS-side\n`;
+        code += `# sweeps over any chain parameter move the shape.\n`;
+        code += `set_var("${cxShapeVar}", "${cxValExpr}")\n`;
+        code += `set_var("${cyShapeVar}", "${cyValExpr}")\n`;
         code += `try:
     _delete_geom_if_exists("${id}")
     ${createCall}${isPortSheet ? '' : `
@@ -1590,6 +1707,11 @@ except Exception as e:
         continue; // skip the tessellated-polyline path below
       }
 
+      // Sweep-safety: the tessellated perimeter bakes every X/Y vertex
+      // at export-time numerics. Only Z (layer stack) stays parametric.
+      noteFrozen(c.id, shapeKind === 'racetrack'
+        ? 'racetrack tessellation (perimeter vertices baked numerically; only Z tracks layer sweeps)'
+        : `${shapeKind} tessellation (perimeter vertices baked numerically; only Z tracks layer sweeps)`);
       // Build the points list. CreatePolyline expects a sequence of
       // PolylinePoint records. X/Y stay numeric (the shape's perimeter
       // is tessellated at export time — see the racetrack note); Z uses
@@ -1720,13 +1842,33 @@ except Exception as e:
     }
 
     // Parametric expressions (with um units) so that changing parameters in
-    // HFSS actually moves geometry. Mirror targets fall back to numeric.
+    // HFSS actually moves geometry. Mirror targets of reflection-symmetric
+    // shapes (rects ARE symmetric) get the parametric reflection of their
+    // SOURCE's chain — cx_t = 2*axis - cx_src — so chain-variable sweeps
+    // move source and mirror copy in lockstep. The target's w/h equal the
+    // source's (applyMirrors copies them), so size exprs need no special
+    // handling. Anything else falls back to numeric + FROZEN report.
     const isMirrorTgt = mirrorTargetIds.has(c.id);
     const pp = parametricPos[c.id];
+    const mpp = isMirrorTgt ? mirrorReflectedPos(c) : null;
     const wExprUm = exprWithUm(c.w);
     const hExprUm = exprWithUm(c.h);
-    const cxExprUm = (!isMirrorTgt && pp) ? exprWithUm(pp.cxExpr) : `(${cx.toFixed(4)})um`;
-    const cyExprUm = (!isMirrorTgt && pp) ? exprWithUm(pp.cyExpr) : `(${cy.toFixed(4)})um`;
+    let cxExprUm, cyExprUm;
+    if (!isMirrorTgt && pp) {
+      cxExprUm = exprWithUm(pp.cxExpr);
+      cyExprUm = exprWithUm(pp.cyExpr);
+      notePara(c.id, 'pos, size');
+    } else if (mpp) {
+      cxExprUm = exprWithUm(mpp.cxExpr);
+      cyExprUm = exprWithUm(mpp.cyExpr);
+      notePara(c.id, `pos (mirror reflection of ${mpp.srcId}), size`);
+    } else {
+      cxExprUm = `(${cx.toFixed(4)})um`;
+      cyExprUm = `(${cy.toFixed(4)})um`;
+      noteFrozen(c.id, isMirrorTgt
+        ? 'mirror target (asymmetric shape or source without chain) - position baked numerically'
+        : 'position not derivable from snap chain - baked numerically');
+    }
     const xLoExprUm = `${cxExprUm} - ${wExprUm}/2`;
     const yLoExprUm = `${cyExprUm} - ${hExprUm}/2`;
 
@@ -2051,6 +2193,7 @@ except Exception as e:
           // numerically via expandTransforms. The CS origin won't
           // track parameter sweeps for those clones; re-export
           // after sweeping if you need the CS to follow.
+          noteFrozen(c.id, 'waveguide relative-CS clones (rotate/mirror chain - CS origins baked numerically)');
           const insts = expandTransforms([c], paramValues);
           for (const inst of insts) {
             if (inst.idx === 0) continue;
@@ -2121,20 +2264,21 @@ except Exception as e:
       //     inset on each endpoint absorbs any sub-µm evaluation
       //     drift between HFSS (evaluating the parametric expression)
       //     and JS (which precomputed the numeric).
-      const isMirrorTgt = mirrorTargetIds.has(c.id);
-      const pp = parametricPos[c.id];
       // HFSS's expression parser can mis-parse identifiers separated
       // by a bare hyphen — e.g. "cap_s-feed_w" gets read as a single
       // (unknown) identifier rather than the subtraction "cap_s - feed_w".
       // Insert spaces around hyphens that sit between identifier
       // characters so the parser sees the binary operator.
-      const spaceHyphens = (s) => String(s).replace(/(\w)-(\w)/g, '$1 - $2');
-      const cxExprForVar = spaceHyphens((!isMirrorTgt && pp)
+      // (isMirrorTgt / pp / mpp come from the shared classification at
+      // the top of the per-component loop — ports are rects, so a
+      // mirrored port gets the parametric reflection of its source.)
+      const portSpaceHyphens = (s) => String(s).replace(/(\w)-(\w)/g, '$1 - $2');
+      const cxExprForVar = portSpaceHyphens((!isMirrorTgt && pp)
         ? exprWithUm(pp.cxExpr)
-        : `${String(c.cx)}um`);
-      const cyExprForVar = spaceHyphens((!isMirrorTgt && pp)
+        : (mpp ? exprWithUm(mpp.cxExpr) : `${String(c.cx)}um`));
+      const cyExprForVar = portSpaceHyphens((!isMirrorTgt && pp)
         ? exprWithUm(pp.cyExpr)
-        : `${String(c.cy)}um`);
+        : (mpp ? exprWithUm(mpp.cyExpr) : `${String(c.cy)}um`));
       // Port sheet Z: half-way up the conductor layer, so the sheet
       // sits inside the metal trace at its mid-height. For a zero-
       // thickness conductor (h_cond=0) this collapses to the conductor
@@ -2258,8 +2402,13 @@ except Exception as e:
     for (const m of members) { gx += m.cx; gy += m.cy; }
     return { x: gx / members.length, y: gy / members.length };
   };
-  const emitTransformChainHfss = (transforms, partIds, startCx, startCy, baseW, baseH, componentGroup, startCxExpr, startCyExpr, baseWExpr, baseHExpr) => {
+  // One-shot guard so a scene with many oversized repeats doesn't spam
+  // the console — one warning per generation is enough to flag it.
+  let warnedLargeRepeat = false;
+  const emitTransformChainHfss = (transforms, partIds, startCx, startCy, baseW, baseH, componentGroup, startCxExpr, startCyExpr, baseWExpr, baseHExpr, reportCompId) => {
     if (!transforms || transforms.length === 0) return [...partIds];
+    // Sweep-safety report id for frozen-pivot entries below.
+    const chainReportId = reportCompId || (partIds && partIds[0]) || '(unknown)';
     let curCx = startCx, curCy = startCy, curRotation = 0;
     // Parametric centroid expressions: track curCx/curCy as HFSS-side
     // expressions so that Mirror / DuplicateMirror base points can be
@@ -2371,6 +2520,7 @@ except Exception as e:
               // itself is still emitted with a parametric angle.
               pivotXExpr = `${pivotX.toFixed(4)}um`;
               pivotYExpr = `${pivotY.toFixed(4)}um`;
+              noteFrozen(chainReportId, 'rotate pivot (group centroid of mixed members - baked numerically)');
             }
           } else if (pivot !== 'C') {
             // Anchor offset on the part's BASE w/h, then rotate by
@@ -2396,6 +2546,7 @@ except Exception as e:
             } else {
               pivotXExpr = `${pivotX.toFixed(4)}um`;
               pivotYExpr = `${pivotY.toFixed(4)}um`;
+              noteFrozen(chainReportId, `rotate pivot '${pivot}' (no parametric base dims - pivot baked numerically)`);
             }
           }
           // Negate the pivot for the pre-rotate translate. Wrapping in
@@ -2448,6 +2599,13 @@ except Exception as e:
         if (!Number.isFinite(dxNum) || !Number.isFinite(dyNum) || nNum < 1) continue;
         const dxExpr = (typeof t.dx === 'string' && /[A-Za-z_]/.test(t.dx)) ? ascii(t.dx) : `${dxNum.toFixed(4)}um`;
         const dyExpr = (typeof t.dy === 'string' && /[A-Za-z_]/.test(t.dy)) ? ascii(t.dy) : `${dyNum.toFixed(4)}um`;
+        if (nNum > 500) {
+          code += `# WARNING: repeat n=${nNum} creates ${nNum + 1} instances -- HFSS history will be very slow; consider reducing or flattening\n`;
+          if (!warnedLargeRepeat) {
+            warnedLargeRepeat = true;
+            console.warn(`hfss-native: repeat n=${nNum} creates ${nNum + 1} instances -- HFSS history will be very slow; consider reducing or flattening`);
+          }
+        }
         // oEditor.DuplicateAlongLine: NumClones = n (creates n copies of
         // the selection, so total parts = n + 1).
         code += `try:
@@ -2633,6 +2791,7 @@ except Exception as e:
       ppForChain ? ppForChain.cyExpr : undefined,
       ppForChain ? ppForChain.wExpr : undefined,
       ppForChain ? ppForChain.hExpr : undefined,
+      c.id,
     );
     finalPartIdsByCompId.set(c.id, finalPartIds);
     // If this part is a zero-thickness conductor sheet, every clone the
@@ -2766,6 +2925,7 @@ except Exception as e:
         ppForBool ? ppForBool.cyExpr : undefined,
         ppForBool ? ppForBool.wExpr : undefined,
         ppForBool ? ppForBool.hExpr : undefined,
+        b.id,
       );
       // Record this boolean's POST-transform part list so a downstream
       // boolean that consumes it sees every clone. Critical for
@@ -3110,6 +3270,10 @@ oBoundarySetup = oDesign.GetModule("BoundarySetup")
       const portId = comp.id.replace(/[^A-Za-z0-9_]/g, '_');
       const portName = `LumpedPort_${portId}`;
       const impedance = (comp.lumpedPort && comp.lumpedPort.impedance) || '50';
+      // Sweep-safety: HFSS's IntLine COM field rejects expressions, so
+      // the endpoints below are baked numerics. Re-assign the line once
+      // via the GUI (Edit > Integration Line) to make it auto-track.
+      noteFrozen(comp.id, 'lumped-port integration line (numeric endpoints; re-assign once via GUI Edit > Integration Line to auto-track, or re-export after param changes)');
       // IntLine endpoints are emitted as BARE numeric literals at the
       // export-time port edges. They MUST sit EXACTLY on opposite port
       // edges — HFSS's lumped-port assignment rejects interior points
@@ -3196,24 +3360,113 @@ except Exception as e:
     }
   }
   if (!appendToActive) {
-    // Fresh-project mode: install a default DrivenModal setup so the
-    // generated project is immediately solvable. In append-to-active
-    // mode the existing design already carries its own setups and
-    // sweeps that the user wants preserved — we leave them alone.
+    // Fresh-project mode: install a DrivenModal setup (plus optional
+    // frequency sweep and Optimetrics parametric sweep) so the
+    // generated project is immediately solvable with ZERO manual GUI
+    // work. In append-to-active mode the existing design already
+    // carries its own setups and sweeps that the user wants preserved
+    // — we leave them alone.
+    const sim = scene.simSetup || {};
+    // Strip a trailing 'GHz' the user may have typed (same forgiving
+    // handling as fnominal above); returns the fallback on garbage.
+    const stripGhz = (v, fallback) => {
+      const s = ascii(String(v ?? '')).trim().replace(/\s*ghz\s*$/i, '');
+      return s !== '' && Number.isFinite(parseFloat(s)) ? s : fallback;
+    };
+    // Adaptive-solve frequency: solveFreq wins; empty/missing/garbage
+    // falls back to fnominal (the radiation-box sizing frequency).
+    const solveFreqGHz = stripGhz(sim.solveFreq, String(fnominalGHz));
+    const maxPassesNum = Math.floor(parseFloat(sim.maxPasses));
+    const maxPasses = Number.isFinite(maxPassesNum) && maxPassesNum > 0 ? maxPassesNum : 12;
+    const maxDeltaSNum = parseFloat(sim.maxDeltaS);
+    const maxDeltaS = Number.isFinite(maxDeltaSNum) && maxDeltaSNum > 0 ? maxDeltaSNum : 0.02;
     code += `
 # ===== Setup =====
 oModule = oDesign.GetModule("AnalysisSetup")
 oModule.InsertSetup("HfssDriven",
     ["NAME:Setup1",
      "AdaptMultipleFreqs:=", False,
-     "Frequency:=", "20GHz",
-     "MaxDeltaS:=", 0.02,
-     "MaximumPasses:=", 12,
+     "Frequency:=", "${solveFreqGHz}GHz",
+     "MaxDeltaS:=", ${maxDeltaS},
+     "MaximumPasses:=", ${maxPasses},
      "MinimumPasses:=", 1,
      "MinimumConvergedPasses:=", 1,
      "PercentRefinement:=", 30,
      "IsEnabled:=", True])
-
+`;
+    if (sim.sweepEnabled !== false) {
+      const sweepStart = stripGhz(sim.sweepStart, '0.1');
+      const sweepStop = stripGhz(sim.sweepStop, '50');
+      const sweepPointsNum = Math.floor(parseFloat(sim.sweepPoints));
+      const sweepPoints = Number.isFinite(sweepPointsNum) && sweepPointsNum > 0 ? sweepPointsNum : 500;
+      const sweepType = ['Interpolating', 'Discrete', 'Fast'].includes(sim.sweepType)
+        ? sim.sweepType : 'Interpolating';
+      // The Interp* knobs are only meaningful (and only accepted by
+      // some HFSS releases) for interpolating sweeps.
+      const interpExtras = sweepType === 'Interpolating'
+        ? `,
+         "InterpTolerance:=", 0.5,
+         "InterpMaxSolns:=", 250,
+         "InterpMinSolns:=", 0,
+         "InterpMinSubranges:=", 1`
+        : '';
+      code += `
+# Frequency sweep: ${sweepStart} - ${sweepStop} GHz, ${sweepPoints} points, ${sweepType}.
+try:
+    oModule.InsertFrequencySweep("Setup1",
+        ["NAME:Sweep",
+         "IsEnabled:=", True,
+         "RangeType:=", "LinearCount",
+         "RangeStart:=", "${sweepStart}GHz",
+         "RangeEnd:=", "${sweepStop}GHz",
+         "RangeCount:=", ${sweepPoints},
+         "Type:=", "${sweepType}",
+         "SaveFields:=", False,
+         "SaveRadFields:=", False${interpExtras}])
+except Exception as e:
+    oDesktop.AddMessage("", "", 1, "InsertFrequencySweep failed: " + str(e))
+`;
+    }
+    // ===== Optimetrics parametric sweep over flagged scene params =====
+    // Any param carrying sweep={enabled,start,stop,step} becomes one
+    // SweepDefinition in a single OptiParametric setup driving Setup1.
+    const sweptParams = Object.entries(scene.params || {}).filter(([, p]) =>
+      p && p.sweep && p.sweep.enabled && p.sweep.start && p.sweep.stop && p.sweep.step);
+    if (sweptParams.length > 0) {
+      const defs = sweptParams.map(([name, p]) => {
+        const u = unitFor(p.unit);
+        const lin = `LIN ${ascii(String(p.sweep.start).trim())}${u} ${ascii(String(p.sweep.stop).trim())}${u} ${ascii(String(p.sweep.step).trim())}${u}`;
+        return { name: ascii(name), lin };
+      });
+      const defLines = defs.map(d => `         ["NAME:SweepDefinition",
+          "Variable:=", "${d.name}",
+          "Data:=", "${d.lin}",
+          "OffsetF1:=", False,
+          "Synchronize:=", 0]`).join(',\n');
+      code += `
+# ===== Optimetrics parametric setup =====
+# Swept params (audit before solving):
+${defs.map(d => `#   ${d.name}: ${d.lin}`).join('\n')}
+try:
+    oModule = oDesign.GetModule("Optimetrics")
+    oModule.InsertSetup("OptiParametric",
+        ["NAME:ParametricSetup1",
+         "IsEnabled:=", True,
+         ["NAME:ProdOptiSetupDataV2",
+          "SaveFields:=", False,
+          "CopyMesh:=", False,
+          "SolveWithCopiedMeshOnly:=", True],
+         ["NAME:StartingPoint"],
+         "Sim. Setups:=", ["Setup1"],
+         ["NAME:Sweeps",
+${defLines}],
+         ["NAME:Sweep Operations"],
+         ["NAME:Goals"]])
+except Exception as e:
+    oDesktop.AddMessage("", "", 1, "Optimetrics parametric setup failed: " + str(e))
+`;
+    }
+    code += `
 oProject.Save()
 oDesktop.AddMessage("", "", 0, "Layout built.")
 `;
@@ -3294,5 +3547,33 @@ except Exception as e:
     }
   }
 
-  return code;
+  // ===== PARAMETRIC-SWEEP SAFETY REPORT (spliced into the header) =====
+  // Generation has now visited every emission site, so the parametric /
+  // frozen classification lists are complete. Replace the placeholder
+  // that the header template reserved near the top of the script.
+  // Comment-only block — never affects Python parsing; ASCII-sanitized
+  // so the IronPython 2.7 reader can't choke on stray unicode.
+  {
+    const lines = [];
+    lines.push('# ===== PARAMETRIC-SWEEP SAFETY REPORT =====');
+    lines.push('# Fully parametric (tracks HFSS variable changes):');
+    if (reportParametric.length === 0) {
+      lines.push('#   (none)');
+    } else {
+      for (const e of reportParametric) lines.push(`#   - ${ascii(String(e.id))}: ${ascii(String(e.tracks))}`);
+    }
+    lines.push('# FROZEN at export values (re-export after changing related params):');
+    if (reportFrozen.length === 0) {
+      lines.push('#   (none -- every emitted element tracks HFSS variables)');
+    } else {
+      for (const e of reportFrozen) lines.push(`#   - ${ascii(String(e.id))}: ${ascii(String(e.reason))}`);
+    }
+    lines.push('# ==========================================');
+    code = code.replace('#__PARAMETRIC_REPORT__', () => lines.join('\n'));
+  }
+  // Final ASCII pass over the WHOLE script: IronPython 2.7 inside HFSS must
+  // never see non-ASCII bytes (em-dashes / lambda / approx signs sneak in
+  // via emitted comment templates). Geometry/expressions are ASCII already,
+  // so this only normalizes comments.
+  return ascii(code);
 }

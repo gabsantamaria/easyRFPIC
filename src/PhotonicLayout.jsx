@@ -4574,7 +4574,7 @@ export default function App() {
               buttonClassName="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium"
               buttonStyle={{ background: '#06b6d4', color: '#0f172a' }}
               items={[
-                { label: 'pyAEDT', icon: Download, onClick: handleExportPyAEDT, hint: 'layout.py', title: 'External Python with pyaedt installed (run from terminal: python layout.py)' },
+                { label: 'pyAEDT (basic)', icon: Download, onClick: handleExportPyAEDT, hint: 'layout.py', title: 'External Python with pyaedt installed (run from terminal: python layout.py). Basic export — numeric positions, single-conductor assumptions. For full parametric fidelity use HFSS native.' },
                 { label: 'HFSS native', icon: Download, onClick: handleExportHfssNative, hint: 'layout_hfss.py', title: 'Native HFSS COM script (run inside HFSS via Tools -> Run Script)' },
                 { label: 'GDS-II', icon: Download, onClick: handleExportGDS, hint: 'layout.gds', title: 'Binary GDS-II layout. Layers: waveguide=1, conductors=10+ (one per stack layer), port=100. Coords in µm with 1nm database resolution.' },
                 { label: 'gdsfactory', icon: Download, onClick: handleExportGdsfactory, hint: 'layout_gf.py', title: 'Parametric @gf.cell Python function. Every scene parameter becomes a kwarg with its current value as default — call the function with overrides to sweep params in Python.' },
@@ -5171,6 +5171,7 @@ export default function App() {
                     suggestions={paramNames.filter(n => n !== name)}
                     onUpdateUnit={(v) => updateParam(name, { unit: v })}
                     onUpdateDesc={(v) => updateParam(name, { desc: v })}
+                    onUpdateSweep={(sw) => updateParam(name, { sweep: sw })}
                     onDelete={() => deleteParam(name)}
                   />
                 ))}
@@ -5810,9 +5811,25 @@ export default function App() {
                 ? airPadNum : radPadUm;
               const airPadIsOverride = Number.isFinite(airPadNum) && airPadNum > 0;
               const appendActive = !!(scene.simSetup && scene.simSetup.appendToActive);
+              // Analysis / sweep knobs (see normalizeScene for the contract
+              // defaults — these ?? fallbacks only matter for scenes that
+              // bypassed normalize, e.g. mid-session legacy blobs).
+              const solveFreqStr = (scene.simSetup && scene.simSetup.solveFreq) ?? '';
+              const maxPassesStr = (scene.simSetup && scene.simSetup.maxPasses) ?? '12';
+              const maxDeltaSStr = (scene.simSetup && scene.simSetup.maxDeltaS) ?? '0.02';
+              const sweepEnabled = (scene.simSetup && scene.simSetup.sweepEnabled) ?? true;
+              const sweepStartStr = (scene.simSetup && scene.simSetup.sweepStart) ?? '0.1';
+              const sweepStopStr = (scene.simSetup && scene.simSetup.sweepStop) ?? '50';
+              const sweepPointsStr = (scene.simSetup && scene.simSetup.sweepPoints) ?? '500';
+              const sweepTypeStr = (scene.simSetup && scene.simSetup.sweepType) ?? 'Interpolating';
               const updateSim = (patch) => updateScene(prev => ({
                 ...prev,
-                simSetup: { fnominal: '4', padXNeg: '50', padXPos: '50', padYNeg: '50', padYPos: '50', ...(prev.simSetup || {}), ...patch },
+                simSetup: {
+                  fnominal: '4', padXNeg: '50', padXPos: '50', padYNeg: '50', padYPos: '50',
+                  solveFreq: '', maxPasses: '12', maxDeltaS: '0.02',
+                  sweepEnabled: true, sweepStart: '0.1', sweepStop: '50', sweepPoints: '500', sweepType: 'Interpolating',
+                  ...(prev.simSetup || {}), ...patch,
+                },
               }));
               const PadField = ({ label, value, field }) => (
                 <div className="flex items-center gap-2">
@@ -5826,6 +5843,24 @@ export default function App() {
                     className="w-20 px-1.5 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 text-xs font-mono"
                   />
                   <span className="text-[10px] text-slate-500">µm</span>
+                </div>
+              );
+              // Same input semantics as PadField (blur/Enter commit, Escape
+              // reverts) but with a per-field fallback + placeholder so
+              // blank-allowed fields (solveFreq) and non-µm units work.
+              const SimField = ({ label, value, field, fallback = '', placeholder = '', unit = '' }) => (
+                <div className="flex items-center gap-2">
+                  <label className="text-[10px] text-slate-400 w-24 text-right">{label}</label>
+                  <input
+                    type="text"
+                    defaultValue={value}
+                    key={value}
+                    placeholder={placeholder}
+                    onBlur={(e) => updateSim({ [field]: e.target.value.trim() || fallback })}
+                    onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); if (e.key === 'Escape') { e.target.value = value; e.target.blur(); } }}
+                    className="w-20 px-1.5 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 text-xs font-mono placeholder:text-slate-600"
+                  />
+                  {unit && <span className="text-[10px] text-slate-500">{unit}</span>}
                 </div>
               );
               return (
@@ -5892,6 +5927,52 @@ export default function App() {
                       <PadField label="+y" value={padYPosStr} field="padYPos" />
                       <PadField label="−y" value={padYNegStr} field="padYNeg" />
                     </div>
+                  </div>
+                  <div className="border-t border-slate-800 pt-2">
+                    <div className="text-[10px] uppercase tracking-wider text-slate-400 mb-1">Analysis</div>
+                    <p className="text-[10px] text-slate-500 leading-snug mb-2">
+                      Adaptive-solve settings for the generated Setup1.
+                      Leave solve frequency blank to solve at
+                      f<sub>nominal</sub>.
+                    </p>
+                    <div className="space-y-1.5">
+                      <SimField label="Solve freq" value={solveFreqStr} field="solveFreq" fallback="" placeholder="fnominal" unit="GHz" />
+                      <SimField label="Max passes" value={maxPassesStr} field="maxPasses" fallback="12" />
+                      <SimField label="Max ΔS" value={maxDeltaSStr} field="maxDeltaS" fallback="0.02" />
+                    </div>
+                  </div>
+                  <div className="border-t border-slate-800 pt-2">
+                    <div className="text-[10px] uppercase tracking-wider text-slate-400 mb-1">Frequency sweep</div>
+                    <label className="flex items-center gap-2 text-[11px] text-slate-200 cursor-pointer mb-1.5">
+                      <input
+                        type="checkbox"
+                        checked={sweepEnabled}
+                        onChange={(e) => updateSim({ sweepEnabled: e.target.checked })}
+                      />
+                      Enable frequency sweep
+                    </label>
+                    {sweepEnabled && (
+                      <div className="space-y-1.5">
+                        <SimField label="Start" value={sweepStartStr} field="sweepStart" fallback="0.1" unit="GHz" />
+                        <SimField label="Stop" value={sweepStopStr} field="sweepStop" fallback="50" unit="GHz" />
+                        <SimField label="Points" value={sweepPointsStr} field="sweepPoints" fallback="500" />
+                        <div className="flex items-center gap-2">
+                          <label className="text-[10px] text-slate-400 w-24 text-right">Type</label>
+                          <select
+                            value={sweepTypeStr}
+                            onChange={(e) => updateSim({ sweepType: e.target.value })}
+                            className="w-32 px-1.5 py-1 rounded bg-slate-800 border border-slate-700 text-slate-200 text-xs font-mono"
+                          >
+                            <option value="Interpolating">Interpolating</option>
+                            <option value="Discrete">Discrete</option>
+                            <option value="Fast">Fast</option>
+                          </select>
+                        </div>
+                      </div>
+                    )}
+                    <p className="text-[10px] text-slate-500 mt-2 leading-snug">
+                      Emitted as Setup1 + sweep in the HFSS export.
+                    </p>
                   </div>
                   <div className="border-t border-slate-800 pt-2">
                     <div className="text-[10px] uppercase tracking-wider text-slate-400 mb-1">HFSS export mode</div>

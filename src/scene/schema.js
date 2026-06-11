@@ -332,8 +332,25 @@ export function normalizeScene(s) {
   //     (deviceMaxX + padXPos, deviceMaxY + padYPos). Symmetric pads
   //     keep the design centered on the chip; asymmetric pads shift
   //     it. Strings so they can be parametric later. Default 50 µm.
+  //   - solveFreq: adaptive-solve frequency (GHz). Empty string →
+  //     fall back to fnominal at export time.
+  //   - maxPasses / maxDeltaS: adaptive-pass convergence knobs for
+  //     the generated Setup1.
+  //   - sweepEnabled / sweepStart / sweepStop / sweepPoints /
+  //     sweepType: frequency-sweep block emitted under Setup1 in the
+  //     HFSS export. All values stored as strings except
+  //     sweepEnabled (boolean). The spread below lets saved values
+  //     win — including an explicit sweepEnabled:false.
   const simSetup = {
     fnominal: '4',
+    solveFreq: '',
+    maxPasses: '12',
+    maxDeltaS: '0.02',
+    sweepEnabled: true,
+    sweepStart: '0.1',
+    sweepStop: '50',
+    sweepPoints: '500',
+    sweepType: 'Interpolating',
     padXNeg: '50',
     padXPos: '50',
     padYNeg: '50',
