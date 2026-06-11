@@ -44,6 +44,38 @@ export function anchorLocal(anchorName, w, h) {
   return { x: dx, y: dy };
 }
 
+// Rotate a local anchor offset by `rotDeg` degrees CCW. Used for
+// components carrying a first-class `rotation` expression so their
+// anchors sit on the ROTATED shape's actual corners/edges, not on the
+// pre-rotation axis-aligned bbox.
+export function rotateLocal(local, rotDeg) {
+  if (!rotDeg || Math.abs(rotDeg) < 1e-12) return local;
+  const rad = rotDeg * Math.PI / 180;
+  const ca = Math.cos(rad), sa = Math.sin(rad);
+  return { x: local.x * ca - local.y * sa, y: local.x * sa + local.y * ca };
+}
+
+// `anchorLocal` with an optional rotation applied.
+export function anchorLocalRotated(anchorName, w, h, rotDeg = 0) {
+  return rotateLocal(anchorLocal(anchorName, w, h), rotDeg);
+}
+
+// Numeric value of a component's first-class `rotation` field (degrees,
+// CCW). Only rect / circle / ellipse / polygon support it (matching the
+// seeding in expandTransforms); booleans and path-like kinds return 0.
+// Absent / blank / '0' → 0.
+const ROTATABLE_KINDS = new Set(['rect', 'circle', 'ellipse', 'polygon']);
+export function compRotationDeg(comp, paramValues) {
+  if (!comp) return 0;
+  if (!ROTATABLE_KINDS.has(comp.kind || 'rect')) return 0;
+  const r = comp.rotation;
+  if (r == null) return 0;
+  if (typeof r === 'number') return Number.isFinite(r) ? r : 0;
+  if (typeof r !== 'string' || r.trim() === '' || r.trim() === '0') return 0;
+  const v = evalExpr(r, paramValues || {});
+  return Number.isFinite(v) ? v : 0;
+}
+
 export function anchorWorld(comp, anchorName, paramValues) {
   // For booleans with a transform chain, `displayBbox` carries the post-
   // transform AABB (the visible footprint of the rotated/replicated
@@ -60,6 +92,9 @@ export function anchorWorld(comp, anchorName, paramValues) {
   // solveLayout) as well as expression-string w/h (primitives).
   const w = typeof comp.w === 'number' ? comp.w : evalExpr(comp.w, paramValues);
   const h = typeof comp.h === 'number' ? comp.h : evalExpr(comp.h, paramValues);
-  const local = anchorLocal(anchorName, w, h);
+  // First-class rotation: the anchor offset rotates with the shape so
+  // snap targets / dots track the rotated geometry. (Booleans return 0.)
+  const rot = compRotationDeg(comp, paramValues);
+  const local = rotateLocal(anchorLocal(anchorName, w, h), rot);
   return { x: comp.cx + local.x, y: comp.cy + local.y };
 }

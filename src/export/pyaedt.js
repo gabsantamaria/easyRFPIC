@@ -228,6 +228,33 @@ def build_wg(name, cx, cy, w, h):
     // (c.cx, c.cy) and update with each displace.
     let curCx = c.cx, curCy = c.cy;
     let curRotation = 0;
+    // ── Per-component zOffset (D5) — BASIC numeric emission ──────────
+    // pyAEDT is the convenience exporter; the native COM export keeps
+    // zOffset fully parametric. Here we bake the evaluated offset as a
+    // single Z move so the geometry matches the canvas/native export.
+    if (c.zOffset != null && String(c.zOffset).trim() !== '') {
+      const zOffNum = evalExpr(c.zOffset, paramValues);
+      if (Number.isFinite(zOffNum) && Math.abs(zOffNum) > 1e-12) {
+        const partsStr0 = partTargets.map(p => `"${p}"`).join(', ');
+        code += `# ${c.id}: zOffset = ${ascii(String(c.zOffset))} (baked numerically; use the native COM export for a parametric Z offset)\n`;
+        code += `hfss.modeler.move([${partsStr0}], ["0um", "0um", "${zOffNum.toFixed(4)}um"])\n`;
+      }
+    }
+    // ── First-class rotation (D6) — BASIC numeric emission ───────────
+    // Rotate about the part's own center via translate-rotate-translate
+    // (HFSS rotates about the world origin). Numeric here; the native
+    // COM export emits the rotation EXPRESSION parametrically.
+    if ((shapeKind === 'rect' || shapeKind === 'circle' || shapeKind === 'ellipse' || shapeKind === 'polygon')
+        && c.rotation != null && String(c.rotation).trim() !== '' && String(c.rotation).trim() !== '0') {
+      const rotNum = evalExpr(c.rotation, paramValues);
+      if (Number.isFinite(rotNum) && Math.abs(rotNum) > 1e-12) {
+        const partsStr0 = partTargets.map(p => `"${p}"`).join(', ');
+        code += `# ${c.id}: rotation = ${ascii(String(c.rotation))} deg CCW about own center (baked numerically; use the native COM export for a parametric rotation)\n`;
+        code += `hfss.modeler.move([${partsStr0}], ["${(-curCx).toFixed(4)}um", "${(-curCy).toFixed(4)}um", "0um"])\n`;
+        code += `hfss.modeler.rotate([${partsStr0}], "Z", "${rotNum.toFixed(4)}deg")\n`;
+        code += `hfss.modeler.move([${partsStr0}], ["${curCx.toFixed(4)}um", "${curCy.toFixed(4)}um", "0um"])\n`;
+      }
+    }
     for (const t of (c.transforms || [])) {
       if (!t || t.enabled === false) continue;
       const partsStr = partTargets.map(p => `"${p}"`).join(', ');

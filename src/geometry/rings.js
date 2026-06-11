@@ -110,31 +110,39 @@ export function shapeInstanceToRing(inst) {
   }
   if (kind === 'polyline') {
     // For ring consumers (GDS / canvas boolean mask / etc.) we return the
-    // CENTERLINE as a polyline ring. The instance carries `_resolvedVerts`
-    // populated by the solver (world-space vertex positions). Canvas
-    // rendering prefers an explicit stroked <path> with parametric width
-    // — using the centerline as a ring here covers the few callers that
-    // need a generic perimeter (GDS BOUNDARY emission, boolean mask
+    // CENTERLINE as a polyline ring — TESSELLATED (arcs expanded, spline
+    // runs interpolated). The instance carries `_resolvedVerts` populated
+    // by the solver (world-space path points at the BASE pose) plus
+    // `_baseCx`/`_baseCy` (the anchor that pose was resolved against).
+    // Points are remapped into the clone's frame relative to the BASE
+    // anchor — using inst.cx here would cancel the clone's translation.
+    // Canvas rendering prefers an explicit stroked <path> with parametric
+    // width — using the centerline as a ring here covers the few callers
+    // that need a generic perimeter (GDS fallbacks, boolean mask
     // composition). HFSS export emits a native CreatePolyline + sweep
     // with the proper XSection width, not via this ring.
     const verts = (inst._resolvedVerts && inst._resolvedVerts.length > 0)
       ? inst._resolvedVerts
       : [];
     if (verts.length === 0) return [];
-    return verts.map(([lx, ly]) => xform(lx - inst.cx, ly - inst.cy));
+    const bx = Number.isFinite(inst._baseCx) ? inst._baseCx : inst.cx;
+    const by = Number.isFinite(inst._baseCy) ? inst._baseCy : inst.cy;
+    return verts.map(([lx, ly]) => xform(lx - bx, ly - by));
   }
   if (kind === 'polyshape') {
-    // Closed polygon-path: the resolved vertices ARE the perimeter ring.
-    // Like polyline this uses `_resolvedVerts` (world coords) set by the
-    // canvas / exporters before calling shapeInstanceToRing. The ring
-    // is implicitly closed — we drop the last vertex if it duplicates
-    // the first so downstream consumers (GDS BOUNDARY emission etc.)
-    // get a non-degenerate edge list.
+    // Closed polygon-path: the tessellated resolved vertices ARE the
+    // perimeter ring. Like polyline this uses `_resolvedVerts` (world
+    // coords at the base pose, solver-stashed) remapped via _baseCx/_baseCy.
+    // The ring is implicitly closed — we drop the last vertex if it
+    // duplicates the first so downstream consumers (GDS BOUNDARY emission
+    // etc.) get a non-degenerate edge list.
     const verts = (inst._resolvedVerts && inst._resolvedVerts.length > 0)
       ? inst._resolvedVerts
       : [];
     if (verts.length === 0) return [];
-    const out = verts.map(([lx, ly]) => xform(lx - inst.cx, ly - inst.cy));
+    const bx = Number.isFinite(inst._baseCx) ? inst._baseCx : inst.cx;
+    const by = Number.isFinite(inst._baseCy) ? inst._baseCy : inst.cy;
+    const out = verts.map(([lx, ly]) => xform(lx - bx, ly - by));
     if (out.length > 1) {
       const [fx, fy] = out[0];
       const [lx, ly] = out[out.length - 1];

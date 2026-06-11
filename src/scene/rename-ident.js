@@ -20,10 +20,20 @@ const COMPONENT_EXPR_FIELDS = [
   'R', 'L_straight', 'p', 'wgWidth',         // racetrack
   'n',                                       // polygon side count
   'width',                                   // polyline trace width
+  'rotation',                                // first-class rotation (deg, CCW)
+  'zOffset',                                 // Z shift relative to the layer (µm)
 ];
 const CUTOUT_EXPR_FIELDS    = ['dx', 'dy', 'w', 'h'];
 const TRANSFORM_EXPR_FIELDS = ['dx', 'dy', 'angle', 'n', 'offset'];
-const VERTEX_EXPR_FIELDS    = ['dx', 'dy'];  // rel-kind polyline/polyshape vertices
+// Polyline/polyshape vertex expression fields:
+//   dx/dy        — rel-kind step from the previous vertex
+//   cdx/cdy/angle — arc-kind center offset + sweep (degrees CCW)
+//   width        — per-vertex taper width (polyline only; any kind)
+// Applied to EVERY vertex regardless of kind — replFields skips fields
+// that aren't strings, so snap vertices (compId/anchor only) pass
+// through untouched while a snap vertex carrying a taper width still
+// gets its width expression rewritten.
+const VERTEX_EXPR_FIELDS    = ['dx', 'dy', 'cdx', 'cdy', 'angle', 'width'];
 const STACK_EXPR_FIELDS     = ['thickness', 'core_width', 'slab_height', 'slab_width', 'etch_angle'];
 const SIM_EXPR_FIELDS       = ['fnominal', 'padXNeg', 'padXPos', 'padYNeg', 'padYPos', 'airPad'];
 
@@ -71,10 +81,12 @@ export function renameIdentInScene(scene, oldName, newName) {
       next.transforms = c.transforms.map((t) => (t ? replFields(t, TRANSFORM_EXPR_FIELDS, repl) : t));
     }
     if (Array.isArray(c.vertices)) {
-      // Only rel-kind vertices carry expressions; snap-kind vertices
-      // hold { compId, anchor } and have nothing to rewrite.
+      // Every vertex kind can carry expressions now: rel (dx/dy), arc
+      // (cdx/cdy/angle), and any kind can carry a taper width. snap
+      // vertices' compId/anchor are not expressions and aren't in the
+      // field list, so they pass through unchanged.
       next.vertices = c.vertices.map((v) =>
-        v && v.kind === 'rel' ? replFields(v, VERTEX_EXPR_FIELDS, repl) : v
+        v ? replFields(v, VERTEX_EXPR_FIELDS, repl) : v
       );
     }
     return next;

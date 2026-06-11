@@ -42,6 +42,50 @@ import { instanceChainOffsetExpr, chainOwnerForInstance } from '../scene/instanc
 // snap-chain → parametric-position resolution. The output expressions
 // use HFSS-style "um" unit suffixes on bare numerics; callers that
 // target a different language post-process those out.
+
+// ── First-class rotation helpers ─────────────────────────────────────
+// Components may carry an optional `rotation` expression (degrees, CCW).
+// HFSS trig is UNIT-AWARE: cos/sin demand a degree- (or radian-) typed
+// argument, so a unitless rotation expression must be multiplied by
+// `1deg`. Pure numeric rotations emit as "<n>deg" literals.
+//
+// IMPORTANT: rotation parameters auto-created from the inspector are
+// UNITLESS (unit: '') — multiplying a deg-typed HFSS variable by 1deg
+// would produce deg², which HFSS rejects.
+export function hfssAngleDegExpr(expr) {
+  const s = String(expr ?? '0').trim();
+  if (/^-?\d+(?:\.\d+)?$/.test(s)) return `${s}deg`;
+  return `(${s})*1deg`;
+}
+
+// The component's rotation expression, or null when absent / trivially
+// zero. Only rect / circle / ellipse / polygon support first-class
+// rotation (matching expandTransforms' seeding); booleans and path-like
+// kinds return null.
+const HFSS_ROTATABLE_KINDS = new Set(['rect', 'circle', 'ellipse', 'polygon']);
+export function componentRotationExpr(c) {
+  if (!c || c.rotation == null) return null;
+  if (!HFSS_ROTATABLE_KINDS.has(c.kind || 'rect')) return null;
+  const s = String(c.rotation).trim();
+  if (s === '' || s === '0') return null;
+  return s;
+}
+
+// Wrap an (xOff, yOff) anchor-offset expression pair in the 2-D rotation
+// matrix for `rotExpr` degrees CCW, using HFSS trig:
+//   xOff' = (xOff)·cos(rot·1deg) − (yOff)·sin(rot·1deg)
+//   yOff' = (xOff)·sin(rot·1deg) + (yOff)·cos(rot·1deg)
+// A child snapped to a rotated parent thereby tracks BOTH the parent's
+// position parameters AND its rotation parameter in HFSS.
+function rotateOffsetExprs(off, rotExpr) {
+  if (!rotExpr) return off;
+  const d = hfssAngleDegExpr(rotExpr);
+  return {
+    xOff: `(${off.xOff})*cos(${d}) - (${off.yOff})*sin(${d})`,
+    yOff: `(${off.xOff})*sin(${d}) + (${off.yOff})*cos(${d})`,
+  };
+}
+
 export function computeParametricPositions(components, snaps, paramValues = {}) {
   const byId = Object.fromEntries(components.map(c => [c.id, c]));
   // Helper: produce an expression for the X/Y offset of an anchor on a comp
@@ -66,7 +110,11 @@ export function computeParametricPositions(components, snaps, paramValues = {}) 
     if (/^-?\d+(?:\.\d+)?$/.test(s.trim())) return `${s}um`;
     return s;
   };
-  const anchorOffsetExpr = (anchorName, wExpr, hExpr) => {
+  // Optional 4th arg `rotExpr`: the owning component's first-class
+  // rotation expression (degrees, CCW). When present, the offsets are
+  // wrapped in the HFSS-trig rotation matrix so the anchor tracks the
+  // ROTATED shape (see rotateOffsetExprs above).
+  const anchorOffsetExpr = (anchorName, wExpr, hExpr, rotExpr = null) => {
     const wExprS = dimExprStr(wExpr);
     const hExprS = dimExprStr(hExpr);
     const a = parseAnchor(anchorName);
@@ -83,7 +131,7 @@ export function computeParametricPositions(components, snaps, paramValues = {}) 
       if (n.includes('S')) yOff = `-(${hExprS})/2`;
       else if (n.includes('N')) yOff = `(${hExprS})/2`;
     }
-    return { xOff, yOff };
+    return rotateOffsetExprs({ xOff, yOff }, rotExpr);
   };
 
   // Build incoming-snap lookup
@@ -228,8 +276,8 @@ export function computeParametricPositions(components, snaps, paramValues = {}) 
     const chExpr = cc.kind === 'boolean'
       ? `${typeof cc.h === 'number' ? cc.h : 0}um`
       : String(cc.h ?? '0');
-    const fromOff = anchorOffsetExpr(sn.from.anchor, pwExpr, phExpr);
-    const toOff   = anchorOffsetExpr(sn.to.anchor,   cwExpr, chExpr);
+    const fromOff = anchorOffsetExpr(sn.from.anchor, pwExpr, phExpr, componentRotationExpr(parent));
+    const toOff   = anchorOffsetExpr(sn.to.anchor,   cwExpr, chExpr, componentRotationExpr(cc));
     return {
       cxExpr: `(${parentPos.cxExpr}) + (${fromOff.xOff}) + (${sn.dx}) - (${toOff.xOff})`,
       cyExpr: `(${parentPos.cyExpr}) + (${fromOff.yOff}) + (${sn.dy}) - (${toOff.yOff})`,
@@ -354,8 +402,11 @@ export function computeParametricPositions(components, snaps, paramValues = {}) 
     // tracking — it placed meander_h.cy = wg1.NW.y + dy instead of
     // wg1.NW.y + dy + h_meander/2.
     const cDims = dimExprForComp(c);
-    const fromOff = anchorOffsetExpr(snap.from.anchor, parentPos.wExpr, parentPos.hExpr);
-    const toOff   = anchorOffsetExpr(snap.to.anchor,   cDims.wExpr,     cDims.hExpr);
+    // Parent / child first-class rotations wrap the anchor offsets in
+    // the HFSS-trig rotation matrix, so the chain tracks the rotation
+    // parameter as well as the position parameters.
+    const fromOff = anchorOffsetExpr(snap.from.anchor, parentPos.wExpr, parentPos.hExpr, componentRotationExpr(parent));
+    const toOff   = anchorOffsetExpr(snap.to.anchor,   cDims.wExpr,     cDims.hExpr,     componentRotationExpr(c));
     // Solver: toComp.cx = fromAnchorWorld.x + dx - toAnchor.local.x
     //                  = (parent.cx + fromOff.x) + dx - toOff.x
     const cxExpr = `(${parentPos.cxExpr}) + (${fromOff.xOff}) + (${snap.dx}) - (${toOff.xOff})`;
@@ -545,7 +596,10 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   // or the parametric union bbox from `dimExprForComp`). Defined here
   // at the top of the function scope so polyline emission, the
   // transform-chain emitter, and any future caller can all reach it.
-  const anchorOffsetParam = (anchorName, wExpr, hExpr) => {
+  // Optional 4th arg `rotExpr`: first-class rotation of the anchor's
+  // owning component — wraps the offsets in the HFSS-trig rotation
+  // matrix (same idiom as anchorOffsetExpr in computeParametricPositions).
+  const anchorOffsetParam = (anchorName, wExpr, hExpr, rotExpr = null) => {
     const a = parseAnchor(anchorName);
     let xOff = '0', yOff = '0';
     if (a.kind === 'edge') {
@@ -560,6 +614,13 @@ export function generateHfssNative(scene, paramValues, options = {}) {
       if (n.includes('S')) yOff = `-(${hExpr})/2`;
       else if (n.includes('N')) yOff = `(${hExpr})/2`;
     }
+    if (rotExpr) {
+      const d = hfssAngleDegExpr(spaceHyphens(ascii(resolveSynthetics(String(rotExpr)))));
+      return {
+        xOff: `(${xOff})*cos(${d}) - (${yOff})*sin(${d})`,
+        yOff: `(${xOff})*sin(${d}) + (${yOff})*cos(${d})`,
+      };
+    }
     return { xOff, yOff };
   };
   const exprWithUm = (expr) => {
@@ -570,6 +631,28 @@ export function generateHfssNative(scene, paramValues, options = {}) {
       return `(${s})um`;
     }
     return `(${s})`;
+  };
+  // ── Per-component Z offset (D5) ─────────────────────────────────────
+  // Optional `zOffset` expression (µm) shifting the part's Z placement
+  // relative to its layer. Emitted as a LIVE HFSS expression appended to
+  // the layer's parametric zBottom, so HFSS-side sweeps over any
+  // variable in the zOffset expression move the part vertically.
+  const zOffsetExprOf = (c) => {
+    if (!c || c.zOffset == null) return null;
+    const s = String(c.zOffset).trim();
+    if (s === '' || s === '0') return null;
+    return exprWithUm(s);
+  };
+  const withZOffset = (zExpr, c) => {
+    const zo = zOffsetExprOf(c);
+    return zo ? `(${zExpr}) + ${zo}` : zExpr;
+  };
+  // First-class rotation angle, post-processed for HFSS emission
+  // (ascii + hyphen spacing + synthetic expansion), degree-typed.
+  const rotationAngleDegFor = (c) => {
+    const e = componentRotationExpr(c);
+    if (!e) return null;
+    return hfssAngleDegExpr(spaceHyphens(ascii(resolveSynthetics(e))));
   };
 
   // Format a value for SetVariableValue. For bare numbers attach the unit; otherwise leave as expression.
@@ -1259,6 +1342,15 @@ except:
         zBottomExpr = (wgLayer && layerZ[wgLayer.id]?.zTopExpr) || exprWithUm('h_wg');
         zSizeExpr = '0um';
       }
+      // Per-component Z offset rides on top of the layer's parametric
+      // zBottom. Covers every non-rect emission path below: native
+      // primitives (ZCenter), polyline pathZ, polyshape zBottom, and the
+      // tessellated fallback (incl. the racetrack inner-hole subtract).
+      if (zOffsetExprOf(c)) {
+        const zoNum = evalExpr(c.zOffset, paramValues);
+        if (Number.isFinite(zoNum)) zBottom += zoNum;
+        zBottomExpr = withZOffset(zBottomExpr, c);
+      }
       const materialName = c.layer === 'waveguide'
         ? (wgLayer ? wgLayer.material : 'lithium_niobate')
         : (c.layer === 'electrode' ? 'gold'
@@ -1366,7 +1458,7 @@ except:
               });
             }
             if (tgtPp && tgtPp.cxExpr && tgtPp.cyExpr) {
-              const off = anchorOffsetParam(v.anchor, tgtPp.wExpr || '0', tgtPp.hExpr || '0');
+              const off = anchorOffsetParam(v.anchor, tgtPp.wExpr || '0', tgtPp.hExpr || '0', componentRotationExpr(tgtComp));
               if (chainOffset) {
                 curXExpr = `(${tgtPp.cxExpr}) + (${off.xOff}) + (${chainOffset.dxExpr})`;
                 curYExpr = `(${tgtPp.cyExpr}) + (${off.yOff}) + (${chainOffset.dyExpr})`;
@@ -1398,7 +1490,7 @@ except:
               noteFrozen(c.id, `polyline vertex snapped to ${v.compId} (target has no parametric chain - anchor baked numerically)`);
               const tw = typeof tgtComp.w === 'number' ? tgtComp.w : (evalExpr(tgtComp.w, paramValues) || 0);
               const th = typeof tgtComp.h === 'number' ? tgtComp.h : (evalExpr(tgtComp.h, paramValues) || 0);
-              const off = anchorOffsetParam(v.anchor, `${tw}um`, `${th}um`);
+              const off = anchorOffsetParam(v.anchor, `${tw}um`, `${th}um`, componentRotationExpr(tgtComp));
               if (chainOffset) {
                 curXExpr = `(${tgtComp.cx.toFixed(4)}um) + (${off.xOff}) + (${chainOffset.dxExpr})`;
                 curYExpr = `(${tgtComp.cy.toFixed(4)}um) + (${off.yOff}) + (${chainOffset.dyExpr})`;
@@ -1660,16 +1752,18 @@ except Exception as e:
         } else { // polygon
           // CreateRegularPolygon takes a center, a "start" vertex on
           // the polygon perimeter, and the number of sides. We anchor
-          // the start vertex at (cx+r, cy) — the East-pointing vertex.
-          // r is the circumradius (vertex distance from center).
+          // the start vertex at (cx, cy+r) — the NORTH-pointing vertex —
+          // matching the canvas ring convention (shapeInstanceToRing
+          // places the first vertex at +90°, apex-up). r is the
+          // circumradius (vertex distance from center).
           const rExpr = exprWithUm(c.r ?? '0');
           const nVal = evalExpr(c.n ?? '6', paramValues);
           const nSides = Math.max(3, Math.floor(Number.isFinite(nVal) ? nVal : 6));
-          const xStartExpr = `(${cxShape}) + (${rExpr})`;
+          const yStartExpr = `(${cyShape}) + (${rExpr})`;
           createCall = `oEditor.CreateRegularPolygon(
         ["NAME:RegularPolygonParameters",
          "XCenter:=", "${cxShape}", "YCenter:=", "${cyShape}", "ZCenter:=", "${zBottomExpr}",
-         "XStart:=", "${xStartExpr}", "YStart:=", "${cyShape}", "ZStart:=", "${zBottomExpr}",
+         "XStart:=", "${cxShape}", "YStart:=", "${yStartExpr}", "ZStart:=", "${zBottomExpr}",
          "NumSides:=", "${nSides}",
          "WhichAxis:=", "Z"],
         ["NAME:Attributes",
@@ -1898,7 +1992,10 @@ except Exception as e:
       // lockstep with the layer stack.
       const wgZ = wgLayer && layerZ[wgLayer.id] ? layerZ[wgLayer.id].zBottom : 0;
       const wgT = wgLayer && layerZ[wgLayer.id] ? layerZ[wgLayer.id].thickness : (Number.isFinite(wgLayerThickness) ? wgLayerThickness : 0.6);
-      const wgZExpr = (wgLayer && layerZ[wgLayer.id]?.zBottomExpr) || `${wgZ.toFixed(4)}um`;
+      // Per-component zOffset rides on the layer's parametric zBottom —
+      // every derived Z (slab bottom, rib bottom/top, relative CS) below
+      // chains off wgZExpr, so the offset propagates automatically.
+      const wgZExpr = withZOffset((wgLayer && layerZ[wgLayer.id]?.zBottomExpr) || `${wgZ.toFixed(4)}um`, c);
       const wgTExpr = (wgLayer && layerZ[wgLayer.id]?.thicknessExpr) || `${wgT.toFixed(4)}um`;
       // Compute rib bottom and top widths from core_width and the reference face.
       // Etch angle is measured from horizontal. tan(angle) gives rise/run, so going up
@@ -2295,7 +2392,8 @@ except Exception as e:
       // is bound (legacy h_wg placement).
       const portCondZBotExpr = (portCondLayer && layerZ[portCondLayer.id]?.zBottomExpr) || exprWithUm('h_wg');
       const portCondThkExpr  = (portCondLayer && layerZ[portCondLayer.id]?.thicknessExpr) || '0um';
-      const portZNum = `(${portCondZBotExpr}) + (${portCondThkExpr})/2`;
+      // Per-component zOffset shifts the sheet's Z plane parametrically.
+      const portZNum = withZOffset(`(${portCondZBotExpr}) + (${portCondThkExpr})/2`, c);
       const portWExpr = exprWithUm(c.w);  // e.g. "(port1_w)"
       const portHExpr = exprWithUm(c.h);
       const cxVar = `${id}_cx`;
@@ -2333,7 +2431,9 @@ except Exception as e:
       const elecZ = elecLayer && layerZ[elecLayer.id] ? layerZ[elecLayer.id].zBottom : 0;
       const elecThickness = elecLayer && layerZ[elecLayer.id] ? layerZ[elecLayer.id].thickness : cond_z;
       const elecMaterial = elecLayer ? elecLayer.material : condMaterial;
-      const elecZ_um = (elecLayer && layerZ[elecLayer.id]?.zBottomExpr) || `${elecZ.toFixed(4)}um`;
+      // Per-component zOffset rides on the conductor layer's parametric
+      // zBottom (applies to both the 3-D box and the 0-thickness sheet).
+      const elecZ_um = withZOffset((elecLayer && layerZ[elecLayer.id]?.zBottomExpr) || `${elecZ.toFixed(4)}um`, c);
       const elecT_um = (elecLayer && layerZ[elecLayer.id]?.thicknessExpr) || `${elecThickness.toFixed(4)}um`;
       // If the conductor layer's thickness is zero, emit the trace as a
       // 2D SHEET (rectangle on the XY plane) instead of a 3D box. We
@@ -2769,8 +2869,13 @@ except Exception as e:
   }
   for (const c of solved) {
     if (c.kind === 'boolean') continue; // booleans handled below
-    if (!c.transforms || c.transforms.length === 0) continue;
-    if (!c.transforms.some(t => t && t.enabled !== false)) continue;
+    const hasChain = !!(c.transforms && c.transforms.some(t => t && t.enabled !== false));
+    // First-class rotation (D6): a base `rotation` expression rotates
+    // the part about its OWN CENTER before the transform chain runs —
+    // mirroring expandTransforms, which seeds the stream instance's
+    // rotation with evalExpr(c.rotation).
+    const baseRotAngle = rotationAngleDegFor(c);
+    if (!hasChain && !baseRotAngle) continue;
     const id = c.id.replace(/[^A-Za-z0-9_]/g, '_');
     // For rib-waveguide rects, both the slab and the rib are emitted
     // as separate parts (`<id>_wg_slab`, `<id>_wg_rib`). Transforms
@@ -2783,8 +2888,45 @@ except Exception as e:
       : [id];
     const baseW = typeof c.w === 'number' ? c.w : evalExpr(c.w, paramValues);
     const baseH = typeof c.h === 'number' ? c.h : evalExpr(c.h, paramValues);
-    code += `\n# ===== Transforms for ${c.id} =====\n`;
     const ppForChain = parametricPosForExport[c.id];
+    if (baseRotAngle) {
+      // Translate-rotate-translate about the part's own center, fully
+      // parametric: the pivot is the component's snap-chain cx/cy
+      // expression and the angle is the rotation EXPRESSION typed in
+      // degrees ("(<expr>)*1deg", or "<n>deg" when purely numeric).
+      // oEditor.Rotate spins about the WORLD origin, hence the move/
+      // rotate/move sandwich (see the compatibility note above).
+      const pivotXE = ppForChain ? exprWithUm(ppForChain.cxExpr) : `${(c.cx ?? 0).toFixed(4)}um`;
+      const pivotYE = ppForChain ? exprWithUm(ppForChain.cyExpr) : `${(c.cy ?? 0).toFixed(4)}um`;
+      if (ppForChain) {
+        notePara(`${c.id}.rotation`, 'first-class rotation (parametric angle + parametric pivot)');
+      } else {
+        noteFrozen(`${c.id}.rotation`, 'first-class rotation pivot (no parametric snap chain - center baked numerically; angle stays parametric)');
+      }
+      const selStrRot = partIds.join(',');
+      code += `\n# ===== Base rotation for ${c.id}: ${baseRotAngle} CCW about own center =====\n`;
+      code += `try:
+    oEditor.Move(
+        ["NAME:Selections", "Selections:=", "${selStrRot}", "NewPartsModelFlag:=", "Model"],
+        ["NAME:TranslateParameters",
+         "TranslateVectorX:=", "-(${pivotXE})",
+         "TranslateVectorY:=", "-(${pivotYE})",
+         "TranslateVectorZ:=", "0um"])
+    oEditor.Rotate(
+        ["NAME:Selections", "Selections:=", "${selStrRot}", "NewPartsModelFlag:=", "Model"],
+        ["NAME:RotateParameters", "RotateAxis:=", "Z", "RotateAngle:=", "${baseRotAngle}"])
+    oEditor.Move(
+        ["NAME:Selections", "Selections:=", "${selStrRot}", "NewPartsModelFlag:=", "Model"],
+        ["NAME:TranslateParameters",
+         "TranslateVectorX:=", "${pivotXE}",
+         "TranslateVectorY:=", "${pivotYE}",
+         "TranslateVectorZ:=", "0um"])
+except Exception as e:
+    oDesktop.AddMessage("", "", 1, "Base rotation failed for ${selStrRot}: " + str(e))
+`;
+    }
+    if (!hasChain) continue;
+    code += `\n# ===== Transforms for ${c.id} =====\n`;
     const finalPartIds = emitTransformChainHfss(
       c.transforms, partIds, c.cx, c.cy, baseW || 0, baseH || 0, c.group,
       ppForChain ? ppForChain.cxExpr : undefined,
@@ -3266,7 +3408,11 @@ oBoundarySetup = oDesign.GetModule("BoundarySetup")
       code += `${portCondLPComment}\n`;
       const portZ_zBot = portCondLayerLP && layerZ[portCondLayerLP.id] ? layerZ[portCondLayerLP.id].zBottom : evalExpr('h_wg', paramValues) || 0.6;
       const portZ_thk  = portCondLayerLP && layerZ[portCondLayerLP.id] ? layerZ[portCondLayerLP.id].thickness : 0;
-      const portZ_um = portZ_zBot + portZ_thk / 2;
+      // Numeric zOffset shift so the IntLine endpoints stay coplanar with
+      // a z-offset port sheet (the sheet's Z is parametric; this is the
+      // matching export-time numeric).
+      const portZ_off = comp.zOffset != null ? (evalExpr(comp.zOffset, paramValues) || 0) : 0;
+      const portZ_um = portZ_zBot + portZ_thk / 2 + portZ_off;
       const portId = comp.id.replace(/[^A-Za-z0-9_]/g, '_');
       const portName = `LumpedPort_${portId}`;
       const impedance = (comp.lumpedPort && comp.lumpedPort.impedance) || '50';

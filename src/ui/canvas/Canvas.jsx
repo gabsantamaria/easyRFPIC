@@ -11,7 +11,7 @@
 // straight cut-and-import (Stage 4.10 of the planned refactor). All
 // callbacks and view state are passed in as explicit props by App.
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { ANCHORS, parseAnchor, anchorLocal, anchorWorld } from '../../scene/anchors.js';
+import { ANCHORS, parseAnchor, anchorLocal, anchorLocalRotated, anchorWorld, compRotationDeg, rotateLocal } from '../../scene/anchors.js';
 import { evalExpr } from '../../scene/params.js';
 import { solveLayout, applyMirrors, resolveBooleanBboxes } from '../../scene/solver.js';
 import { expandTransforms } from '../../scene/transforms.js';
@@ -414,25 +414,40 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) continue;
       const cx = inst.cx, cy = inst.cy;
       const tag = inst.idx > 0 ? `${inst.compId}#${inst.idx}` : inst.compId;
+      // Rotation (first-class `rotation` field + transform-chain rotates,
+      // both already composed into inst.rotation). Anchors and edge
+      // projections live in the SHAPE's local frame so the snap points
+      // sit on the rotated shape's actual corners/edges.
+      const rot = inst.rotation || 0;
+      const rad = rot * Math.PI / 180;
+      const ca = Math.cos(rad), sa = Math.sin(rad);
+      const toWorld = (lx, ly) => ({ x: cx + lx * ca - ly * sa, y: cy + lx * sa + ly * ca });
       // 9 fixed anchors
       for (const a of ANCHORS) {
-        const lp = anchorLocal(a, w, h);
+        const lp = anchorLocalRotated(a, w, h, rot);
         consider(cx + lp.x, cy + lp.y, `${tag} ${a}`);
       }
-      // Nearest point on each edge (parametric snap)
-      const x0 = cx - w / 2, x1 = cx + w / 2;
-      const y0 = cy - h / 2, y1 = cy + h / 2;
-      // Top edge: y = y1, x in [x0, x1]
-      if (wp.x >= x0 - worldThresh && wp.x <= x1 + worldThresh) {
-        const xProj = Math.max(x0, Math.min(x1, wp.x));
-        consider(xProj, y1, `${tag} top`);
-        consider(xProj, y0, `${tag} bot`);
+      // Nearest point on each edge (parametric snap): project the cursor
+      // in the shape's LOCAL frame, then map back to world.
+      const lwx = (wp.x - cx) * ca + (wp.y - cy) * sa;
+      const lwy = -(wp.x - cx) * sa + (wp.y - cy) * ca;
+      const x0 = -w / 2, x1 = w / 2;
+      const y0 = -h / 2, y1 = h / 2;
+      // Top/bottom edges (local y = ±h/2)
+      if (lwx >= x0 - worldThresh && lwx <= x1 + worldThresh) {
+        const xProj = Math.max(x0, Math.min(x1, lwx));
+        const pT = toWorld(xProj, y1);
+        const pB = toWorld(xProj, y0);
+        consider(pT.x, pT.y, `${tag} top`);
+        consider(pB.x, pB.y, `${tag} bot`);
       }
-      // Left/right edges
-      if (wp.y >= y0 - worldThresh && wp.y <= y1 + worldThresh) {
-        const yProj = Math.max(y0, Math.min(y1, wp.y));
-        consider(x0, yProj, `${tag} left`);
-        consider(x1, yProj, `${tag} right`);
+      // Left/right edges (local x = ±w/2)
+      if (lwy >= y0 - worldThresh && lwy <= y1 + worldThresh) {
+        const yProj = Math.max(y0, Math.min(y1, lwy));
+        const pL = toWorld(x0, yProj);
+        const pR = toWorld(x1, yProj);
+        consider(pL.x, pL.y, `${tag} left`);
+        consider(pR.x, pR.y, `${tag} right`);
       }
     }
     // For BOOLEAN INSTANCES at idx > 0 (repeats / mirror copies of a
@@ -478,13 +493,15 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         const newCx = rot ? inst.cx + rxC * ca - ryC * sa : tx;
         const newCy = rot ? inst.cy + rxC * sa + ryC * ca : ty;
         const tagOp = `${op.id}#${inst.idx}`;
-        // For rotated booleans the operand's axis-aligned anchors don't
-        // perfectly match the visible (rotated) shape; treating them as
-        // axis-aligned at (newCx, newCy) is an approximation that's
-        // correct for rot=0 (the vast majority of meander / lattice use
-        // cases). Rotated-cluster snap fidelity can be tightened later.
+        // Operand anchors rotate by the operand's own visible rotation
+        // (its first-class base rotation, already seeded into its base
+        // instance) composed with the cluster's chain rotation. Edge
+        // projections below stay axis-aligned — an approximation that's
+        // exact for rot=0 (the vast majority of meander / lattice use
+        // cases).
+        const opVisRot = rot + (baseInst.rotation || 0);
         for (const a of ANCHORS) {
-          const lp = anchorLocal(a, opW, opH);
+          const lp = anchorLocalRotated(a, opW, opH, opVisRot);
           consider(newCx + lp.x, newCy + lp.y, `${tagOp} ${a}`);
         }
         const ox0 = newCx - opW / 2, ox1 = newCx + opW / 2;
@@ -586,26 +603,39 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       const w = inst.w, h = inst.h;
       if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) continue;
       const cx = inst.cx, cy = inst.cy;
+      // First-class rotation + transform-chain rotates (composed into
+      // inst.rotation): anchors and edge projections live in the shape's
+      // LOCAL frame so the candidates sit on the rotated geometry.
+      const rot = inst.rotation || 0;
+      const rad = rot * Math.PI / 180;
+      const ca = Math.cos(rad), sa = Math.sin(rad);
+      const toWorld = (lx, ly) => ({ x: cx + lx * ca - ly * sa, y: cy + lx * sa + ly * ca });
       // 9 fixed anchors — preferred over parametric edge points.
       for (const a of ANCHORS) {
-        const lp = anchorLocal(a, w, h);
+        const lp = anchorLocalRotated(a, w, h, rot);
         consider(cx + lp.x, cy + lp.y, inst.compId, a, inst.idx);
       }
-      // Parametric edge anchors. Project cursor onto each edge and tag
-      // with T:t / B:t / L:t / R:t where t ∈ [0, 1] runs along the edge.
-      const x0 = cx - w / 2, x1 = cx + w / 2;
-      const y0 = cy - h / 2, y1 = cy + h / 2;
-      if (wp.x >= x0 - worldThresh && wp.x <= x1 + worldThresh) {
-        const projX = Math.max(x0, Math.min(x1, wp.x));
+      // Parametric edge anchors. Project the cursor in LOCAL coords onto
+      // each edge and tag with T:t / B:t / L:t / R:t, t ∈ [0, 1].
+      const lwx = (wp.x - cx) * ca + (wp.y - cy) * sa;
+      const lwy = -(wp.x - cx) * sa + (wp.y - cy) * ca;
+      const x0 = -w / 2, x1 = w / 2;
+      const y0 = -h / 2, y1 = h / 2;
+      if (lwx >= x0 - worldThresh && lwx <= x1 + worldThresh) {
+        const projX = Math.max(x0, Math.min(x1, lwx));
         const tX = (projX - x0) / (x1 - x0);
-        consider(projX, y1, inst.compId, `T:${tX.toFixed(4)}`, inst.idx);
-        consider(projX, y0, inst.compId, `B:${tX.toFixed(4)}`, inst.idx);
+        const pT = toWorld(projX, y1);
+        const pB = toWorld(projX, y0);
+        consider(pT.x, pT.y, inst.compId, `T:${tX.toFixed(4)}`, inst.idx);
+        consider(pB.x, pB.y, inst.compId, `B:${tX.toFixed(4)}`, inst.idx);
       }
-      if (wp.y >= y0 - worldThresh && wp.y <= y1 + worldThresh) {
-        const projY = Math.max(y0, Math.min(y1, wp.y));
+      if (lwy >= y0 - worldThresh && lwy <= y1 + worldThresh) {
+        const projY = Math.max(y0, Math.min(y1, lwy));
         const tY = (projY - y0) / (y1 - y0);
-        consider(x0, projY, inst.compId, `L:${tY.toFixed(4)}`, inst.idx);
-        consider(x1, projY, inst.compId, `R:${tY.toFixed(4)}`, inst.idx);
+        const pL = toWorld(x0, projY);
+        const pR = toWorld(x1, projY);
+        consider(pL.x, pL.y, inst.compId, `L:${tY.toFixed(4)}`, inst.idx);
+        consider(pR.x, pR.y, inst.compId, `R:${tY.toFixed(4)}`, inst.idx);
       }
     }
     // For boolean instances at idx > 0, also walk the cluster's
@@ -646,8 +676,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         const ryC = ty - inst.cy;
         const newCx = rot ? inst.cx + rxC * ca - ryC * sa : tx;
         const newCy = rot ? inst.cy + rxC * sa + ryC * ca : ty;
+        // Operand anchors rotate by base rotation + cluster rotation
+        // (see the matching comment in findRulerSnap).
+        const opVisRot = rot + (baseInst.rotation || 0);
         for (const a of ANCHORS) {
-          const lp = anchorLocal(a, opW, opH);
+          const lp = anchorLocalRotated(a, opW, opH, opVisRot);
           consider(newCx + lp.x, newCy + lp.y, op.id, a, inst.idx);
         }
         const ox0 = newCx - opW / 2, ox1 = newCx + opW / 2;
@@ -1036,6 +1069,14 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       const clusterBboxCy = Number.isFinite(cbMinY) ? (cbMinY + cbMaxY) / 2 : (rootComp?.cy ?? 0);
       const clusterBboxW = Number.isFinite(cbMinX) ? (cbMaxX - cbMinX) : 0;
       const clusterBboxH = Number.isFinite(cbMinY) ? (cbMaxY - cbMinY) : 0;
+      // First-class rotation of the dragged shape, used by the alt-drag
+      // anchor preview so the dragged anchor sits on the ROTATED corner
+      // (matching what the solver will do on snap commit). Only
+      // meaningful for a single-component drag — for clusters the
+      // "dragged shape" is the composite AABB, which stays axis-aligned.
+      const dragRotationDeg = (coMovers.length === 1 && coMovers[0].id === id)
+        ? compRotationDeg(solved.find(cc => cc.id === id), paramValues)
+        : 0;
       if (rootComp || coMovers.length > 0) {
         // If already in selection, drag it; otherwise replace selection with this one
         if (!selectedIds.has(id)) {
@@ -1052,6 +1093,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           startCy: clusterBboxCy,
           clusterBboxW,                 // cluster bbox dimensions for alt-drag anchor math
           clusterBboxH,
+          dragRotationDeg,              // first-class rotation of a single-comp drag (deg, CCW)
           clusterSet,                   // ids to EXCLUDE from alt-drag snap target search
           coMovers,                     // primitives to translate by drag delta
           // Snap-bound warning payload (null when free): which component is
@@ -1241,14 +1283,20 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
               //     anchor) pair across the 9-point grids. Distance is the
               //     2D distance between the two anchors at the dragged
               //     cluster's current proposed position; snap commits both
-              //     axes when this kind wins.
+              //     axes when this kind wins. First-class rotation on
+              //     either side rotates the anchor offsets so candidates
+              //     sit on the rotated shapes' actual corners/edges —
+              //     matching the solver's rotation-aware anchor math on
+              //     commit.
               // -----------------------------------------------------------
+              const ocRot = compRotationDeg(oc, paramValues);
+              const dRot = drag.dragRotationDeg || 0;
               for (const ta of ANCHORS) {
-                const tlp = anchorLocal(ta, ow, oh);
+                const tlp = anchorLocalRotated(ta, ow, oh, ocRot);
                 const tx = oc.cx + tlp.x;
                 const ty = oc.cy + tlp.y;
                 for (const da of ANCHORS) {
-                  const dlp = anchorLocal(da, dw, dh);
+                  const dlp = anchorLocalRotated(da, dw, dh, dRot);
                   const dax = proposedCx + dlp.x;
                   const day = proposedCy + dlp.y;
                   const dist = Math.hypot(tx - dax, ty - day);
@@ -1438,13 +1486,15 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                     // center, not the cluster's center. That's the wrong
                     // detent for an edge-slide gesture.
                     const pairCount = Math.min(tAnchorList.length, dAnchorList.length);
+                    const stickOcRot = compRotationDeg(oc, paramValues);
+                    const stickDRot = drag.dragRotationDeg || 0;
                     for (let i = 0; i < pairCount; i++) {
                       const ta = tAnchorList[i];
                       const da = dAnchorList[i];
-                      const tlp = anchorLocal(ta, ow, oh);
+                      const tlp = anchorLocalRotated(ta, ow, oh, stickOcRot);
                       const tx = oc.cx + tlp.x;
                       const ty = oc.cy + tlp.y;
-                      const dlp = anchorLocal(da, dw, dh);
+                      const dlp = anchorLocalRotated(da, dw, dh, stickDRot);
                       const dax = proposedCx + dlp.x;
                       const day = proposedCy + dlp.y;
                       // Only the FREE-axis distance matters here: the
@@ -1489,7 +1539,10 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   edgeDSide: best.edgeDSide,
                 });
                 // Place the cluster so its chosen anchor sits on the target.
-                const dlp = anchorLocal(best.dAnchor, dw, dh);
+                // Rotation-aware: the dragged anchor offset rotates with a
+                // single rotated comp, so the preview placement matches the
+                // solver's commit position exactly.
+                const dlp = anchorLocalRotated(best.dAnchor, dw, dh, drag.dragRotationDeg || 0);
                 newCx = best.target.x - dlp.x;
                 newCy = best.target.y - dlp.y;
               } else {
@@ -3130,6 +3183,17 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   {c.id}
                 </text>
               )}
+              {/* zOffset badge: 2-D top view can't show Z, so surface the
+                  per-component Z offset in the selection info instead. */}
+              {isPrimary && c.zOffset != null && String(c.zOffset).trim() !== '' && String(c.zOffset).trim() !== '0' && (() => {
+                const zv = evalExpr(c.zOffset, paramValues);
+                const fs = Math.max(1.5, Math.min(w, h) / 11);
+                return (
+                  <text x={c.cx} y={-c.cy + fs * 1.4} fontSize={fs} textAnchor="middle" dominantBaseline="middle" fill="#7c2d92" pointerEvents="none" fontFamily="monospace">
+                    {`z${zv >= 0 ? '+' : ''}${Number.isFinite(zv) ? zv.toFixed(2) : '?'}µm (${String(c.zOffset)})`}
+                  </text>
+                );
+              })()}
               {/* Snap direction indicators on the primary-selected component.
                   For each snap touching this component, draw a small arrow at
                   the relevant anchor pointing along the snap line. Incoming
@@ -3153,7 +3217,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   } else continue;
                   const otherComp = solved.find(cc => cc.id === otherCompId);
                   if (!otherComp) continue;
-                  const myLocal = anchorLocal(myAnchor, w, h);
+                  const myLocal = anchorLocalRotated(myAnchor, w, h, compRotationDeg(c, paramValues));
                   const myWX = c.cx + myLocal.x;
                   const myWY = c.cy + myLocal.y;
                   const otherW = anchorWorld(otherComp, otherAnchor, paramValues);
@@ -3285,35 +3349,42 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   />
                 );
               })}
-              {/* Snap-mode edge strips: clickable lines on each edge */}
+              {/* Snap-mode edge strips: clickable lines on each edge.
+                  Rotation-aware: strips, t-projection, and the hover dot
+                  all live in the shape's LOCAL frame so they trace the
+                  rotated shape's actual edges. */}
               {snapMode === 'creating' && (() => {
                 const edgeStrokeW = Math.max(hr * 0.8, 1);
-                // Bounds of the rect in world coordinates
-                const x0 = c.cx - w / 2, x1 = c.cx + w / 2;
-                const y0 = c.cy - h / 2, y1 = c.cy + h / 2;
-                // Figure t from a screen click: use the SVG's CTM via screenToWorld,
-                // then map to t along the edge.
+                const rotE = compRotationDeg(c, paramValues);
+                const radE = rotE * Math.PI / 180;
+                const caE = Math.cos(radE), saE = Math.sin(radE);
+                const toWorldE = (lx, ly) => ({ x: c.cx + lx * caE - ly * saE, y: c.cy + lx * saE + ly * caE });
+                const toLocalE = (x, y) => ({ x: (x - c.cx) * caE + (y - c.cy) * saE, y: -(x - c.cx) * saE + (y - c.cy) * caE });
+                // Local bounds of the rect (centered frame)
+                const lx0 = -w / 2, lx1 = w / 2;
+                const ly0 = -h / 2, ly1 = h / 2;
+                // Figure t from a screen click: use the SVG's CTM via
+                // screenToWorld, map into the LOCAL frame, then to t along
+                // the edge.
+                const tFromWorld = (side, x, y) => {
+                  const l = toLocalE(x, y);
+                  let t;
+                  if (side === 'T' || side === 'B') t = (l.x - lx0) / Math.max(1e-9, w);
+                  else                              t = (l.y - ly0) / Math.max(1e-9, h);
+                  return Math.max(0, Math.min(1, t));
+                };
                 const handleEdgeClick = (side, e) => {
                   e.stopPropagation();
                   const wp = screenToWorld(e.clientX, e.clientY);
-                  let t;
-                  if (side === 'T' || side === 'B') t = (wp.x - x0) / Math.max(1e-9, w);
-                  else                              t = (wp.y - y0) / Math.max(1e-9, h);
-                  t = Math.max(0, Math.min(1, t));
+                  let t = tFromWorld(side, wp.x, wp.y);
                   // Apply Shift axis-lock against first anchor (if picking the second)
                   if (e.shiftKey && snapPick && snapPick.compId !== c.id) {
                     const fromComp = solved.find(cc => cc.id === snapPick.compId);
                     if (fromComp) {
                       const fromW = anchorWorld(fromComp, snapPick.anchor, paramValues);
-                      // Solve for t such that the world position of the edge anchor matches
-                      // either fromW.x (for T/B edges) or fromW.y (for L/R edges).
-                      if (side === 'T' || side === 'B') {
-                        const target = (fromW.x - x0) / Math.max(1e-9, w);
-                        t = Math.max(0, Math.min(1, target));
-                      } else {
-                        const target = (fromW.y - y0) / Math.max(1e-9, h);
-                        t = Math.max(0, Math.min(1, target));
-                      }
+                      // Solve for t such that the edge anchor lines up with
+                      // the first anchor (projected into the local frame).
+                      t = tFromWorld(side, fromW.x, fromW.y);
                     }
                   }
                   // Round t for cleaner snap names
@@ -3322,31 +3393,27 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                 };
                 const handleEdgeMove = (side, e) => {
                   const wp = screenToWorld(e.clientX, e.clientY);
-                  let t;
-                  if (side === 'T' || side === 'B') t = (wp.x - x0) / Math.max(1e-9, w);
-                  else                              t = (wp.y - y0) / Math.max(1e-9, h);
-                  t = Math.max(0, Math.min(1, t));
+                  let t = tFromWorld(side, wp.x, wp.y);
                   if (e.shiftKey && snapPick && snapPick.compId !== c.id) {
                     const fromComp = solved.find(cc => cc.id === snapPick.compId);
                     if (fromComp) {
                       const fromW = anchorWorld(fromComp, snapPick.anchor, paramValues);
-                      if (side === 'T' || side === 'B') {
-                        const target = (fromW.x - x0) / Math.max(1e-9, w);
-                        t = Math.max(0, Math.min(1, target));
-                      } else {
-                        const target = (fromW.y - y0) / Math.max(1e-9, h);
-                        t = Math.max(0, Math.min(1, target));
-                      }
+                      t = tFromWorld(side, fromW.x, fromW.y);
                     }
                   }
-                  const local = anchorLocal(`${side}:${t}`, w, h);
+                  const local = anchorLocalRotated(`${side}:${t}`, w, h, rotE);
                   setSnapHover({ compId: c.id, side, t, x: c.cx + local.x, y: c.cy + local.y });
                 };
+                const mkEdge = (side, ax, ay, bx, by) => {
+                  const p1 = toWorldE(ax, ay);
+                  const p2 = toWorldE(bx, by);
+                  return { side, x1v: p1.x, y1v: p1.y, x2v: p2.x, y2v: p2.y };
+                };
                 const edges = [
-                  { side: 'T', x1v: x0, y1v: y1, x2v: x1, y2v: y1 },
-                  { side: 'B', x1v: x0, y1v: y0, x2v: x1, y2v: y0 },
-                  { side: 'L', x1v: x0, y1v: y0, x2v: x0, y2v: y1 },
-                  { side: 'R', x1v: x1, y1v: y0, x2v: x1, y2v: y1 },
+                  mkEdge('T', lx0, ly1, lx1, ly1),
+                  mkEdge('B', lx0, ly0, lx1, ly0),
+                  mkEdge('L', lx0, ly0, lx0, ly1),
+                  mkEdge('R', lx1, ly0, lx1, ly1),
                 ];
                 return edges.map(eg => (
                   <line
@@ -3372,9 +3439,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   pointerEvents="none"
                 />
               )}
-              {/* Snap-mode anchors */}
+              {/* Snap-mode anchors. Rotation-aware: dots sit on the
+                  ROTATED shape's actual corners/edges so what you click
+                  is what the solver snaps to. */}
               {snapMode === 'creating' && ANCHORS.map(a => {
-                const local = anchorLocal(a, w, h);
+                const local = anchorLocalRotated(a, w, h, compRotationDeg(c, paramValues));
                 const ax = c.cx + local.x;
                 const ay = -(c.cy + local.y);
                 const isPicked = snapPick?.compId === c.id && snapPick.anchor === a;

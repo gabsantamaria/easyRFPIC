@@ -63,6 +63,8 @@ export function tokenizeComponentExprs(c) {
   push(c.r); push(c.rx); push(c.ry);
   push(c.R); push(c.L_straight); push(c.p); push(c.wgWidth);
   push(c.n);
+  // First-class rotation (deg, CCW) + per-component Z offset (µm).
+  push(c.rotation); push(c.zOffset);
   for (const cu of (c.cutouts || [])) {
     push(cu.dx); push(cu.dy); push(cu.w); push(cu.h);
   }

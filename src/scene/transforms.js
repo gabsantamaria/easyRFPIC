@@ -75,6 +75,15 @@ export function expandTransforms(components, paramValues) {
       shapeFields.closed = !!c.closed;
       const wVal = evalExpr(c.width ?? '0', paramValues);
       shapeFields.width = Number.isFinite(wVal) ? wVal : 0;
+      // Solver-stashed tessellated path (world coords at the BASE pose)
+      // + the base anchor it was resolved against. Ring consumers remap
+      // these into each clone's frame (translate by inst.cx − _baseCx,
+      // then the clone's scale / rotation) — see rings.js.
+      if (Array.isArray(c._resolvedVerts)) {
+        shapeFields._resolvedVerts = c._resolvedVerts;
+        shapeFields._baseCx = c.cx;
+        shapeFields._baseCy = c.cy;
+      }
     } else if (kind === 'polyshape') {
       // Polygon-path components (closed 2-D shapes). Same vertex schema
       // as polyline, but always closed and rendered/exported as a FILLED
@@ -83,6 +92,11 @@ export function expandTransforms(components, paramValues) {
       // repeat / mirror / rotate.
       shapeFields.vertices = c.vertices || [];
       shapeFields.closed = true; // ALWAYS closed by definition
+      if (Array.isArray(c._resolvedVerts)) {
+        shapeFields._resolvedVerts = c._resolvedVerts;
+        shapeFields._baseCx = c.cx;
+        shapeFields._baseCy = c.cy;
+      }
     }
     if (!Number.isFinite(w) || !Number.isFinite(h)) {
       // Skip degenerate components — keeps render path tolerant.
@@ -92,7 +106,18 @@ export function expandTransforms(components, paramValues) {
     // Start with a single-instance list. Each ENABLED transform either
     // mutates each instance in place, or extends the list (repeat).
     // scaleX / scaleY default to 1; mirror transforms flip them to -1.
-    let stream = [{ cx: c.cx, cy: c.cy, w, h, rotation: 0, scaleX: 1, scaleY: 1, ...shapeFields }];
+    //
+    // FIRST-CLASS ROTATION: rect / circle / ellipse / polygon components
+    // may carry an optional `rotation` expression (degrees, CCW). It
+    // seeds the initial stream instance's rotation, so rendering, rings,
+    // GDS, and boolean masks pick it up with zero special-casing.
+    // Transform-chain rotates then ADD to it (rotation composes).
+    let baseRotation = 0;
+    if ((kind === 'rect' || kind === 'circle' || kind === 'ellipse' || kind === 'polygon') && c.rotation != null) {
+      const rv = evalExpr(c.rotation, paramValues);
+      if (Number.isFinite(rv)) baseRotation = rv;
+    }
+    let stream = [{ cx: c.cx, cy: c.cy, w, h, rotation: baseRotation, scaleX: 1, scaleY: 1, ...shapeFields }];
     for (const t of (c.transforms || [])) {
       if (!t || t.enabled === false) continue;
       if (t.kind === 'displace') {
@@ -300,6 +325,9 @@ export function expandTransforms(components, paramValues) {
       if (inst.vertices !== undefined) out.vertices = inst.vertices;
       if (inst.closed !== undefined) out.closed = inst.closed;
       if (inst.width !== undefined) out.width = inst.width;
+      if (inst._resolvedVerts !== undefined) out._resolvedVerts = inst._resolvedVerts;
+      if (inst._baseCx !== undefined) out._baseCx = inst._baseCx;
+      if (inst._baseCy !== undefined) out._baseCy = inst._baseCy;
       instances.push(out);
     });
   }

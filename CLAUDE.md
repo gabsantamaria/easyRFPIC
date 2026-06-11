@@ -36,7 +36,14 @@ scene = {
 
 ```js
 // Primitive shapes:
-{ id, kind, layer, cx, cy, w, h, cutouts[], transforms[], consumedBy? }
+{ id, kind, layer, cx, cy, w, h, cutouts[], transforms[], consumedBy?,
+  rotation?,   // OPTIONAL expression (degrees, CCW) on rect/circle/ellipse/polygon.
+               // Absent or '0' = none. Seeds the base instance's rotation in
+               // expandTransforms; chain rotates ADD to it. Anchors/snap dots
+               // rotate with the shape (anchorWorld / anchorLocalRotated).
+  zOffset? }   // OPTIONAL expression (µm) on rect/circle/ellipse/polygon/
+               // polyline/polyshape: shifts the part's Z placement relative
+               // to its layer (HFSS-parametric; no canvas visual in top view).
 // where kind is one of:
 //   'rect':       w, h
 //   'circle':     r            (w='2*r', h='2*r' derived)
@@ -52,6 +59,8 @@ scene = {
 ```
 
 The AABB `w`/`h` being stored as expressions (`'2*r'` etc.) keeps every snap, anchor, dimension, and boolean-bbox code path working uniformly. Booleans have `w='0'`, `h='0'` literally; their actual bbox is refreshed numerically by `resolveBooleanBboxes` after the solver runs.
+
+**Rotation in HFSS export**: the angle is degree-typed — `"(<expr>)*1deg"` (or `"<n>deg"` for pure numerics). Rotation params auto-created from the inspector are therefore UNITLESS (a deg-typed variable times 1deg would be deg²). Snap chains through a rotated parent wrap the anchor offsets in the HFSS-trig rotation matrix (`cos((rot)*1deg)` etc.) inside `computeParametricPositions`, so a child tracks both the parent's position params AND its rotation param. The part itself is created axis-aligned, then a parametric translate-rotate-translate about its own center is emitted before its transform chain. `zOffset` appends `+ (<expr>)um` to every component Z-placement expression (electrode box/sheet, wg slab+rib, port sheet + IntLine numeric Z, polyline pathZ, polyshape/native-shape zBottom).
 
 ### Parameters
 

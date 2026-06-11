@@ -6585,6 +6585,48 @@ export default function App() {
                     );
                   })()
                 )}
+                {/* First-class rotation (rect / circle / ellipse / polygon)
+                    + per-component z offset (all flat-shape kinds). Both are
+                    parametric expression fields wired through the standard
+                    auto-create-param commit pattern. Rotation params are
+                    auto-created UNITLESS — the HFSS export multiplies the
+                    expression by 1deg ("(<expr>)*1deg"), so a deg-typed
+                    variable would come out deg². zOffset params are µm. */}
+                {selected.kind !== 'boolean' && (() => {
+                  const shapeKind = selected.kind || 'rect';
+                  const showRot = ['rect', 'circle', 'ellipse', 'polygon'].includes(shapeKind);
+                  const showZ = ['rect', 'circle', 'ellipse', 'polygon', 'polyline', 'polyshape'].includes(shapeKind);
+                  if (!showRot && !showZ) return null;
+                  const exprField = (key, label, value, unitForCreate, fmt) => (
+                    <div>
+                      <label className="text-[10px] uppercase tracking-wider text-slate-500">{label}</label>
+                      <DeferredTextInput
+                        autoGrow
+                        value={value}
+                        suggestions={paramNames}
+                        onCommit={(v) => {
+                          const prevEval = evalExpr(value, paramValues);
+                          const prevDefault = Number.isFinite(prevEval) ? String(prevEval) : '0';
+                          updateComp(selected.id, { [key]: v });
+                          commitExpr(v, prevDefault, unitForCreate, `Auto-created (${selected.id}.${key})`);
+                        }}
+                        className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-white outline-none focus:border-cyan-400 whitespace-pre-wrap break-words leading-tight"
+                        spellCheck={false}
+                        placeholder="0"
+                      />
+                      <p className="text-[9px] text-slate-500 mt-0.5 font-mono">= {(() => {
+                        const v = evalExpr(value, paramValues);
+                        return Number.isFinite(v) ? fmt(v) : '—';
+                      })()}</p>
+                    </div>
+                  );
+                  return (
+                    <div className="grid grid-cols-2 gap-2">
+                      {showRot && exprField('rotation', 'rotation (deg ccw)', selected.rotation ?? '0', '', (v) => `${v.toFixed(2)}°`)}
+                      {showZ && exprField('zOffset', 'z offset (µm)', selected.zOffset ?? '', 'µm', (v) => `${v.toFixed(3)} µm`)}
+                    </div>
+                  );
+                })()}
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="text-[10px] uppercase tracking-wider text-slate-500">cx ({selectedHasIncoming ? 'solved' : 'free'})</label>

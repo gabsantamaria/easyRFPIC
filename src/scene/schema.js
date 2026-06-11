@@ -149,6 +149,14 @@ export function normalizeScene(s) {
   let migratedComponents = (s.components || []).map(c => ({
     transforms: c.transforms || [],
     ...c,
+    // Optional expression fields added later in the schema's life:
+    //   rotation — first-class rotation (degrees, CCW) on rect / circle /
+    //              ellipse / polygon. Absent or '0' = none.
+    //   zOffset  — Z shift (µm) relative to the component's layer.
+    // Both are expression STRINGS; coerce stray numerics from hand-
+    // edited JSON so every downstream consumer can assume strings.
+    ...(c.rotation != null && typeof c.rotation !== 'string' ? { rotation: String(c.rotation) } : {}),
+    ...(c.zOffset != null && typeof c.zOffset !== 'string' ? { zOffset: String(c.zOffset) } : {}),
   }));
   // Duplicate component ids: keep the first occurrence, rename each
   // subsequent one to <id>_dup1/_dup2/…. References (snaps, operandIds,

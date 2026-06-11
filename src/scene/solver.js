@@ -21,9 +21,9 @@
 //
 // Extracted from PhotonicLayout.jsx as Stage 1.6 of the planned refactor.
 import { evalExpr } from './params.js';
-import { anchorLocal, anchorWorld } from './anchors.js';
+import { anchorLocalRotated, anchorWorld, compRotationDeg } from './anchors.js';
 import { expandTransforms } from './transforms.js';
-import { resolvePolylineVertices, polylineBbox, polyshapeBbox } from '../geometry/polyline.js';
+import { tessellatePolylinePath, polylineBbox, polyshapeBbox } from '../geometry/polyline.js';
 
 // ── Solve diagnostics ──────────────────────────────────────────────────
 // Module-level record refreshed by every solveLayout call. `converged`
@@ -173,7 +173,20 @@ export function solveLayout(components, snaps, paramValues) {
       const w = evalExpr(c.w, workingPV);
       const h = evalExpr(c.h, workingPV);
       if (!Number.isFinite(w) || !Number.isFinite(h)) return null;
-      return { minX: c.cx - w / 2, maxX: c.cx + w / 2, minY: c.cy - h / 2, maxY: c.cy + h / 2 };
+      // First-class rotation: the operand's AABB grows to enclose the
+      // rotated bbox (|w·cos|+|h·sin| half-extents). Keeps snap targets
+      // on a boolean containing rotated operands consistent with the
+      // post-solve resolveBooleanBboxes refinement.
+      const rot = compRotationDeg(c, workingPV);
+      let hw = w / 2, hh = h / 2;
+      if (rot) {
+        const rad = rot * Math.PI / 180;
+        const ca = Math.abs(Math.cos(rad)), sa = Math.abs(Math.sin(rad));
+        const rw = hw * ca + hh * sa;
+        const rh = hw * sa + hh * ca;
+        hw = rw; hh = rh;
+      }
+      return { minX: c.cx - hw, maxX: c.cx + hw, minY: c.cy - hh, maxY: c.cy + hh };
     };
     // Per-operand bboxes, kept separate so INTERSECT can take the AABB
     // intersection instead of the union. Each operand gets a fresh
@@ -244,20 +257,29 @@ export function solveLayout(components, snaps, paramValues) {
   // dimensions so the synthetic `_comp_<id>_w` / `_h` params reflect
   // the actual extent.
   const refreshPolylineBbox = (p) => {
-    const verts = resolvePolylineVertices(p, byId, workingPV);
+    // Tessellated path (arcs expanded, spline runs interpolated) so the
+    // AABB includes arc bulges that extend past the vertex endpoints.
+    const verts = tessellatePolylinePath(p, byId, workingPV);
     const bb = polylineBbox(p, verts, workingPV);
     p.w = bb.w; p.h = bb.h;
     p.displayBbox = { cx: bb.cx, cy: bb.cy, w: bb.w, h: bb.h };
+    // Stash the tessellated world-space path on the SOLVED component so
+    // downstream ring consumers (shapeInstanceToRing → GDS boundaries,
+    // boolean mask paths) can rebuild the drawn curve without re-walking
+    // the vertex chain. expandTransforms carries this through to each
+    // instance (alongside _baseCx/_baseCy for the clone-frame remap).
+    p._resolvedVerts = verts;
     return true;
   };
   // Same bookkeeping for polyshape (closed 2-D polygon) — uses the
   // vertex-only AABB with no width padding, since polyshapes are flat
   // fills, not swept traces.
   const refreshPolyshapeBbox = (p) => {
-    const verts = resolvePolylineVertices(p, byId, workingPV);
+    const verts = tessellatePolylinePath(p, byId, workingPV);
     const bb = polyshapeBbox(verts);
     p.w = bb.w; p.h = bb.h;
     p.displayBbox = { cx: bb.cx, cy: bb.cy, w: bb.w, h: bb.h };
+    p._resolvedVerts = verts;
     return true;
   };
   const recordPlaced = (c) => {
@@ -328,7 +350,10 @@ export function solveLayout(components, snaps, paramValues) {
       if (toComp.kind === 'boolean') refreshBooleanBbox(toComp);
       const tw = typeof toComp.w === 'number' ? toComp.w : evalExpr(toComp.w, workingPV);
       const th = typeof toComp.h === 'number' ? toComp.h : evalExpr(toComp.h, workingPV);
-      const toLocal = anchorLocal(s.to.anchor, tw, th);
+      // The child's own anchor offset rotates with its first-class
+      // rotation (matches anchorWorld on the parent side), so a rotated
+      // child snaps by its ROTATED corner/edge, not the unrotated bbox.
+      const toLocal = anchorLocalRotated(s.to.anchor, tw, th, compRotationDeg(toComp, workingPV));
       // Non-finite snap offsets (e.g. a dx expression that divides by a
       // zero-valued param) are zeroed so the child still lands somewhere
       // sane; the anomaly is surfaced via solve diagnostics.
