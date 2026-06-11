@@ -16,12 +16,13 @@
 // coverage is auditable at a glance against tokenizeComponentExprs.
 const COMPONENT_EXPR_FIELDS = [
   'w', 'h',                                  // uniform AABB
-  'r', 'rx', 'ry',                           // circle / ellipse / polygon
+  'r', 'rx', 'ry',                           // circle / ellipse / polygon / via
   'R', 'L_straight', 'p', 'wgWidth',         // racetrack
   'n',                                       // polygon side count
   'width',                                   // polyline trace width
   'rotation',                                // first-class rotation (deg, CCW)
   'zOffset',                                 // Z shift relative to the layer (µm)
+  'cornerRadius',                            // rect corner fillet radius (µm, D3)
 ];
 const CUTOUT_EXPR_FIELDS    = ['dx', 'dy', 'w', 'h'];
 const TRANSFORM_EXPR_FIELDS = ['dx', 'dy', 'angle', 'n', 'offset'];

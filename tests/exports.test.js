@@ -521,3 +521,489 @@ describe('generateHfssNative — analysis setup, frequency sweep, Optimetrics', 
     expect(out).toContain('DuplicateAlongLine');
   });
 });
+
+// ── Curved paths + tapers: export emission ──────────────────────────────
+// Arc vertices → HFSS AngularArc segments (parametric center + angle);
+// spline runs → ONE Spline segment; per-vertex widths → per-segment
+// parametric quad sheets + Unite + sweep. GDS / gdsfactory / pyAEDT
+// capture the same geometry numerically (tessellated).
+import { generateGdsfactory } from '../src/export/gdsfactory.js';
+
+describe('curved paths + tapers — exporters', () => {
+  const condLayerId = scene.stack.find(l => l.role === 'conductor')?.id;
+  const basePolyline = (vertices, extraComp = {}, params = {}) => {
+    const allParams = {
+      h_cond: { expr: '0.5' }, h_wg: { expr: '0.3' },
+      trace_w: { expr: '2' },
+      ...params,
+    };
+    const s = {
+      params: allParams,
+      components: [{
+        id: 'pl', kind: 'polyline', layer: 'electrode', conductorLayerId: condLayerId,
+        cx: 0, cy: 0, width: 'trace_w', w: '0', h: '0',
+        cutouts: [], transforms: [], vertices, ...extraComp,
+      }],
+      snaps: [], mirrors: [], groups: [], booleans: [],
+      stack: scene.stack, stackName: scene.stackName, simSetup: scene.simSetup,
+    };
+    const { values: pv } = resolveParams(allParams);
+    return { s, pv };
+  };
+  const pyParses2 = (code, name) => {
+    mkdirSync('tests/out', { recursive: true });
+    writeFileSync(`tests/out/${name}.py`, code);
+    expect(() => execSync(
+      `python3 -c "import ast; ast.parse(open('tests/out/${name}.py').read())"`,
+      { stdio: 'pipe' }
+    )).not.toThrow();
+  };
+
+  it('parametric arc emits an AngularArc segment with the angle param in ArcAngle', () => {
+    const { s, pv } = basePolyline([
+      { kind: 'rel', dx: '0', dy: '0' },
+      { kind: 'arc', cdx: 'arc_r', cdy: '0', angle: 'arc_a' },
+    ], {}, { arc_r: { expr: '5' }, arc_a: { expr: '180' } });
+    const out = generateHfssNative(s, pv);
+    expect(out).toContain('"SegmentType:=", "AngularArc"');
+    // HFSS trig is unit-aware: ArcAngle carries the *1deg tag around
+    // the LIVE expression (not a baked numeric).
+    expect(out).toContain('"ArcAngle:=", "(arc_a)*1deg"');
+    // Arc center chain expr references the cdx param.
+    const centerMatch = out.match(/"ArcCenterX:=", "([^"]+)"/);
+    expect(centerMatch).toBeTruthy();
+    expect(centerMatch[1]).toContain('arc_r');
+    // AngularArc carries start/mid/end → NoOfPoints 3 (HFSS convention).
+    expect(out).toContain('"NoOfPoints:=", 3');
+    // Fully parametric → lands in the PARAMETRIC report, not FROZEN.
+    expect(out).toContain('arc centers + sweep angles');
+    pyParses2(out, 'vitest_hfss_arc');
+  });
+
+  it('spline run emits ONE Spline segment with NoOfPoints = run + anchor', () => {
+    const { s, pv } = basePolyline([
+      { kind: 'rel', dx: '0', dy: '0' },
+      { kind: 'rel', dx: '10', dy: '0', spline: true },
+      { kind: 'rel', dx: '10', dy: '8', spline: true },
+      { kind: 'rel', dx: '10', dy: '-8', spline: true },
+    ]);
+    const out = generateHfssNative(s, pv);
+    // 3 spline vertices + the anchor before the run = 4 points.
+    expect(out).toContain('"SegmentType:=", "Spline", "StartIndex:=", 0, "NoOfPoints:=", 4');
+    // Safety report carries the canvas-approximation caveat.
+    expect(out).toContain('spline (canvas preview is an approximation of HFSS NURBS)');
+    pyParses2(out, 'vitest_hfss_spline');
+  });
+
+  it('tapered single-segment polyline emits sqrt() corner exprs + sweep', () => {
+    const { s, pv } = basePolyline([
+      { kind: 'rel', dx: '0', dy: '0' },
+      { kind: 'rel', dx: 'seg_L', dy: '0', width: 'tip_w' },
+    ], {}, { seg_L: { expr: '20' }, tip_w: { expr: '6' } });
+    const out = generateHfssNative(s, pv);
+    expect(out).toContain('TAPERED polyline trace');
+    // Parametric unit normal: sqrt((dx)*(dx) + (dy)*(dy)) in the corners.
+    expect(out).toContain('sqrt(');
+    // Corner expressions carry the LIVE width + segment-length params.
+    const ptMatch = out.match(/"X:=", "([^"]*tip_w[^"]*)"/);
+    expect(ptMatch).toBeTruthy();
+    expect(out).toContain('seg_L');
+    // Single quad → no Unite needed, but the sheet sweeps up by the
+    // conductor thickness.
+    expect(out).toContain('SweepAlongVector');
+    expect(out).toContain('per-vertex taper widths');
+    pyParses2(out, 'vitest_hfss_taper1');
+  });
+
+  it('tapered multi-segment polyline unites the per-segment sheets', () => {
+    const { s, pv } = basePolyline([
+      { kind: 'rel', dx: '0', dy: '0' },
+      { kind: 'rel', dx: '10', dy: '0', width: 'mid_w' },
+      { kind: 'rel', dx: '10', dy: '5', width: 'tip_w' },
+    ], {}, { mid_w: { expr: '4' }, tip_w: { expr: '1' } });
+    const out = generateHfssNative(s, pv);
+    expect(out).toContain('oEditor.Unite');
+    expect(out).toContain('"Selections:=", "pl,pl_tseg1"');
+    pyParses2(out, 'vitest_hfss_taper2');
+  });
+
+  it('tapered polyline with a snap-bound vertex keeps parametric corners', () => {
+    // Cross-feature interaction (Phase 3 gate): a per-vertex taper width
+    // on a vertex that is snap-bound to another component must emit
+    // corner expressions referencing BOTH the snap target's live chain
+    // (anchor offset rides the target's w param) AND the taper width
+    // param — not baked numerics.
+    const { s, pv } = basePolyline([
+      { kind: 'rel', dx: '0', dy: '0' },
+      { kind: 'snap', compId: 'tgt', anchor: 'E', width: 'tip_w' },
+    ], {}, { tip_w: { expr: '6' }, tgt_w: { expr: '30' } });
+    s.components.push({
+      id: 'tgt', kind: 'rect', layer: 'electrode', conductorLayerId: condLayerId,
+      cx: 40, cy: 0, w: 'tgt_w', h: '10', cutouts: [], transforms: [],
+    });
+    const out = generateHfssNative(s, pv);
+    expect(out).toContain('TAPERED polyline trace');
+    // Snap-bound endpoint corner X rides the target's width param
+    // (anchor E offset = +(tgt_w)/2 inside the chain expression).
+    expect(out).toMatch(/"X:=", "[^"]*tgt_w[^"]*"/);
+    // Taper width param stays live in the corner expressions.
+    expect(out).toMatch(/"[XY]:=", "[^"]*tip_w[^"]*"/);
+    // sqrt() unit-normal idiom present → corners are parametric, and the
+    // snap vertex must NOT freeze the polyline.
+    expect(out).toContain('sqrt(');
+    expect(out).not.toContain('polyline vertex snapped to tgt (target has no parametric chain');
+    pyParses2(out, 'vitest_hfss_taper_snap');
+  });
+
+  it('tapered polyline with an arc segment warns + freezes that segment', () => {
+    const { s, pv } = basePolyline([
+      { kind: 'rel', dx: '0', dy: '0', width: '4' },
+      { kind: 'arc', cdx: '0', cdy: '10', angle: '90' },
+      { kind: 'rel', dx: '10', dy: '0' },
+    ]);
+    const out = generateHfssNative(s, pv);
+    expect(out).toContain('# WARNING:');
+    expect(out).toContain('taper-on-arc');
+    expect(out).toContain('tapered polyline arc/spline segments frozen at constant base width');
+    pyParses2(out, 'vitest_hfss_taper_arc');
+  });
+
+  it('polyshape with an arc edge emits AngularArc on the closed covered polyline', () => {
+    const s = {
+      params: { h_cond: { expr: '0.5' }, h_wg: { expr: '0.3' } },
+      components: [{
+        id: 'ps', kind: 'polyshape', layer: 'electrode', conductorLayerId: condLayerId,
+        cx: 0, cy: 0, w: '0', h: '0', closed: true,
+        cutouts: [], transforms: [],
+        vertices: [
+          { kind: 'rel', dx: '0', dy: '0' },
+          { kind: 'arc', cdx: '5', cdy: '0', angle: '180' },
+          { kind: 'rel', dx: '0', dy: '10' },
+        ],
+      }],
+      snaps: [], mirrors: [], groups: [], booleans: [],
+      stack: scene.stack, stackName: scene.stackName, simSetup: scene.simSetup,
+    };
+    const { values: pv } = resolveParams(s.params);
+    const out = generateHfssNative(s, pv);
+    expect(out).toContain('"SegmentType:=", "AngularArc"');
+    expect(out).toContain('"IsPolylineClosed:=", True');
+    pyParses2(out, 'vitest_hfss_polyshape_arc');
+  });
+
+  it('pyAEDT polyline emits tessellated numeric points (+ taper quads) and parses', () => {
+    const { s, pv } = basePolyline([
+      { kind: 'rel', dx: '0', dy: '0' },
+      { kind: 'arc', cdx: '0', cdy: '10', angle: '90' },
+      { kind: 'rel', dx: '10', dy: '0', width: '6' },
+    ]);
+    const out = generatePyAEDT(s, pv);
+    expect(out).toContain('TAPERED polyline');
+    expect(out).toContain('create_polyline');
+    pyParses2(out, 'vitest_pyaedt_curved');
+    // Non-tapered variant: centerline polyline with rectangle XSection.
+    const { s: s2, pv: pv2 } = basePolyline([
+      { kind: 'rel', dx: '0', dy: '0' },
+      { kind: 'arc', cdx: '0', cdy: '10', angle: '90' },
+    ]);
+    const out2 = generatePyAEDT(s2, pv2);
+    expect(out2).toContain('xsection_type="Rectangle"');
+    expect(out2).toContain('centerline tessellated numerically');
+    pyParses2(out2, 'vitest_pyaedt_curved2');
+  });
+
+  it('GDS export handles arcs, splines, and tapered bands without throwing', () => {
+    const { s } = basePolyline([
+      { kind: 'rel', dx: '0', dy: '0' },
+      { kind: 'arc', cdx: '0', cdy: '10', angle: '90' },
+      { kind: 'rel', dx: '10', dy: '0', spline: true, width: '6' },
+      { kind: 'rel', dx: '10', dy: '-5', spline: true },
+    ]);
+    const { values: pv } = resolveParams(s.params);
+    const gds = generateGDS(s, pv);
+    expect(gds).toBeInstanceOf(Uint8Array);
+    expect(gds.byteLength).toBeGreaterThan(100);
+  });
+
+  it('gdsfactory emits the polyline band as per-segment quads and parses', () => {
+    const { s, pv } = basePolyline([
+      { kind: 'rel', dx: '0', dy: '0' },
+      { kind: 'rel', dx: '20', dy: '0', width: '5' },
+      { kind: 'arc', cdx: '0', cdy: '10', angle: '90' },
+    ]);
+    const out = generateGdsfactory(s, pv);
+    expect(out).toContain('per-segment quad');
+    expect(out).toContain('add_polygon');
+    pyParses2(out, 'vitest_gdsfactory_curved');
+  });
+});
+
+// ── D3 (rect corner fillets) + D4 (vias): export-level assertions ───────
+
+describe('D3/D4 exports: rounded rects + vias', () => {
+  const condLayerId = scene.stack.find(l => l.role === 'conductor')?.id;
+  const pyParses3 = (code, name) => {
+    mkdirSync('tests/out', { recursive: true });
+    writeFileSync(`tests/out/${name}.py`, code);
+    expect(() => execSync(
+      `python3 -c "import ast; ast.parse(open('tests/out/${name}.py').read())"`,
+      { stdio: 'pipe' }
+    )).not.toThrow();
+  };
+  // Minimal GDS BOUNDARY scanner: returns [{ layer, nPts }] per boundary.
+  const scanGdsBoundaries = (bytes) => {
+    const out = [];
+    let i = 0;
+    let curLayer = null;
+    while (i + 4 <= bytes.length) {
+      const len = (bytes[i] << 8) | bytes[i + 1];
+      if (len < 4) break;
+      const recType = bytes[i + 2];
+      if (recType === 0x0d) { // LAYER
+        curLayer = (bytes[i + 4] << 8) | bytes[i + 5];
+      } else if (recType === 0x10) { // XY
+        const nPts = (len - 4) / 8;
+        out.push({ layer: curLayer, nPts });
+      }
+      i += len;
+    }
+    return out;
+  };
+
+  // Custom stack with a dielectric spacer between the WG and the top
+  // metal, so the via's Z span genuinely crosses MULTIPLE thickness
+  // params (the default stack's coplanar device run shares zBottom).
+  const viaScene = () => {
+    const params = {
+      h_si: { expr: '250', unit: 'µm' },
+      h_wg: { expr: '0.6', unit: 'µm' },
+      h_d1: { expr: '1.5', unit: 'µm' },
+      h_cond: { expr: '0.8', unit: 'µm' },
+      via_r: { expr: '2', unit: 'µm' },
+    };
+    const s = {
+      params,
+      components: [
+        { id: 'v1', kind: 'via', layer: 'via', cx: 10, cy: 5, r: 'via_r',
+          w: '2*via_r', h: '2*via_r', layerFrom: 'l_wg', layerTo: 'l_m2',
+          cutouts: [], transforms: [] },
+        { id: 'v2', kind: 'via', layer: 'via', cx: -10, cy: 5, r: 'via_r',
+          w: '2*via_r', h: '2*via_r', layerFrom: 'l_d1', layerTo: 'l_m2',
+          cutouts: [], transforms: [] },
+      ],
+      snaps: [], mirrors: [], groups: [], booleans: [],
+      stack: [
+        { id: 'l_sub', name: 'Si', thickness: 'h_si', material: 'silicon', color: '#5a6878', role: 'substrate' },
+        { id: 'l_wg', name: 'WG', thickness: 'h_wg', material: 'lithium_tantalate', color: '#86efac', role: 'waveguide',
+          core_width: 'w_wg', slab_height: 'h_slab', slab_width: 'w_slab', etch_angle: 'etch_angle' },
+        { id: 'l_d1', name: 'Spacer', thickness: 'h_d1', material: 'silicon_dioxide', color: '#cbd5e1', role: 'dielectric' },
+        { id: 'l_m2', name: 'TopMetal', thickness: 'h_cond', material: 'gold', color: '#daa520', role: 'conductor' },
+      ],
+      stackName: 'via_test_stack',
+      simSetup: scene.simSetup,
+    };
+    const { values: pv } = resolveParams({
+      ...params,
+      w_wg: { expr: '1.2' }, h_slab: { expr: '0.1' },
+      w_slab: { expr: '5' }, etch_angle: { expr: '70' },
+    });
+    return { s, pv };
+  };
+
+  it('HFSS via emits a parametric CreateCylinder: ZStart = layerFrom bottom, Height spans both layers', () => {
+    const { s, pv } = viaScene();
+    const out = generateHfssNative(s, pv);
+    expect(out).toContain('oEditor.CreateCylinder');
+    // Per-via blocks (each starts with its header comment).
+    const b1 = out.slice(out.indexOf('# v1: via'), out.indexOf('# v2: via'));
+    const b2 = out.slice(out.indexOf('# v2: via'));
+    // v1: layerFrom = l_wg → ZStart is the device level's parametric
+    // bottom ('0um' in this stack).
+    expect(b1).toContain('"ZCenter:=", "0um"');
+    // Height = (top of l_m2) - (bottom of l_wg) — must reference EVERY
+    // thickness param along the span: h_wg (WG), h_d1 (spacer), h_cond
+    // (target metal).
+    const height1 = /"Height:=", "([^"]+)"/.exec(b1)?.[1] || '';
+    expect(height1).toContain('h_wg');
+    expect(height1).toContain('h_d1');
+    expect(height1).toContain('h_cond');
+    // v2: layerFrom = l_d1 → ZStart is the spacer's parametric bottom,
+    // which rides h_wg.
+    const zc2 = /"ZCenter:=", "([^"]+)"/.exec(b2)?.[1] || '';
+    expect(zc2).toContain('h_wg');
+    // Radius stays the live expression.
+    expect(b1).toContain('"Radius:=", "(via_r)"');
+    // Cladding subtraction bookkeeping: via is metal (gold from l_m2).
+    expect(b1).toContain('gold');
+    pyParses3(out, 'vitest_hfss_via');
+  });
+
+  it('HFSS via with unresolved or identical layers is skipped with a comment', () => {
+    const { s, pv } = viaScene();
+    s.components = [{
+      id: 'vbad', kind: 'via', layer: 'via', cx: 0, cy: 0, r: 'via_r',
+      w: '2*via_r', h: '2*via_r', layerFrom: 'l_m2', layerTo: 'l_m2',
+      cutouts: [], transforms: [],
+    }];
+    const out = generateHfssNative(s, pv);
+    expect(out).toContain('Skipped via vbad');
+    expect(out).not.toContain('oEditor.CreateCylinder');
+    pyParses3(out, 'vitest_hfss_via_bad');
+  });
+
+  it('via Z span ignores a stray zOffset — vias are layer-bound in Z', () => {
+    // Cross-feature interaction (Phase 3 gate): zOffset is never offered
+    // on vias (their Z span is fully determined by layerFrom/layerTo) and
+    // normalizeScene strips it. Belt-and-suspenders: even a hand-injected
+    // zOffset on an un-normalized component list must NOT leak into the
+    // cylinder's ZCenter (HFSS) or emit a Z move (pyAEDT).
+    const { s, pv } = viaScene();
+    s.components = [{ ...s.components[0], zOffset: '7' }];
+    const out = generateHfssNative(s, pv);
+    const b1 = out.slice(out.indexOf('# v1: via'));
+    expect(/"ZCenter:=", "([^"]+)"/.exec(b1)?.[1]).toBe('0um');
+    pyParses3(out, 'vitest_hfss_via_zoffset');
+    const outPy = generatePyAEDT(s, pv);
+    expect(outPy).not.toContain('zOffset');
+    pyParses3(outPy, 'vitest_pyaedt_via_zoffset');
+  });
+
+  it('pyAEDT via emits a numeric cylinder spanning the stack and parses', () => {
+    const { s, pv } = viaScene();
+    const out = generatePyAEDT(s, pv);
+    expect(out).toContain('create_cylinder');
+    // v1 spans l_wg bottom (0) to l_m2 top (0.6 + 1.5 + 0.8 = 2.9).
+    expect(out).toContain('height="2.9000um"');
+    expect(out).toContain('numeric Z span');
+    pyParses3(out, 'vitest_pyaedt_via');
+  });
+
+  it('GDS vias land on 200+ with one layer per (from → to) pair', () => {
+    const { s, pv } = viaScene();
+    const gds = generateGDS(s, pv);
+    const boundaries = scanGdsBoundaries(gds);
+    const viaB = boundaries.filter(b => b.layer >= 200);
+    expect(viaB).toHaveLength(2);
+    // Distinct pairs → distinct layers, assigned in component order.
+    expect(viaB.map(b => b.layer).sort()).toEqual([200, 201]);
+    // Circle tessellation: 64 vertices + closing repeat.
+    for (const b of viaB) expect(b.nPts).toBe(65);
+  });
+
+  it('gdsfactory vias emit parametric circles on their via layers and parse', () => {
+    const { s, pv } = viaScene();
+    const out = generateGdsfactory(s, pv);
+    expect(out).toContain('"via_l_wg__l_m2": (200, 0)');
+    expect(out).toContain('"via_l_d1__l_m2": (201, 0)');
+    expect(out).toContain('_circle_pts');
+    pyParses3(out, 'vitest_gdsfactory_via');
+  });
+
+  // ── Rounded rects ─────────────────────────────────────────────────────
+
+  const roundedScene = (extraComp = {}) => {
+    const params = {
+      ...scene.params,
+      rw: { expr: '20', unit: 'µm' },
+      rh: { expr: '10', unit: 'µm' },
+      fil_r: { expr: '2', unit: 'µm' },
+    };
+    const s = {
+      params,
+      components: [{
+        id: 'rr', kind: 'rect', layer: 'electrode', conductorLayerId: condLayerId,
+        cx: 0, cy: 0, w: 'rw', h: 'rh', cornerRadius: 'fil_r',
+        cutouts: [], transforms: [], ...extraComp,
+      }],
+      snaps: [], mirrors: [], groups: [], booleans: [],
+      stack: scene.stack, stackName: scene.stackName, simSetup: scene.simSetup,
+    };
+    const { values: pv } = resolveParams(params);
+    return { s, pv };
+  };
+
+  it('HFSS rounded rect emits 4 AngularArc 90deg corners with parametric w/h/r', () => {
+    const { s, pv } = roundedScene();
+    const out = generateHfssNative(s, pv);
+    // Covered closed polyline instead of the box path (the sharp
+    // electrode path would emit a CreateBox with XSize "(rw)"; the
+    // substrate / cladding boxes still legitimately use
+    // safe_create_box, so test for the rect-specific signature).
+    expect(out).toContain('rounded rect (cornerRadius = fil_r)');
+    expect(out).not.toContain('"XSize:=", "(rw)"');
+    const arcCount = (out.match(/"SegmentType:=", "AngularArc"/g) || []).length;
+    expect(arcCount).toBe(4);
+    const angle90Count = (out.match(/"ArcAngle:=", "90deg"/g) || []).length;
+    expect(angle90Count).toBe(4);
+    // Tangent points are parametric in the rect's w/h/r names.
+    expect(out).toMatch(/"X:=", "[^"]*\(rw\)[^"]*"/);
+    expect(out).toMatch(/"Y:=", "[^"]*\(rh\)[^"]*"/);
+    expect(out).toMatch(/"ArcCenterX:=", "[^"]*\(fil_r\)[^"]*"/);
+    // Unclamped-r warning comment.
+    expect(out).toContain('cornerRadius is not clamped in HFSS; keep r <= min(w,h)/2');
+    // Thickened by the conductor layer's parametric thickness.
+    expect(out).toContain('SweepAlongVector');
+    pyParses3(out, 'vitest_hfss_rounded_rect');
+  });
+
+  it('HFSS rounded rect with rotation reuses the D6 base-rotation idiom', () => {
+    const { s, pv } = roundedScene({ rotation: 'rr_rot' });
+    s.params.rr_rot = { expr: '30', unit: '' };
+    const out = generateHfssNative(s, pv);
+    expect(out).toContain('Base rotation for rr');
+    expect(out).toContain('"RotateAngle:=", "(rr_rot)*1deg"');
+    pyParses3(out, 'vitest_hfss_rounded_rect_rot');
+  });
+
+  it('HFSS rect with cornerRadius evaluating to 0 falls back to the sharp box path', () => {
+    const { s, pv } = roundedScene();
+    s.params.fil_r = { expr: '0', unit: 'µm' };
+    const { values: pv0 } = resolveParams(s.params);
+    const out = generateHfssNative(s, pv0);
+    expect(out).toContain('safe_create_box');
+    expect(out).not.toContain('"SegmentType:=", "AngularArc"');
+    pyParses3(out, 'vitest_hfss_rounded_rect_zero');
+  });
+
+  it('GDS rounded rect boundary carries the 36-vertex filleted ring', () => {
+    const { s, pv } = roundedScene();
+    const gds = generateGDS(s, pv);
+    const boundaries = scanGdsBoundaries(gds);
+    // Electrode bound to the first conductor → layer 10; 36 ring
+    // vertices + closing repeat.
+    const rr = boundaries.find(b => b.layer === 10);
+    expect(rr).toBeTruthy();
+    expect(rr.nPts).toBe(37);
+  });
+
+  it('pyAEDT rounded rect emits the numeric filleted polyline and parses', () => {
+    const { s, pv } = roundedScene();
+    const out = generatePyAEDT(s, pv);
+    expect(out).toContain('rounded rect (cornerRadius = fil_r)');
+    expect(out).toContain('create_polyline');
+    expect(out).toContain('thicken_sheet');
+    pyParses3(out, 'vitest_pyaedt_rounded_rect');
+  });
+
+  it('gdsfactory rounded rect bakes the filleted perimeter numerically and parses', () => {
+    const { s, pv } = roundedScene();
+    const out = generateGdsfactory(s, pv);
+    expect(out).toContain('rounded rect (cornerRadius=2');
+    expect(out).toContain('add_polygon');
+    pyParses3(out, 'vitest_gdsfactory_rounded_rect');
+  });
+
+  it('pyAEDT rounded rect with rotation emits the numeric rotate sandwich and parses', () => {
+    // Cross-feature interaction (Phase 3 gate): cornerRadius (D3) +
+    // first-class rotation (D6) compose — the filleted polyline part is
+    // created axis-aligned, then rotated about its own center via the
+    // translate-rotate-translate sandwich. Single part name `rr` (no
+    // `_rib`), so the rotate targets must hit the right part.
+    const { s, pv } = roundedScene({ rotation: '30' });
+    const out = generatePyAEDT(s, pv);
+    expect(out).toContain('rounded rect (cornerRadius = fil_r)');
+    expect(out).toContain('rotation = 30 deg CCW about own center');
+    expect(out).toContain('hfss.modeler.rotate(["rr"], "Z", "30.0000deg")');
+    pyParses3(out, 'vitest_pyaedt_rounded_rect_rot');
+  });
+});

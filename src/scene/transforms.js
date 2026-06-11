@@ -45,7 +45,20 @@ export function expandTransforms(components, paramValues) {
     // geometry instead of approximating from the AABB w/h.
     const kind = c.kind === 'boolean' ? 'boolean' : (c.kind || 'rect');
     const shapeFields = {};
-    if (kind === 'circle') {
+    if (kind === 'rect') {
+      // D3 corner fillets: evaluate the optional cornerRadius expression
+      // onto each instance so rings.js (and through it GDS, boolean
+      // masks, snap bboxes) can build the rounded perimeter. Clamping to
+      // min(w, h)/2 happens in rings.js (clampCornerRadius) so every
+      // consumer applies one rule.
+      if (c.cornerRadius != null && String(c.cornerRadius).trim() !== '' && String(c.cornerRadius).trim() !== '0') {
+        const crVal = evalExpr(c.cornerRadius, paramValues);
+        if (Number.isFinite(crVal) && crVal > 0) shapeFields.cornerRadius = crVal;
+      }
+    } else if (kind === 'circle' || kind === 'via') {
+      // Vias (D4) carry the same primary radius field as circles; the
+      // layerFrom / layerTo ids ride on the component itself (they're
+      // not per-instance numerics).
       shapeFields.r = evalExpr(c.r ?? '0', paramValues);
     } else if (kind === 'ellipse') {
       shapeFields.rx = evalExpr(c.rx ?? '0', paramValues);
@@ -311,7 +324,9 @@ export function expandTransforms(components, paramValues) {
         transformPath: `#${idx}`,
       };
       // Carry shape-specific numeric fields through (r, rx, ry, n,
-      // R, L_straight, p, wgWidth for racetracks).
+      // R, L_straight, p, wgWidth for racetracks, cornerRadius for
+      // filleted rects).
+      if (inst.cornerRadius !== undefined) out.cornerRadius = inst.cornerRadius;
       if (inst.r !== undefined) out.r = inst.r;
       if (inst.rx !== undefined) out.rx = inst.rx;
       if (inst.ry !== undefined) out.ry = inst.ry;

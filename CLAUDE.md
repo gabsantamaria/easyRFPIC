@@ -9,12 +9,13 @@ A React-based parametric layout tool for RF/photonic IC structures (TFLN/TFLT mo
 1. **HFSS pyAEDT** (Python script using `ansys.aedt.core`)
 2. **HFSS native COM** (Python 2.7-compatible script invoking `oEditor` directly via `ScriptEnv`)
 3. **GDS-II** (binary, custom REAL8 encoder)
+4. **gdsfactory** (Python script; numeric tessellation)
 
 The user is an RF engineer working on photonic IC RF structures. Engineering correctness and HFSS compatibility outweigh code elegance.
 
 ## Core mental model
 
-Everything is an **object**: primitive (rect, circle, ellipse, polygon, racetrack), boolean (union/intersect/subtract of operands), or group. All objects expose the same uniform interface for snap, drag, anchor, and rendering. There are no special cases in the canvas for "this is a boolean" vs "this is a rect" — the geometry pipeline treats them uniformly through `shapeInstanceToRing` and AABB w/h.
+Everything is an **object**: primitive (rect, circle, ellipse, polygon, racetrack, via, polyline, polyshape), boolean (union/intersect/subtract of operands), or group. All objects expose the same uniform interface for snap, drag, anchor, and rendering. There are no special cases in the canvas for "this is a boolean" vs "this is a rect" — the geometry pipeline treats them uniformly through `shapeInstanceToRing` and AABB w/h.
 
 Booleans are HFSS-style: a boolean *consumes* its operands (marks them `consumedBy`) and produces a named derived component. The SHAPES panel renders this as a feature tree, and the HFSS export produces a modeler tree mirroring the SHAPES tree.
 
@@ -45,12 +46,56 @@ scene = {
                // polyline/polyshape: shifts the part's Z placement relative
                // to its layer (HFSS-parametric; no canvas visual in top view).
 // where kind is one of:
-//   'rect':       w, h
+//   'rect':       w, h, cornerRadius? (optional fillet expr; ring/GDS/HFSS
+//                              emit 4 straight edges + 4 90-deg corner arcs;
+//                              clamped to min(w,h)/2 in-app, NOT in HFSS)
 //   'circle':     r            (w='2*r', h='2*r' derived)
 //   'ellipse':    rx, ry       (w='2*rx', h='2*ry')
 //   'polygon':    r, n         (w=h='2*r')
 //   'racetrack':  R, L_straight, p, wgWidth
 //                              (w, h are linear-in-p approximations)
+//   'via':        r, layerFrom, layerTo (stack-layer ids; layer='via';
+//                              w/h derived like circles; HFSS emits a
+//                              parametric CreateCylinder from layerFrom's
+//                              zBottom to layerTo's zTop; GDS layers 200+,
+//                              one per distinct from->to pair. rotation /
+//                              zOffset / cornerRadius do NOT apply — a via's
+//                              Z span is layer-bound; normalizeScene strips
+//                              them and exporters never emit them)
+//   'polyline':   width, vertices[], closed?   (w='0', h='0'; bbox refreshed
+//                              post-solve by refreshPolylineBbox, padded by the
+//                              WIDEST effective width)
+//   'polyshape':  vertices[], closed:true      (filled 2-D polygon path;
+//                              bbox = vertex AABB, no width padding)
+
+// Polyline/polyshape VERTEX MODEL (all expression-valued fields are strings):
+//   { kind: 'rel',  dx, dy, spline?, width? }   // step from previous vertex
+//   { kind: 'snap', compId, anchor, instanceIdx?, width? } // pinned to anchor
+//   { kind: 'arc',  cdx, cdy, angle }           // circular arc: center =
+//        prev + (cdx, cdy); sweeps `angle` DEGREES (CCW positive); the
+//        vertex's resolved position is the arc ENDPOINT. 1:1 with an HFSS
+//        AngularArc segment (parametric ArcCenterX/Y + "(<expr>)*1deg").
+//   spline: consecutive spline-flagged rel vertices (plus the anchor vertex
+//        before the run) form ONE HFSS Spline segment (NURBS through the
+//        chain-expr points). Canvas/GDS tessellate the run with Catmull-Rom
+//        (>=8 segs/span) — an APPROXIMATION of HFSS's NURBS, flagged in the
+//        export's safety-report NOTES.
+//   width (polyline only): per-vertex taper width. If ANY vertex carries one,
+//        the trace is TAPERED: rendered + exported as per-segment quads
+//        (endpoint ± (w/2)·normal, BUTT joins). HFSS emits per-segment
+//        4-point covered sheets with PARAMETRIC corners (normal via sqrt) +
+//        Unite + sweep. Arc/spline segments in a tapered polyline are a v1
+//        restriction: constant base width, tessellated numerically (WARNING
+//        comment + FROZEN report entry; width field disabled on arc rows).
+//   resolvePolylineVertices = ONE point per vertex spec (stable indexing for
+//   inspector rows/handles); tessellatePolylinePath = full drawn path (arcs
+//   expanded at ceil(|angle|/360*64) >= 8 segs, spline runs interpolated) —
+//   feeds canvas paths, rings (solver stashes it as `_resolvedVerts`),
+//   AABBs, and the numeric exporters.
+//   Draw UX: pressing 'a' while drawing toggles ARC mode — the next click
+//   places a 90° arc endpoint (synthArc90 picks the bulge side from the
+//   previous move direction). Inspector has line↔arc converters, a spline
+//   checkbox per rel vertex, and per-vertex 'w' taper fields.
 
 // Booleans (derived from operands):
 { id, kind:'boolean', op, operandIds[], layer,
@@ -111,11 +156,14 @@ For non-rect shapes, `expandTransforms` propagates shape-specific fields (r, rx,
 Canvas uses SVG with `y-up world → y-down screen` transform.
 
 **Per-component standard renderer** dispatches on shape kind:
-- `rect`: `<rect>` with rotation wrapper
+- `rect`: `<rect>` with rotation wrapper; positive `cornerRadius` renders via the SVG `rx` attribute, clamped by the SAME `clampCornerRadius` rings.js uses (exact match to the HFSS arc geometry)
 - `circle`: `<circle>`
 - `ellipse`: `<ellipse>`
 - `polygon`: `<polygon>` from tessellated ring (rotation baked into ring, no wrapper rotation)
 - `racetrack`: `<path>` of the centerline, stroked with `stroke-width=wgWidth`, `fill=none` (browser draws the band)
+- `polyline`: `<path>` of the TESSELLATED centerline (`tessellatePolylinePath` — arcs/splines expanded), stroked at the trace width; TAPERED polylines instead render filled per-segment quads from `taperedBandQuads` (SVG strokes can't vary width — the quads exactly match the HFSS per-segment sheets)
+- `polyshape`: filled `<path>` of the tessellated perimeter + `Z`
+- `via`: plan-view `<circle>` in the via layer style + a small center dot (reads as "vertical connection"); tooltip names the spanned stack layers; renders ABOVE electrodes
 
 **Boolean cluster rendering** uses SVG `<mask>` / `<clipPath>` to composite multiple shape rings recursively. Each boolean's rendering function (`renderInterior`, `renderOutline`) walks operands and applies the boolean op via SVG mask composition. Selection halo is uniform cyan `#0ea5e9` across all object kinds.
 
@@ -174,8 +222,25 @@ node tests/test_drag_thorough.mjs
 
 # Run shape & racetrack tests
 node tests/test_shapes.mjs
+node tests/test_polyshape.mjs
 node tests/test_racetrack.mjs
 node tests/test_racetrack_export.mjs
+
+# Full vitest suite (covers everything below; run targeted files while iterating)
+npx vitest run
+#   tests/curved-paths.test.js     — arc/spline/taper vertex model (geometry + solver + walkers)
+#   tests/fillet-via.test.js       — rect cornerRadius + via component (rings, schema, walkers)
+#   tests/rotation_zoffset.test.js — first-class rotation + per-component zOffset
+#   tests/sweep-ui.test.js         — analysis setup / frequency sweep / Optimetrics emission
+#   tests/solver_guards.test.js    — NaN guards, snap-graph validation
+#   tests/rename-ident.test.js     — rename walker over every expression field
+#   tests/exports.test.js          — export emission + Python AST checks (incl. cross-feature
+#                                    interactions: rotated rounded rect, via vs zOffset,
+#                                    tapered polyline with snap-bound vertex)
+#   tests/boolean_render.test.js   — boolean mask composition (incl. polyshape arc operand)
+
+# Production build
+npm run build
 ```
 
 All four drag scenarios should produce position outputs matching the expected positions encoded in each test.

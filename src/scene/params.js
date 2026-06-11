@@ -47,6 +47,10 @@ export function tokenizeIdents(expr) {
 //     knobs counted.
 //   - Cutouts: each cutout's dx / dy / w / h.
 //   - Transform chain: each transform's dx / dy / angle / n.
+//   - Polyline trace width (`width`) and per-vertex expressions on
+//     polyline / polyshape vertices: dx / dy (rel), cdx / cdy / angle
+//     (arc), width (per-vertex taper). Mirrors VERTEX_EXPR_FIELDS in
+//     rename-ident.js — keep both in sync.
 //
 // Boolean operands and snap-chain expressions are NOT included — those
 // live OFF the component (operandIds → other components; snap.dx/dy
@@ -63,8 +67,20 @@ export function tokenizeComponentExprs(c) {
   push(c.r); push(c.rx); push(c.ry);
   push(c.R); push(c.L_straight); push(c.p); push(c.wgWidth);
   push(c.n);
-  // First-class rotation (deg, CCW) + per-component Z offset (µm).
-  push(c.rotation); push(c.zOffset);
+  // First-class rotation (deg, CCW) + per-component Z offset (µm) +
+  // rect corner fillet radius (µm, D3). Via components (D4) reuse the
+  // `r` field above, so they're already covered.
+  push(c.rotation); push(c.zOffset); push(c.cornerRadius);
+  // Polyline trace width + per-vertex expression fields (rel dx/dy,
+  // arc cdx/cdy/angle, taper width). Non-string fields are skipped by
+  // push(), so snap vertices pass through harmlessly.
+  push(c.width);
+  for (const v of (c.vertices || [])) {
+    if (!v) continue;
+    push(v.dx); push(v.dy);
+    push(v.cdx); push(v.cdy); push(v.angle);
+    push(v.width);
+  }
   for (const cu of (c.cutouts || [])) {
     push(cu.dx); push(cu.dy); push(cu.w); push(cu.h);
   }

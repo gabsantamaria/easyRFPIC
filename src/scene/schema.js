@@ -150,14 +150,93 @@ export function normalizeScene(s) {
     transforms: c.transforms || [],
     ...c,
     // Optional expression fields added later in the schema's life:
-    //   rotation — first-class rotation (degrees, CCW) on rect / circle /
-    //              ellipse / polygon. Absent or '0' = none.
-    //   zOffset  — Z shift (µm) relative to the component's layer.
-    // Both are expression STRINGS; coerce stray numerics from hand-
+    //   rotation     — first-class rotation (degrees, CCW) on rect /
+    //                  circle / ellipse / polygon. Absent or '0' = none.
+    //   zOffset      — Z shift (µm) relative to the component's layer.
+    //   cornerRadius — rect corner fillet radius (µm, D3). Absent or
+    //                  '0' = sharp corners.
+    // All are expression STRINGS; coerce stray numerics from hand-
     // edited JSON so every downstream consumer can assume strings.
     ...(c.rotation != null && typeof c.rotation !== 'string' ? { rotation: String(c.rotation) } : {}),
     ...(c.zOffset != null && typeof c.zOffset !== 'string' ? { zOffset: String(c.zOffset) } : {}),
+    ...(c.cornerRadius != null && typeof c.cornerRadius !== 'string' ? { cornerRadius: String(c.cornerRadius) } : {}),
   }));
+  // Via components (D4): plan-view circles spanning two stack layers in
+  // Z. Normalize defaults so downstream consumers can assume:
+  //   r          — expression string (default '2')
+  //   layer      — 'via' (drives canvas styling + exporter dispatch)
+  //   layerFrom / layerTo — stack-layer ids; default waveguide-or-first-
+  //                conductor → top conductor when missing/stale.
+  //   w / h      — '2*(<r>)' derived AABB so snaps / anchors / solver
+  //                see a consistent bbox (the circle convention).
+  {
+    const nonSubstrate = stack.filter(l => l.role !== 'substrate');
+    const condsInStack = stack.filter(l => l.role === 'conductor');
+    const defaultFrom = stack.find(l => l.role === 'waveguide') || condsInStack[0] || nonSubstrate[0] || null;
+    const defaultTo = [...condsInStack].reverse().find(l => !defaultFrom || l.id !== defaultFrom.id)
+      || [...nonSubstrate].reverse().find(l => !defaultFrom || l.id !== defaultFrom.id)
+      || null;
+    migratedComponents = migratedComponents.map(c => {
+      if (c.kind !== 'via') return c;
+      const next = { ...c };
+      let changed = false;
+      if (next.r == null) { next.r = '2'; changed = true; }
+      else if (typeof next.r !== 'string') { next.r = String(next.r); changed = true; }
+      if (next.layer !== 'via') { next.layer = 'via'; changed = true; }
+      const layerIds = new Set(stack.map(l => l.id));
+      if (!next.layerFrom || !layerIds.has(next.layerFrom)) {
+        next.layerFrom = defaultFrom ? defaultFrom.id : (stack[0]?.id ?? '');
+        changed = true;
+      }
+      if (!next.layerTo || !layerIds.has(next.layerTo) || next.layerTo === next.layerFrom) {
+        const fallbackTo = defaultTo && defaultTo.id !== next.layerFrom
+          ? defaultTo.id
+          : (stack.map(l => l.id).reverse().find(id => id !== next.layerFrom) ?? '');
+        if (next.layerTo !== fallbackTo) { next.layerTo = fallbackTo; changed = true; }
+      }
+      const derived = `2*(${next.r})`;
+      if (typeof next.w !== 'string' || next.w.trim() === '' || next.w.trim() === '0') { next.w = derived; changed = true; }
+      if (typeof next.h !== 'string' || next.h.trim() === '' || next.h.trim() === '0') { next.h = derived; changed = true; }
+      if (!Array.isArray(next.cutouts)) { next.cutouts = []; changed = true; }
+      // Strip fields that don't apply to a cylinder plug. A via's Z span
+      // is fully determined by layerFrom/layerTo (zOffset would break the
+      // span semantics), rotation is a geometric no-op on a circle, and
+      // cornerRadius is rect-only. The Inspector never offers these on
+      // vias; this guards hand-edited JSON and stale saves.
+      for (const f of ['zOffset', 'rotation', 'cornerRadius']) {
+        if (next[f] != null) { delete next[f]; changed = true; }
+      }
+      return changed ? next : c;
+    });
+  }
+  // Polyline / polyshape vertex expression fields: coerce stray numerics
+  // (hand-edited JSON, older saves) to strings so every downstream
+  // consumer — solver, exporters, rename walker — can assume expression
+  // STRINGS. Covers rel (dx/dy), arc (cdx/cdy/angle), and the optional
+  // per-vertex taper width. `spline` is normalized to a real boolean.
+  migratedComponents = migratedComponents.map(c => {
+    if (c.kind !== 'polyline' && c.kind !== 'polyshape') return c;
+    let changed = false;
+    const vertices = (c.vertices || []).map(v => {
+      if (!v || typeof v !== 'object') return v;
+      const next = { ...v };
+      let vChanged = false;
+      for (const f of ['dx', 'dy', 'cdx', 'cdy', 'angle', 'width']) {
+        if (next[f] != null && typeof next[f] !== 'string') { next[f] = String(next[f]); vChanged = true; }
+      }
+      if ('spline' in next && typeof next.spline !== 'boolean') { next.spline = !!next.spline; vChanged = true; }
+      // Arc vertices must always carry all three fields so editors and
+      // exporters can read them without null guards.
+      if (next.kind === 'arc') {
+        if (next.cdx == null) { next.cdx = '0'; vChanged = true; }
+        if (next.cdy == null) { next.cdy = '0'; vChanged = true; }
+        if (next.angle == null) { next.angle = '90'; vChanged = true; }
+      }
+      if (vChanged) changed = true;
+      return vChanged ? next : v;
+    });
+    return changed ? { ...c, vertices } : c;
+  });
   // Duplicate component ids: keep the first occurrence, rename each
   // subsequent one to <id>_dup1/_dup2/…. References (snaps, operandIds,
   // consumedBy, snap vertices) are NOT rewritten — they're ambiguous

@@ -313,3 +313,70 @@ describe('Boolean rendering with multi-instance operand', () => {
     expect(html).not.toMatch(/M 9\d\d/); // No path at the bad-bug coordinates
   });
 });
+
+// ── Phase 3 interaction: polyshape with an arc vertex inside a boolean ──
+// The boolean mask path for a polyshape operand comes from
+// shapeInstanceToRing → _resolvedVerts (the solver's TESSELLATED path,
+// arcs expanded). Regression target: an arc vertex must contribute its
+// tessellated bulge to the mask path (not collapse to the 3 raw
+// vertices) and the boolean's refreshed bbox must include the bulge.
+describe('Polyshape with an arc vertex inside a boolean', () => {
+  const scene = {
+    params: {},
+    components: [
+      {
+        id: 'PS', kind: 'polyshape', layer: 'electrode', cx: 0, cy: 0,
+        w: '0', h: '0', closed: true, cutouts: [], transforms: [],
+        consumedBy: 'BOOL',
+        vertices: [
+          { kind: 'rel', dx: '20', dy: '0' },
+          // 180° arc bulging upward: center (20, 5), radius 5 → top at y=10.
+          { kind: 'arc', cdx: '0', cdy: '5', angle: '180' },
+          { kind: 'rel', dx: '-20', dy: '0' },
+        ],
+      },
+      { id: 'B', kind: 'rect', layer: 'electrode', cx: 5, cy: 3, w: 4, h: 4, cutouts: [], transforms: [], consumedBy: 'BOOL' },
+      { id: 'BOOL', kind: 'boolean', op: 'subtract', operandIds: ['PS', 'B'], layer: 'electrode', cx: 0, cy: 0, w: '0', h: '0', cutouts: [], transforms: [] },
+    ],
+    snaps: [], mirrors: [],
+  };
+
+  it('solver bbox of the boolean includes the arc bulge', () => {
+    const paramValues = resolveParams(scene.params).values;
+    const solved = resolveBooleanBboxes(
+      applyMirrors(solveLayout(scene.components, scene.snaps, paramValues), scene.mirrors),
+      paramValues,
+    );
+    const ps = solved.find(c => c.id === 'PS');
+    const bool = solved.find(c => c.id === 'BOOL');
+    // Arc top reaches y = 10 → polyshape height spans 10 (y 0..10).
+    expect(ps.h).toBeCloseTo(10, 6);
+    expect(bool.w).toBeGreaterThan(0);
+    expect(bool.h).toBeCloseTo(10, 6);
+    // Tessellated path stashed for ring consumers, arc expanded past
+    // the 4 resolved vertices.
+    expect(Array.isArray(ps._resolvedVerts)).toBe(true);
+    expect(ps._resolvedVerts.length).toBeGreaterThan(8);
+    for (const [x, y] of ps._resolvedVerts) {
+      expect(Number.isFinite(x)).toBe(true);
+      expect(Number.isFinite(y)).toBe(true);
+    }
+  });
+
+  it('mask path carries the tessellated arc (many segments, bulge apex present)', () => {
+    const { renderInterior, compById } = buildHarness(scene);
+    const html = renderToStaticMarkup(
+      React.createElement('svg', null, renderInterior(compById.BOOL, '#daa520', 'fill', 'BOOL', undefined, null))
+    );
+    expect(html).toContain('<mask');
+    const dAttrs = [...html.matchAll(/d="([^"]+)"/g)].map(m => m[1]);
+    expect(dAttrs.length).toBeGreaterThan(0);
+    // The polyshape's path: more line segments than the 3 raw vertices
+    // (the 180° arc tessellates into ≥ 8 segments)…
+    const psPath = dAttrs.find(d => (d.match(/L/g) || []).length >= 8);
+    expect(psPath).toBeTruthy();
+    // …and the arc apex (y = 10 in world = -10 in y-down SVG, or 10 if
+    // the harness keeps y-up world coords) appears as a path ordinate.
+    expect(/(^|[\sL])-?10(\.0+)?([\s,]|$)/.test(psPath.replace(/[ML]/g, ' L'))).toBe(true);
+  });
+});

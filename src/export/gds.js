@@ -18,9 +18,29 @@
 import { evalExpr } from '../scene/params.js';
 import { solveLayout, applyMirrors } from '../scene/solver.js';
 import { expandTransforms } from '../scene/transforms.js';
-import { resolvePolylineVertices } from '../geometry/polyline.js';
+import { tessellatePolylinePath, taperedBandQuads, polylineIsTapered } from '../geometry/polyline.js';
 import { shapeInstanceToRing } from '../geometry/rings.js';
 import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/racetrack.js';
+
+// Via GDS layer mapping (D4): vias land on layers 200+. Each DISTINCT
+// (layerFrom → layerTo) pair — a "via type" in fab terms — gets its own
+// GDS layer, assigned in component order: the first via type seen maps
+// to 200, the next new pair to 201, and so on. Exported so the export
+// summary dialog (handleExportGDS) and the gdsfactory exporter print /
+// reuse the SAME mapping as the binary stream.
+export function viaGdsLayerMap(components) {
+  const out = [];
+  const seen = new Map(); // 'from->to' -> entry
+  for (const c of components || []) {
+    if (c.kind !== 'via') continue;
+    const key = `${c.layerFrom || '?'}->${c.layerTo || '?'}`;
+    if (seen.has(key)) continue;
+    const entry = { key, layer: 200 + seen.size, layerFrom: c.layerFrom || '?', layerTo: c.layerTo || '?' };
+    seen.set(key, entry);
+    out.push(entry);
+  }
+  return out;
+}
 
 export function generateGDS(scene, paramValues) {
   const { components, mirrors, snaps, stack } = scene;
@@ -134,7 +154,13 @@ export function generateGDS(scene, paramValues) {
   const conductorLayers = (stack || []).filter(l => l.role === 'conductor');
   const condIdToGdsLayer = {};
   conductorLayers.forEach((l, i) => { condIdToGdsLayer[l.id] = 10 + i; });
+  // Vias: one GDS layer per distinct (layerFrom → layerTo) pair, 200+.
+  const viaLayers = viaGdsLayerMap(components);
+  const viaKeyToGdsLayer = Object.fromEntries(viaLayers.map(v => [v.key, v.layer]));
   const gdsLayerForComponent = (c) => {
+    if (c.kind === 'via') {
+      return viaKeyToGdsLayer[`${c.layerFrom || '?'}->${c.layerTo || '?'}`] ?? 200;
+    }
     if (c.layer === 'waveguide') return 1;
     if (c.layer === 'port') return 100;
     if (c.layer === 'electrode') {
@@ -188,8 +214,39 @@ export function generateGDS(scene, paramValues) {
       // expects `_resolvedVerts` on the instance, which expandTransforms
       // doesn't populate). Apply the instance's rotation about its center
       // so repeat / mirror / rotate clones land correctly.
+      // Tapered polyline: emit the BAND geometry as one BOUNDARY per
+      // segment quad (same layer, DATATYPE 0). The quads come from
+      // taperedBandQuads — the same per-segment butt-join geometry the
+      // canvas renders and the HFSS export unites — so GDS, canvas and
+      // HFSS all describe the SAME band. Quads are computed at the base
+      // pose and remapped into each instance's frame (translate / scale /
+      // rotate), mirroring the polyshape path below.
+      if (c.kind === 'polyline' && polylineIsTapered(c)) {
+        const { quads } = taperedBandQuads(c, byIdSolved, paramValues);
+        const rad0 = (inst.rotation || 0) * Math.PI / 180;
+        const ca0 = Math.cos(rad0), sa0 = Math.sin(rad0);
+        const sx0 = inst.scaleX ?? 1, sy0 = inst.scaleY ?? 1;
+        for (const q of quads) {
+          const pts = q.map(([vx, vy]) => {
+            const lx = (vx - c.cx) * sx0;
+            const ly = (vy - c.cy) * sy0;
+            return [inst.cx + lx * ca0 - ly * sa0, inst.cy + lx * sa0 + ly * ca0];
+          });
+          writeNoData(BOUNDARY);
+          writeInt2(LAYER, [layer]);
+          writeInt2(DATATYPE, [0]);
+          const xys = [];
+          for (const [px, py] of pts) { xys.push(toNm(px), toNm(py)); }
+          xys.push(toNm(pts[0][0]), toNm(pts[0][1]));
+          writeInt4(XY, xys);
+          writeNoData(ENDEL);
+        }
+        continue;
+      }
       if (c.kind === 'polyshape') {
-        const verts = resolvePolylineVertices(c, byIdSolved, paramValues);
+        // Tessellated perimeter (arcs expanded, spline runs interpolated)
+        // so curved edges land in the GDS exactly as drawn.
+        const verts = tessellatePolylinePath(c, byIdSolved, paramValues);
         if (verts.length >= 3) {
           // Translate to instance frame, then apply rotation if any.
           const dx = inst.cx - c.cx, dy = inst.cy - c.cy;

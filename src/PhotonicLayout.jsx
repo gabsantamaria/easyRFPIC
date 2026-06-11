@@ -5,10 +5,11 @@ import { tokenizeIdents, tokenizeComponentExprs, resolveParams, evalExpr, RESERV
 import { renameIdentInScene } from './scene/rename-ident.js';
 import { ANCHORS, parseAnchor, anchorLocal, anchorWorld } from './scene/anchors.js';
 import { rectInstanceToRing, shapeInstanceToRing } from './geometry/rings.js';
+import { resolvePolylineVertices, polylineIsTapered, synthArc90 } from './geometry/polyline.js';
 import { expandTransforms } from './scene/transforms.js';
 import { detectPortIntegrationLine } from './scene/lumpedPort.js';
 import { solveLayout, applyMirrors, resolveBooleanBboxes, validateSnapGraph } from './scene/solver.js';
-import { generateGDS } from './export/gds.js';
+import { generateGDS, viaGdsLayerMap } from './export/gds.js';
 import { generatePyAEDT } from './export/pyaedt.js';
 import { generateHfssNative } from './export/hfss-native.js';
 import { generateGdsfactory } from './export/gdsfactory.js';
@@ -1372,6 +1373,7 @@ export default function App() {
       : shapeKind === 'polygon' ? 'poly'
       : shapeKind === 'polyline' ? 'trace'
       : shapeKind === 'polyshape' ? 'pshape'
+      : shapeKind === 'via' ? 'via'
       : layerPrefix;
     const idPrefix = shapeKind === 'rect' ? layerPrefix : shapePrefix;
     const baseId = `${idPrefix}${scene.components.filter(c => c.layer === layerKind).length + 1}`;
@@ -1618,6 +1620,24 @@ export default function App() {
           cutouts: [], label: id,
           ...(conductorLayerId ? { conductorLayerId } : {}),
         };
+      } else if (shapeKind === 'via') {
+        // Via (D4): click-to-place vertical interconnect spanning two
+        // stack layers. Plan-view circle (r param, default 2 µm) — the
+        // Z span comes from layerFrom / layerTo at export time, fully
+        // parametric through the stack thickness expressions. AABB w/h
+        // derive from the radius exactly like circles, so snaps /
+        // anchors / transforms work uniformly.
+        const rParam = `${id}_r`;
+        newParams[rParam] = { expr: '2', unit: 'µm', desc: `${id} via radius` };
+        newComp = {
+          id, kind: 'via', layer: 'via',
+          cx, cy,
+          r: rParam,
+          layerFrom: spec.layerFrom || null,
+          layerTo: spec.layerTo || null,
+          w: `2*${rParam}`, h: `2*${rParam}`,
+          cutouts: [], label: id,
+        };
       } else if (shapeKind === 'polyline') {
         // Polyline trace. The drawing UX in Canvas hands us a vertex
         // array with world coordinates and optional snap bindings per
@@ -1635,6 +1655,20 @@ export default function App() {
           : 3;
         newParams[widthParam] = { expr: String(wValForParam), unit: 'µm', desc: `${id} trace width` };
         const polyVerts = (spec.vertices || []).map((v, i) => {
+          if (v.arc && i > 0) {
+            // Arc-mode click: the draw UX synthesized a 90° (or −90°)
+            // circular arc — center offset (cdx, cdy) from the PREVIOUS
+            // vertex plus the signed sweep. Bake cdx/cdy as numeric
+            // expressions and keep the sweep as the '90'/'-90' literal;
+            // the inspector exposes all three as expression fields for
+            // later parametrization. Maps 1:1 to an HFSS AngularArc.
+            return {
+              kind: 'arc',
+              cdx: Number(v.arc.cdx).toFixed(3),
+              cdy: Number(v.arc.cdy).toFixed(3),
+              angle: String(v.arc.angle),
+            };
+          }
           if (v.snap) {
             // Preserve instanceIdx when the user clicked on a non-base
             // transform replica or boolean-operand cell. The solver +
@@ -1692,6 +1726,17 @@ export default function App() {
         // per-segment params so the user can later tune a single edge
         // without breaking the rest of the polygon.
         const polyVerts = (spec.vertices || []).map((v, i) => {
+          if (v.arc && i > 0) {
+            // Arc-mode edge: same encoding as the polyline branch —
+            // numeric center offset + signed 90° sweep, 1:1 with an
+            // HFSS AngularArc segment on the closed polygon path.
+            return {
+              kind: 'arc',
+              cdx: Number(v.arc.cdx).toFixed(3),
+              cdy: Number(v.arc.cdy).toFixed(3),
+              angle: String(v.arc.angle),
+            };
+          }
           if (v.snap) {
             return {
               kind: 'snap',
@@ -4283,6 +4328,7 @@ export default function App() {
     } else {
       // Show a brief confirmation in the export preview modal — but with a
       // text summary instead of the binary content (which is unprintable).
+      const viaLayerEntries = viaGdsLayerMap(scene.components || []);
       const summary = [
         `GDS-II file: ${gdsName} (${bytes.length} bytes)`,
         '',
@@ -4290,6 +4336,9 @@ export default function App() {
         '  1   = waveguide',
         ...Array.from((scene.stack || []).filter(l => l.role === 'conductor')).map((l, i) => `  ${10 + i}  = conductor "${l.name}"`),
         '  100 = port',
+        // Vias: one GDS layer per distinct (layerFrom → layerTo) pair,
+        // assigned 200, 201, … in the order via types appear in the scene.
+        ...viaLayerEntries.map(v => `  ${v.layer} = via "${v.layerFrom} → ${v.layerTo}" (circle boundary)`),
         '',
         'Coordinate units: 1 µm = 1000 nm (database unit = 1 nm).',
         '',
@@ -4435,6 +4484,27 @@ export default function App() {
               };
               const baseBtn = 'flex items-center justify-center w-7 h-7 rounded';
               const activeRing = ' ring-2 ring-green-400';
+              // Via tool (D4): click-to-place vertical interconnect. Only
+              // meaningful when the stack has at least two non-substrate
+              // layers to span. Defaults: layerFrom = waveguide layer (or
+              // first conductor), layerTo = top conductor.
+              const nonSubstrateLayers = (scene.stack || []).filter(l => l.role !== 'substrate');
+              const viaEligible = nonSubstrateLayers.length >= 2;
+              const viaDefaults = () => {
+                const wgL = (scene.stack || []).find(l => l.role === 'waveguide');
+                const from = wgL || conductors[0] || nonSubstrateLayers[0] || null;
+                const to = [...conductors].reverse().find(l => !from || l.id !== from.id)
+                  || [...nonSubstrateLayers].reverse().find(l => !from || l.id !== from.id)
+                  || null;
+                return { layerFrom: from?.id || null, layerTo: to?.id || null };
+              };
+              const isViaActive = !!(addMode && addMode.shape === 'via');
+              const toggleVia = () => {
+                if (isViaActive) { setAddMode(null); return; }
+                setAddMode({ layer: 'via', shape: 'via', ...viaDefaults() });
+                setSnapMode('idle');
+                setRulerMode(false);
+              };
               return (
                 <>
                   <select
@@ -4484,7 +4554,7 @@ export default function App() {
                     onClick={() => toggleShape('polyline')}
                     className={baseBtn + (isShapeActive('polyline') ? activeRing : '')}
                     style={{ background: '#1e293b', color: '#e2e8f0' }}
-                    title="Polyline trace — click to place each vertex; double-click or Enter to finish, Esc to cancel. Snap halos appear on other shapes' anchors; cursor aligns with previous vertices on H/V axes (purple guides). The trace's width is a parameter and the Z extrusion is the bound conductor's thickness — HFSS sees it as CreatePolyline + sweep, fully parametric."
+                    title="Polyline trace — click to place each vertex; double-click or Enter to finish, Esc to cancel. Press 'a' while drawing to toggle ARC mode (next click places a 90° arc — HFSS AngularArc, fully parametric). Snap halos appear on other shapes' anchors; cursor aligns with previous vertices on H/V axes (purple guides). The trace's width is a parameter and the Z extrusion is the bound conductor's thickness — HFSS sees it as CreatePolyline + sweep, fully parametric. Per-vertex taper widths, arcs, and spline runs are editable in the inspector."
                   >
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <polyline points="3,18 9,8 14,14 21,4" />
@@ -4539,6 +4609,21 @@ export default function App() {
                       title="Number of sides (3–64)"
                     />
                   </div>
+                  <button
+                    key="add-via"
+                    onClick={toggleVia}
+                    disabled={!viaEligible}
+                    className={baseBtn + (isViaActive ? activeRing : '') + (viaEligible ? '' : ' opacity-40 cursor-not-allowed')}
+                    style={{ background: '#1e293b', color: '#e2e8f0' }}
+                    title={viaEligible
+                      ? 'Add via — click on canvas to place a vertical interconnect (default r = 2 µm). Spans layerFrom → layerTo through the stack; both are editable in the inspector. HFSS sees a parametric CreateCylinder whose height is the live stack-thickness expression.'
+                      : 'Via tool needs at least two non-substrate layers in the stack (something to connect).'}
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <circle cx="12" cy="12" r="9" />
+                      <circle cx="12" cy="12" r="2.5" fill="currentColor" stroke="none" />
+                    </svg>
+                  </button>
                 </>
               );
             })()}
@@ -5454,6 +5539,12 @@ export default function App() {
                       <span className="px-1 py-0 rounded text-[9px] font-mono flex-shrink-0" style={{ background: layerSwatches[c.layer]?.bg, color: layerSwatches[c.layer]?.fg }}>
                         {c.layer}
                       </span>
+                      {c.kind === 'polyline' && polylineIsTapered(c) && (
+                        <span
+                          className="text-[8px] uppercase font-bold tracking-wider flex-shrink-0 text-amber-400"
+                          title="Tapered trace: one or more vertices carry a per-vertex width — rendered/exported as per-segment quads"
+                        >taper</span>
+                      )}
                       <span className="flex-1" />
                       {isBoolean ? (
                         <button onClick={(e) => { e.stopPropagation(); deleteBoolean(c.id); }} className="text-slate-500 hover:text-red-400 flex-shrink-0" title="Delete this derived component (operands are released)">
@@ -6462,11 +6553,94 @@ export default function App() {
                       // highlighting, auto-create on commit, etc.).
                       const vertSpecs = selected.vertices || [];
                       const isPolyshape = shapeKind === 'polyshape';
+                      const isTapered = !isPolyshape && polylineIsTapered(selected);
+                      // Solved vertex positions, computed at CLICK time for
+                      // the line↔arc converters (so the synthesized arc /
+                      // recovered dx,dy reflect the current solve, including
+                      // snap-bound vertices).
+                      const resolvedVertsNow = () => {
+                        const solvedNow = applyMirrors(solveLayout(scene.components, scene.snaps, paramValues), scene.mirrors);
+                        const byIdS = Object.fromEntries(solvedNow.map(cc => [cc.id, cc]));
+                        const sel = byIdS[selected.id] || selected;
+                        return { verts: resolvePolylineVertices(sel, byIdS, paramValues), sel };
+                      };
+                      const setVertices = (newVerts) => updateComp(selected.id, { vertices: newVerts });
+                      const inputCls = "bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-white outline-none focus:border-cyan-400";
+                      // Expression input bound to one field of one vertex.
+                      const vertExprInput = (idx, v, field, placeholder, unitForCreate = 'µm') => (
+                        <DeferredTextInput
+                          autoGrow
+                          value={String(v[field] ?? '0')}
+                          suggestions={paramNames}
+                          onCommit={(val) => {
+                            const prevEval = evalExpr(v[field] ?? '0', paramValues);
+                            const prevDefault = Number.isFinite(prevEval) ? String(prevEval) : '0';
+                            setVertices(vertSpecs.map((vv, i) => i === idx ? { ...vv, [field]: val } : vv));
+                            commitExpr(val, prevDefault, unitForCreate, `${selected.id} v${idx}.${field}`);
+                          }}
+                          className={inputCls}
+                          placeholder={placeholder}
+                        />
+                      );
+                      // Per-vertex taper width (polyline only). Empty =
+                      // unset (vertex uses the base trace width). Disabled
+                      // on arc vertices: taper-on-arc isn't supported in v1
+                      // (HFSS falls back to constant base width).
+                      const vertWidthInput = (idx, v) => {
+                        const isArcRow = v.kind === 'arc';
+                        return (
+                          <div className="grid grid-cols-[1.4rem_1fr] gap-1 items-center" title={isArcRow
+                            ? 'Taper width on ARC segments is not supported in v1 — the arc keeps the base trace width (HFSS export falls back to constant width on curved segments).'
+                            : 'Optional taper width at this vertex (µm expression). Empty = base trace width. Setting ANY vertex width makes the whole trace TAPERED: per-segment quads with butt joins, matching the HFSS per-segment sheet export.'}>
+                            <span className="text-[9px] font-mono text-slate-500 text-right">w</span>
+                            {isArcRow ? (
+                              <input
+                                disabled
+                                value=""
+                                placeholder="n/a on arc"
+                                className={inputCls + ' opacity-40 cursor-not-allowed'}
+                              />
+                            ) : (
+                              <DeferredTextInput
+                                autoGrow
+                                value={String(v.width ?? '')}
+                                suggestions={paramNames}
+                                onCommit={(val) => {
+                                  const trimmed = String(val).trim();
+                                  setVertices(vertSpecs.map((vv, i) => {
+                                    if (i !== idx) return vv;
+                                    const next = { ...vv };
+                                    if (trimmed === '') delete next.width;
+                                    else next.width = trimmed;
+                                    return next;
+                                  }));
+                                  if (trimmed !== '') commitExpr(trimmed, '0', 'µm', `${selected.id} v${idx}.width`);
+                                }}
+                                className={inputCls}
+                                placeholder="taper w (empty = base)"
+                              />
+                            )}
+                          </div>
+                        );
+                      };
+                      const deleteVertBtn = (idx) => (vertSpecs.length > 2 && idx > 0) ? (
+                        <button
+                          title="Delete this vertex"
+                          className="text-[9px] px-1 py-0.5 rounded border border-slate-600 hover:border-red-500 hover:text-red-300 text-slate-400"
+                          onClick={() => setVertices(vertSpecs.filter((_, i) => i !== idx))}
+                        >×</button>
+                      ) : null;
                       return (
                         <div className="space-y-2">
                           {!isPolyshape && (
-                            <div className="grid grid-cols-2 gap-2">
+                            <div className="grid grid-cols-2 gap-2 items-end">
                               {fieldRow('width', 'trace width', selected.width ?? '5', (v) => updateComp(selected.id, { width: v }))}
+                              {isTapered && (
+                                <span
+                                  className="justify-self-start text-[9px] px-1.5 py-0.5 rounded font-mono uppercase tracking-wider bg-amber-900/40 border border-amber-600 text-amber-300"
+                                  title="One or more vertices carry a taper width — the trace renders and exports as per-segment quads (butt joins). Clear every per-vertex w to return to a constant-width swept trace."
+                                >tapered</span>
+                              )}
                             </div>
                           )}
                           {isPolyshape && (
@@ -6475,70 +6649,103 @@ export default function App() {
                           <div className="border border-slate-700 rounded p-2" style={{ background: 'rgba(15,23,42,0.5)' }}>
                             <div className="flex items-center justify-between mb-1">
                               <span className="text-[10px] uppercase tracking-wider text-slate-400">Vertices ({vertSpecs.length})</span>
-                              <span className="text-[9px] text-slate-500">v0 sits at (cx, cy); subsequent vertices step relative</span>
+                              <span className="text-[9px] text-slate-500">v0 = (cx, cy) · S = spline · ⌒ = arc</span>
                             </div>
                             <div className="space-y-1 max-h-64 overflow-y-auto">
                               {vertSpecs.map((v, idx) => (
-                                <div key={idx} className="grid grid-cols-[1.4rem_1fr_1fr_auto] gap-1 items-center text-[10px]">
-                                  <span className="font-mono text-slate-400">v{idx}</span>
-                                  {v.kind === 'snap' ? (
-                                    <>
-                                      <span className="col-span-2 px-1 py-0.5 rounded text-[9px] font-mono text-amber-300 bg-slate-800 border border-amber-700">
-                                        snap → {v.compId}.{v.anchor}
-                                      </span>
-                                      <button
-                                        title="Replace this snap binding with a free (rel) vertex at the current solved position"
-                                        className="text-[9px] px-1 py-0.5 rounded border border-slate-600 hover:border-cyan-500 hover:text-cyan-300 text-slate-400"
-                                        onClick={() => {
-                                          const newVerts = vertSpecs.map((vv, i) => i === idx
-                                            ? { kind: 'rel', dx: '0', dy: '0' }
-                                            : vv);
-                                          updateComp(selected.id, { vertices: newVerts });
-                                        }}
-                                      >×</button>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <DeferredTextInput
-                                        autoGrow
-                                        value={String(v.dx ?? '0')}
-                                        suggestions={paramNames}
-                                        onCommit={(val) => {
-                                          const prevEval = evalExpr(v.dx ?? '0', paramValues);
-                                          const prevDefault = Number.isFinite(prevEval) ? String(prevEval) : '0';
-                                          const newVerts = vertSpecs.map((vv, i) => i === idx ? { ...vv, dx: val } : vv);
-                                          updateComp(selected.id, { vertices: newVerts });
-                                          commitExpr(val, prevDefault, 'µm', `${selected.id} v${idx}.dx`);
-                                        }}
-                                        className="bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-white outline-none focus:border-cyan-400"
-                                        placeholder="dx"
-                                      />
-                                      <DeferredTextInput
-                                        autoGrow
-                                        value={String(v.dy ?? '0')}
-                                        suggestions={paramNames}
-                                        onCommit={(val) => {
-                                          const prevEval = evalExpr(v.dy ?? '0', paramValues);
-                                          const prevDefault = Number.isFinite(prevEval) ? String(prevEval) : '0';
-                                          const newVerts = vertSpecs.map((vv, i) => i === idx ? { ...vv, dy: val } : vv);
-                                          updateComp(selected.id, { vertices: newVerts });
-                                          commitExpr(val, prevDefault, 'µm', `${selected.id} v${idx}.dy`);
-                                        }}
-                                        className="bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-white outline-none focus:border-cyan-400"
-                                        placeholder="dy"
-                                      />
-                                      {vertSpecs.length > 2 && idx > 0 && (
+                                <div key={idx} className="space-y-0.5 pb-1 border-b border-slate-800/60 last:border-b-0">
+                                  <div className="grid grid-cols-[1.4rem_1fr_1fr_auto] gap-1 items-center text-[10px]">
+                                    <span className="font-mono text-slate-400">{v.kind === 'arc' ? `v${idx}⌒` : `v${idx}`}</span>
+                                    {v.kind === 'snap' ? (
+                                      <>
+                                        <span className="col-span-2 px-1 py-0.5 rounded text-[9px] font-mono text-amber-300 bg-slate-800 border border-amber-700">
+                                          snap → {v.compId}.{v.anchor}
+                                        </span>
                                         <button
-                                          title="Delete this vertex"
-                                          className="text-[9px] px-1 py-0.5 rounded border border-slate-600 hover:border-red-500 hover:text-red-300 text-slate-400"
+                                          title="Replace this snap binding with a free (rel) vertex at the current solved position"
+                                          className="text-[9px] px-1 py-0.5 rounded border border-slate-600 hover:border-cyan-500 hover:text-cyan-300 text-slate-400"
                                           onClick={() => {
-                                            const newVerts = vertSpecs.filter((_, i) => i !== idx);
-                                            updateComp(selected.id, { vertices: newVerts });
+                                            setVertices(vertSpecs.map((vv, i) => i === idx
+                                              ? { kind: 'rel', dx: '0', dy: '0', ...(vv.width != null ? { width: vv.width } : {}) }
+                                              : vv));
                                           }}
                                         >×</button>
-                                      )}
-                                    </>
+                                      </>
+                                    ) : v.kind === 'arc' ? (
+                                      <>
+                                        {vertExprInput(idx, v, 'cdx', 'cdx (center)')}
+                                        {vertExprInput(idx, v, 'cdy', 'cdy (center)')}
+                                        <div className="flex gap-0.5">
+                                          <button
+                                            title="Convert this arc back to a straight segment — the endpoint is kept as a rel dx/dy step from the previous vertex"
+                                            className="text-[9px] px-1 py-0.5 rounded border border-slate-600 hover:border-cyan-500 hover:text-cyan-300 text-slate-400 font-mono"
+                                            onClick={() => {
+                                              const { verts, sel } = resolvedVertsNow();
+                                              const prev = idx === 0 ? [sel.cx, sel.cy] : verts[idx - 1];
+                                              const cur = verts[idx];
+                                              if (!prev || !cur || !Number.isFinite(cur[0]) || !Number.isFinite(prev[0])) return;
+                                              setVertices(vertSpecs.map((vv, i) => i === idx
+                                                ? { kind: 'rel', dx: (cur[0] - prev[0]).toFixed(3), dy: (cur[1] - prev[1]).toFixed(3), ...(vv.width != null ? { width: vv.width } : {}) }
+                                                : vv));
+                                            }}
+                                          >—</button>
+                                          {deleteVertBtn(idx)}
+                                        </div>
+                                      </>
+                                    ) : (
+                                      <>
+                                        {vertExprInput(idx, v, 'dx', 'dx')}
+                                        {vertExprInput(idx, v, 'dy', 'dy')}
+                                        <div className="flex gap-0.5 items-center">
+                                          {idx > 0 && (
+                                            <label
+                                              className="text-[9px] font-mono text-slate-400 inline-flex items-center gap-0.5 cursor-pointer px-0.5"
+                                              title="Spline-flag this vertex: consecutive flagged vertices (plus the vertex before the run) become ONE HFSS Spline segment (NURBS through the points). Canvas/GDS preview the run with a Catmull-Rom approximation."
+                                            >
+                                              <input
+                                                type="checkbox"
+                                                checked={!!v.spline}
+                                                onChange={(e) => setVertices(vertSpecs.map((vv, i) => {
+                                                  if (i !== idx) return vv;
+                                                  const next = { ...vv };
+                                                  if (e.target.checked) next.spline = true;
+                                                  else delete next.spline;
+                                                  return next;
+                                                }))}
+                                              />S
+                                            </label>
+                                          )}
+                                          {idx > 0 && (
+                                            <button
+                                              title="Convert this straight segment to a 90° circular arc through the same endpoint (center synthesized on the perpendicular bisector; edit cdx/cdy/angle afterwards to reshape)"
+                                              className="text-[9px] px-1 py-0.5 rounded border border-slate-600 hover:border-cyan-500 hover:text-cyan-300 text-slate-400 font-mono"
+                                              onClick={() => {
+                                                const { verts } = resolvedVertsNow();
+                                                const S = verts[idx - 1], E = verts[idx];
+                                                if (!S || !E || !Number.isFinite(S[0]) || !Number.isFinite(E[0])) return;
+                                                const prevDir = idx >= 2 && verts[idx - 2]
+                                                  ? { x: S[0] - verts[idx - 2][0], y: S[1] - verts[idx - 2][1] }
+                                                  : null;
+                                                const arc = synthArc90({ x: S[0], y: S[1] }, { x: E[0], y: E[1] }, prevDir);
+                                                if (!arc) return;
+                                                setVertices(vertSpecs.map((vv, i) => i === idx
+                                                  ? { kind: 'arc', cdx: arc.cdx.toFixed(3), cdy: arc.cdy.toFixed(3), angle: String(arc.angle) }
+                                                  : vv));
+                                              }}
+                                            >⌒</button>
+                                          )}
+                                          {deleteVertBtn(idx)}
+                                        </div>
+                                      </>
+                                    )}
+                                  </div>
+                                  {v.kind === 'arc' && (
+                                    <div className="grid grid-cols-[1.4rem_1fr] gap-1 items-center" title="Sweep angle in degrees, CCW positive — the HFSS export emits '(expr)*1deg' so auto-created angle params are UNITLESS.">
+                                      <span className="text-[9px] font-mono text-slate-500 text-right">∠</span>
+                                      {vertExprInput(idx, v, 'angle', 'angle (deg CCW)', '')}
+                                    </div>
                                   )}
+                                  {!isPolyshape && vertWidthInput(idx, v)}
                                 </div>
                               ))}
                             </div>
@@ -6576,11 +6783,54 @@ export default function App() {
                         </div>
                       );
                     }
+                    if (shapeKind === 'via') {
+                      // Via (D4): radius expression + the two stack layers
+                      // the cylinder spans. layerFrom must differ from
+                      // layerTo — matching options are disabled in each
+                      // select so an equal pair can't be picked.
+                      const stackLayers = scene.stack || [];
+                      const layerSelect = (key, label, value, otherValue) => (
+                        <div>
+                          <label className="text-[10px] uppercase tracking-wider text-slate-500">{label}</label>
+                          <select
+                            value={value || ''}
+                            onChange={(e) => updateComp(selected.id, { [key]: e.target.value })}
+                            className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-slate-100 outline-none focus:border-cyan-400"
+                            title="Stack layer this via terminates on. HFSS uses the layer's parametric Z expressions, so thickness sweeps move the via with the stack."
+                          >
+                            {!value && <option value="">— pick layer —</option>}
+                            {stackLayers.map(l => (
+                              <option key={l.id} value={l.id} disabled={l.id === otherValue}>
+                                {l.id} ({l.name || l.role})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      );
+                      return (
+                        <>
+                          <div className="grid grid-cols-2 gap-2">
+                            {fieldRow('r', 'r (via radius)', selected.r ?? '2', (v) => updateComp(selected.id, { r: v }))}
+                          </div>
+                          <div className="grid grid-cols-2 gap-2 mt-2">
+                            {layerSelect('layerFrom', 'layer from (bottom)', selected.layerFrom, selected.layerTo)}
+                            {layerSelect('layerTo', 'layer to (top)', selected.layerTo, selected.layerFrom)}
+                          </div>
+                          {selected.layerFrom && selected.layerFrom === selected.layerTo && (
+                            <p className="text-[9px] text-red-400 mt-1 leading-snug">
+                              layerFrom and layerTo must differ — a via has to span two
+                              distinct stack layers. Pick a different layer on one side.
+                            </p>
+                          )}
+                        </>
+                      );
+                    }
                     // Default: rectangle.
                     return (
                       <div className="grid grid-cols-2 gap-2">
                         {fieldRow('w', 'w', selected.w, (v) => updateComp(selected.id, { w: v }))}
                         {fieldRow('h', 'h', selected.h, (v) => updateComp(selected.id, { h: v }))}
+                        {fieldRow('cornerRadius', 'corner radius', selected.cornerRadius ?? '0', (v) => updateComp(selected.id, { cornerRadius: v }))}
                       </div>
                     );
                   })()

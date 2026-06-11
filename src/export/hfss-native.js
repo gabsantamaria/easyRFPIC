@@ -20,6 +20,10 @@ import { detectPortIntegrationLine } from '../scene/lumpedPort.js';
 import { shapeInstanceToRing } from '../geometry/rings.js';
 import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/racetrack.js';
 import { instanceChainOffsetExpr, chainOwnerForInstance } from '../scene/instance-positions.js';
+import {
+  resolvePolylineVertices, polylineIsTapered,
+  tessellateArcFrom, catmullRomTessellate,
+} from '../geometry/polyline.js';
 
 // ----------------------------------------------------------------------
 // PARAMETRIC POSITION EXPRESSIONS (for HFSS export)
@@ -490,6 +494,16 @@ export function generateHfssNative(scene, paramValues, options = {}) {
     reportSeen.add(k);
     reportFrozen.push({ id, reason });
   };
+  // NOTES: caveats that are neither fully-parametric nor frozen — e.g.
+  // the canvas preview approximating an HFSS-native curve. Rendered as a
+  // third section in the safety report.
+  const reportNotes = [];
+  const noteCaveat = (id, text) => {
+    const k = `N:${id}:${text}`;
+    if (reportSeen.has(k)) return;
+    reportSeen.add(k);
+    reportNotes.push({ id, text });
+  };
 
   // ── Mirror-target parametric reflection ─────────────────────────────
   // applyMirrors (solver.js) overwrites each locked mirror target with
@@ -514,7 +528,10 @@ export function generateHfssNative(scene, paramValues, options = {}) {
       }
     }
   }
-  const MIRROR_SYMMETRIC_KINDS = new Set(['rect', 'circle', 'ellipse']);
+  // Vias are plan-view circles, hence reflection-symmetric about their
+  // own center axes like circles — the mirror copy can ride the source's
+  // parametric chain.
+  const MIRROR_SYMMETRIC_KINDS = new Set(['rect', 'circle', 'ellipse', 'via']);
   const mirrorReflectedPos = (c) => {
     const info = mirrorInfoByTarget.get(c.id);
     if (!info) return null;
@@ -653,6 +670,21 @@ export function generateHfssNative(scene, paramValues, options = {}) {
     const e = componentRotationExpr(c);
     if (!e) return null;
     return hfssAngleDegExpr(spaceHyphens(ascii(resolveSynthetics(e))));
+  };
+  // ── Rect corner fillets (D3) ────────────────────────────────────────
+  // A rect with a positive cornerRadius expression emits as a covered +
+  // closed CreatePolyline (4 Line + 4 AngularArc segments) instead of
+  // the box / rectangle path, with every coordinate parametric. Returns
+  // { expr, value } when active, null for sharp rects. The export-time
+  // numeric gate (value > 0) mirrors the canvas / rings behavior: an
+  // expression that currently evaluates <= 0 renders sharp everywhere.
+  const cornerRadiusInfo = (c) => {
+    if (!c || (c.kind || 'rect') !== 'rect' || c.cornerRadius == null) return null;
+    const s = String(c.cornerRadius).trim();
+    if (s === '' || s === '0') return null;
+    const v = evalExpr(c.cornerRadius, paramValues);
+    if (!Number.isFinite(v) || v <= 0) return null;
+    return { expr: s, value: v };
   };
 
   // Format a value for SetVariableValue. For bare numbers attach the unit; otherwise leave as expression.
@@ -1302,6 +1334,94 @@ except:
     const hStr = h.toFixed(4);
     const id = c.id.replace(/[^A-Za-z0-9_]/g, '_');
 
+    // ── VIA (D4): parametric CreateCylinder spanning two stack layers ──
+    // XCenter / YCenter ride the snap-chain expressions (per-shape
+    // set_var, the native-primitive idiom), Radius is the live r
+    // expression, and the Z span is built ENTIRELY from the layer
+    // stack's parametric zBottom / zTop expressions — so HFSS-side
+    // sweeps of any layer thickness stretch the via with the stack.
+    if (shapeKind === 'via') {
+      const zFrom = c.layerFrom ? layerZ[c.layerFrom] : null;
+      const zTo = c.layerTo ? layerZ[c.layerTo] : null;
+      if (!zFrom || !zTo || c.layerFrom === c.layerTo) {
+        code += `# Skipped via ${c.id}: layerFrom="${c.layerFrom || '(unset)'}" / layerTo="${c.layerTo || '(unset)'}" — both must resolve to DISTINCT stack layers. Fix the binding in the Inspector and re-export.\n`;
+        noteFrozen(c.id, 'via skipped (layerFrom/layerTo unresolved or identical)');
+        continue;
+      }
+      // ZStart = bottom of layerFrom; Height = top of layerTo minus that
+      // bottom. Both live expressions through the stack thickness vars.
+      // NOTE: per-component zOffset is intentionally NOT applied to vias —
+      // a via's Z span is fully determined by its layerFrom/layerTo
+      // bindings (shifting only the start would break the span semantics).
+      // The Inspector never offers zOffset on vias and normalizeScene
+      // strips it from via components.
+      const zStartExpr = zFrom.zBottomExpr;
+      const heightExpr = `(${zTo.zTopExpr}) - (${zFrom.zBottomExpr})`;
+      const heightNum = (zTo.zBottom + zTo.thickness) - zFrom.zBottom;
+      if (!(heightNum > 0)) {
+        code += `# WARNING: via ${c.id} has non-positive height at export values (${heightNum.toFixed(4)} um) — layerTo "${c.layerTo}" tops out below layerFrom "${c.layerFrom}"'s bottom. HFSS will likely reject the cylinder; swap the layers in the Inspector.\n`;
+      }
+      // Material: the target conductor's metal when layerTo is a
+      // conductor layer; gold otherwise (sensible default for a plug).
+      const toLayer = (stack || []).find(l => l.id === c.layerTo);
+      const viaMaterial = (toLayer && toLayer.role === 'conductor' && toLayer.material) ? toLayer.material : 'gold';
+      // Parametric center via per-shape HFSS variables (the native-
+      // primitive idiom). Mirror targets get the parametric reflection
+      // of their source chain (vias are reflection-symmetric).
+      const isMirrorTgtVia = mirrorTargetIds.has(c.id);
+      const mppVia = isMirrorTgtVia ? mirrorReflectedPos(c) : null;
+      const ppVia = parametricPos[c.id];
+      let cxValExprVia, cyValExprVia;
+      if (!isMirrorTgtVia && ppVia) {
+        cxValExprVia = spaceHyphens(exprWithUm(ppVia.cxExpr));
+        cyValExprVia = spaceHyphens(exprWithUm(ppVia.cyExpr));
+        notePara(c.id, 'pos, radius, Z span (layer-stack thickness exprs)');
+      } else if (mppVia) {
+        cxValExprVia = spaceHyphens(exprWithUm(mppVia.cxExpr));
+        cyValExprVia = spaceHyphens(exprWithUm(mppVia.cyExpr));
+        notePara(c.id, `pos (mirror reflection of ${mppVia.srcId}), radius, Z span`);
+      } else {
+        cxValExprVia = `${cx.toFixed(4)}um`;
+        cyValExprVia = `${cy.toFixed(4)}um`;
+        noteFrozen(c.id, isMirrorTgtVia
+          ? 'mirror target (source without chain) - via position baked numerically'
+          : 'via position not derivable from snap chain - baked numerically');
+      }
+      const rExprVia = exprWithUm(c.r ?? '0');
+      const cxVarVia = `${id}_cx`;
+      const cyVarVia = `${id}_cy`;
+      code += `# ${c.id}: via ${c.layerFrom} -> ${c.layerTo} (parametric CreateCylinder)\n`;
+      code += `# ZStart = bottom of "${c.layerFrom}", Height = top of "${c.layerTo}" - that bottom; both\n`;
+      code += `# are live layer-stack expressions, so thickness sweeps stretch the via.\n`;
+      code += `set_var("${cxVarVia}", "${cxValExprVia}")\n`;
+      code += `set_var("${cyVarVia}", "${cyValExprVia}")\n`;
+      code += `try:
+    _delete_geom_if_exists("${id}")
+    oEditor.CreateCylinder(
+        ["NAME:CylinderParameters",
+         "XCenter:=", "(${cxVarVia})", "YCenter:=", "(${cyVarVia})", "ZCenter:=", "${zStartExpr}",
+         "Radius:=", "${rExprVia}",
+         "Height:=", "${heightExpr}",
+         "WhichAxis:=", "Z",
+         "NumSides:=", "0"],
+        ["NAME:Attributes",
+         "Name:=", "${id}", "Flags:=", "",
+         "Color:=", "(148 163 184)", "Transparency:=", 0.0,
+         "PartCoordinateSystem:=", "Global",
+         "MaterialValue:=", "\\"${ascii(viaMaterial)}\\"",
+         "SolveInside:=", False])
+except Exception as e:
+    try:
+        oDesktop.AddMessage("", "", 1, "Failed to build via ${id}: " + str(e))
+    except:
+        pass
+`;
+      // Conductor bookkeeping: vias are metal plugs — the cladding
+      // subtraction must carve them out like any electrode body.
+      emittedElecNames.push(id);
+      continue;
+    }
+
     // Non-rectangular shapes: emit as a polygonal sheet built from the
     // shape's perimeter ring, then thicken via SweepAlongVector. We
     // don't preserve parametric ties (cx, cy, r are baked numerically),
@@ -1403,6 +1523,13 @@ except:
         let curXExpr = baseCxExpr;
         let curYExpr = baseCyExpr;
         const vertExprs = [];
+        // Per-vertex segment metadata, parallel to vertExprs:
+        //   { kind: 'line' }                        — rel / snap vertex
+        //   { kind: 'spline' }                      — spline-flagged rel vertex
+        //   { kind: 'arc', arc: { cenX, cenY, midX, midY, aDeg } }
+        // Drives PLSegment record emission below (Line / Spline /
+        // AngularArc) and the tapered-band branch's per-segment walk.
+        const vertMeta = [];
         const vertSpecs = c.vertices || [];
         for (let i = 0; i < vertSpecs.length; i++) {
           const v = vertSpecs[i];
@@ -1500,6 +1627,38 @@ except:
               }
             }
             vertExprs.push({ xExpr: curXExpr, yExpr: curYExpr });
+            vertMeta.push({ kind: 'line' });
+          } else if (v && v.kind === 'arc') {
+            // Circular arc: center = previous vertex + (cdx, cdy);
+            // endpoint = previous vertex rotated about the center by
+            // `angle` degrees (CCW positive). Maps 1:1 to an HFSS
+            // AngularArc polyline segment with parametric ArcCenterX/Y
+            // and ArcAngle, so HFSS-side sweeps of any variable in
+            // cdx / cdy / angle (or anything upstream in the chain)
+            // re-evaluate the arc end-to-end.
+            //
+            // Endpoint chain expression (prev = P, center C = P + (cdx, cdy)):
+            //   end = C + R(a)*(P - C) = C + R(a)*(-cdx, -cdy)
+            //   endX = Cx - cdx*cos(a) + cdy*sin(a)
+            //   endY = Cy - cdx*sin(a) - cdy*cos(a)
+            // HFSS trig is unit-aware: `aDeg` is the degree-typed angle
+            // expression ("(expr)*1deg" or "<n>deg"). A MID point at
+            // half sweep is emitted too: HFSS AngularArc segments carry
+            // start / mid / end in the point list (NoOfPoints = 3,
+            // matching recorded HFSS scripts and pyAEDT's convention).
+            const prevX = i === 0 ? baseCxExpr : curXExpr;
+            const prevY = i === 0 ? baseCyExpr : curYExpr;
+            const cdxE = exprWithUm(v.cdx ?? '0');
+            const cdyE = exprWithUm(v.cdy ?? '0');
+            const aDeg = hfssAngleDegExpr(spaceHyphens(ascii(resolveSynthetics(String(v.angle ?? '0')))));
+            const cenX = `(${prevX}) + (${cdxE})`;
+            const cenY = `(${prevY}) + (${cdyE})`;
+            const midX = `(${cenX}) - (${cdxE})*cos((${aDeg})/2) + (${cdyE})*sin((${aDeg})/2)`;
+            const midY = `(${cenY}) - (${cdxE})*sin((${aDeg})/2) - (${cdyE})*cos((${aDeg})/2)`;
+            curXExpr = `(${cenX}) - (${cdxE})*cos(${aDeg}) + (${cdyE})*sin(${aDeg})`;
+            curYExpr = `(${cenY}) - (${cdxE})*sin(${aDeg}) - (${cdyE})*cos(${aDeg})`;
+            vertExprs.push({ xExpr: curXExpr, yExpr: curYExpr });
+            vertMeta.push({ kind: 'arc', arc: { cenX, cenY, midX, midY, aDeg } });
           } else {
             // `rel`: dx/dy expressions added to the previous vertex.
             const dxExpr = exprWithUm(v?.dx ?? '0');
@@ -1512,6 +1671,10 @@ except:
               curYExpr = `(${curYExpr}) + (${dyExpr})`;
             }
             vertExprs.push({ xExpr: curXExpr, yExpr: curYExpr });
+            // A spline run needs an anchor vertex before it — a spline
+            // flag on vertex 0 has no preceding point and degrades to a
+            // plain line vertex (it starts the path; no segment enters it).
+            vertMeta.push({ kind: (v && v.spline && i > 0) ? 'spline' : 'line' });
           }
         }
         // polyshape needs ≥ 3 vertices to enclose an interior; polyline
@@ -1538,13 +1701,323 @@ except:
         // every consecutive pair INCLUDING the wrap-around (so the
         // last point connects back to vertex 0).
         const polyClosed = isPolyshape || c.closed;
-        // Build PLPoint and PLSegment records.
-        const ptList = vertExprs.map(v =>
-          `["NAME:PLPoint", "X:=", "${v.xExpr}", "Y:=", "${v.yExpr}", "Z:=", "${pathZExpr}"]`
-        ).join(',\n          ');
-        const segList = vertExprs.slice(0, polyClosed ? vertExprs.length : vertExprs.length - 1).map((_, i) =>
-          `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", ${i}, "NoOfPoints:=", 2]`
-        ).join(',\n          ');
+
+        // ── TAPERED POLYLINE (per-vertex width) ─────────────────────
+        // If ANY vertex carries a width expression, the trace can't be
+        // built with a single XSection sweep (HFSS cross-sections are
+        // constant along the path). Instead we emit ONE covered 4-point
+        // CreatePolyline sheet PER LINE SEGMENT with fully PARAMETRIC
+        // corners (chain exprs ± (width/2)·unit-normal, normal =
+        // (dy, -dx)/sqrt(dx^2+dy^2) — HFSS expressions support sqrt),
+        // Unite the segment sheets, and sweep up by the layer thickness
+        // (the polyshape idiom). BUTT joins — no miter — which exactly
+        // matches the canvas's taperedBandQuads rendering and the GDS
+        // band emission, keeping geometric compatibility end-to-end.
+        // Arc / spline segments inside a tapered polyline are NOT
+        // supported parametrically in v1: they fall back to constant
+        // base width, tessellated numerically (same tessellation as
+        // the canvas), with a WARNING comment + FROZEN report entry.
+        if (!isPolyshape && polylineIsTapered(c)) {
+          // Effective width expression at vertex i: its own width expr
+          // if set, else the component's base width. Arc vertices pin
+          // to the base width (v1 restriction, enforced in the UI).
+          const effWidthExpr = (i) => {
+            const v = vertSpecs[i];
+            if (v && v.kind !== 'arc' && v.width != null && String(v.width).trim() !== '') {
+              return exprWithUm(v.width);
+            }
+            return exprWithUm(c.width ?? '0');
+          };
+          // Numeric resolved vertex positions (for degenerate-segment
+          // guards + the curved-segment numeric fallback). byIdSolved
+          // is the solved-component map used elsewhere in this export.
+          const numVerts = resolvePolylineVertices(c, byIdSolved, paramValues);
+          const baseWNum = Math.max(0, evalExpr(c.width ?? '0', paramValues) || 0);
+          const sheetNames = [];
+          let curvedFallback = false;
+          const quadSheet = (corners4, label) => {
+            // corners4: [{x,y}, ...] expression pairs, CCW or CW —
+            // covered closed polyline fills either orientation.
+            const name = sheetNames.length === 0 ? id : `${id}_tseg${sheetNames.length}`;
+            sheetNames.push(name);
+            const pts = [...corners4, corners4[0]].map(p =>
+              `["NAME:PLPoint", "X:=", "${p.x}", "Y:=", "${p.y}", "Z:=", "${zBottomExpr}"]`
+            ).join(',\n          ');
+            const segs = [0, 1, 2, 3].map(k =>
+              `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", ${k}, "NoOfPoints:=", 2]`
+            ).join(',\n          ');
+            code += `# ${label}\n`;
+            code += `try:
+    _delete_geom_if_exists("${name}")
+    oEditor.CreatePolyline(
+        ["NAME:PolylineParameters",
+         "IsPolylineCovered:=", True,
+         "IsPolylineClosed:=", True,
+         ["NAME:PolylinePoints",
+          ${pts}],
+         ["NAME:PolylineSegments",
+          ${segs}],
+         ["NAME:PolylineXSection",
+          "XSectionType:=", "None",
+          "XSectionOrient:=", "Auto",
+          "XSectionWidth:=", "0um",
+          "XSectionTopWidth:=", "0um",
+          "XSectionHeight:=", "0um",
+          "XSectionNumSegments:=", "0",
+          "XSectionBendType:=", "Corner"]],
+        ["NAME:Attributes",
+         "Name:=", "${name}",
+         "Flags:=", "",
+         "Color:=", "(218 165 32)",
+         "Transparency:=", 0.0,
+         "PartCoordinateSystem:=", "Global",
+         "MaterialValue:=", "\\"${ascii(materialName)}\\"",
+         "SolveInside:=", ${c.layer === 'waveguide' ? 'True' : 'False'}])
+except Exception as e:
+    try:
+        oDesktop.AddMessage("", "", 1, "Failed to build tapered segment ${name}: " + str(e))
+    except:
+        pass
+`;
+          };
+          // Parametric quad for a LINE segment from chain-expr point s
+          // to chain-expr point e with start/end width exprs w0/w1.
+          const emitLineQuad = (s, e, w0E, w1E, label) => {
+            const dxE = `(${e.xExpr}) - (${s.xExpr})`;
+            const dyE = `(${e.yExpr}) - (${s.yExpr})`;
+            const lenE = `sqrt((${dxE})*(${dxE}) + (${dyE})*(${dyE}))`;
+            // Unit normal (dy, -dx)/len — matches taperedBandQuads.
+            const nxE = `(${dyE})/(${lenE})`;
+            const nyE = `-((${dxE}))/(${lenE})`;
+            quadSheet([
+              { x: `(${s.xExpr}) + ((${w0E})/2)*(${nxE})`, y: `(${s.yExpr}) + ((${w0E})/2)*(${nyE})` },
+              { x: `(${e.xExpr}) + ((${w1E})/2)*(${nxE})`, y: `(${e.yExpr}) + ((${w1E})/2)*(${nyE})` },
+              { x: `(${e.xExpr}) - ((${w1E})/2)*(${nxE})`, y: `(${e.yExpr}) - ((${w1E})/2)*(${nyE})` },
+              { x: `(${s.xExpr}) - ((${w0E})/2)*(${nxE})`, y: `(${s.yExpr}) - ((${w0E})/2)*(${nyE})` },
+            ], label);
+          };
+          // Numeric constant-width quads along a tessellated curve
+          // (the arc/spline v1 fallback). Mirrors taperedBandQuads'
+          // pushCurveQuads so HFSS builds the SAME geometry the canvas
+          // and GDS show.
+          const emitCurveQuadsNumeric = (pts, label) => {
+            for (let k = 0; k + 1 < pts.length; k++) {
+              const [x0, y0] = pts[k], [x1, y1] = pts[k + 1];
+              const ddx = x1 - x0, ddy = y1 - y0;
+              const len = Math.hypot(ddx, ddy);
+              if (!(len > 1e-12)) continue;
+              const nx = ddy / len, ny = -ddx / len;
+              const hw = baseWNum / 2;
+              quadSheet([
+                { x: `(${(x0 + hw * nx).toFixed(4)})um`, y: `(${(y0 + hw * ny).toFixed(4)})um` },
+                { x: `(${(x1 + hw * nx).toFixed(4)})um`, y: `(${(y1 + hw * ny).toFixed(4)})um` },
+                { x: `(${(x1 - hw * nx).toFixed(4)})um`, y: `(${(y1 - hw * ny).toFixed(4)})um` },
+                { x: `(${(x0 - hw * nx).toFixed(4)})um`, y: `(${(y0 - hw * ny).toFixed(4)})um` },
+              ], label);
+            }
+          };
+          code += `# ${c.id}: TAPERED polyline trace (per-segment parametric sheets + Unite + sweep)\n`;
+          // Start at vertex 0: a LINE vertex 0 only establishes the path
+          // start (no segment enters it), but an ARC at vertex 0 sweeps
+          // from the component's base anchor and must emit its band.
+          let i2 = 0;
+          while (i2 < vertSpecs.length) {
+            const meta = vertMeta[i2];
+            if (meta.kind === 'arc') {
+              code += `# WARNING: ${c.id} segment ${i2} is an ARC inside a TAPERED polyline - taper-on-arc\n`;
+              code += `# is not supported in v1; the segment falls back to CONSTANT base width and is\n`;
+              code += `# tessellated numerically (re-export after changing related params).\n`;
+              curvedFallback = true;
+              const v = vertSpecs[i2];
+              const [px, py] = i2 === 0 ? [c.cx, c.cy] : numVerts[i2 - 1];
+              const cdxN = evalExpr(v.cdx ?? '0', paramValues);
+              const cdyN = evalExpr(v.cdy ?? '0', paramValues);
+              const angN = evalExpr(v.angle ?? '0', paramValues);
+              if (Number.isFinite(px) && Number.isFinite(cdxN) && Number.isFinite(cdyN)
+                  && Number.isFinite(angN) && Math.abs(angN) > 1e-12) {
+                emitCurveQuadsNumeric(
+                  [[px, py], ...tessellateArcFrom(px, py, px + cdxN, py + cdyN, angN)],
+                  `${c.id} arc segment ${i2} (numeric fallback, constant width)`);
+              }
+              i2++;
+              continue;
+            }
+            if (meta.kind === 'spline') {
+              code += `# WARNING: ${c.id} segments ${i2}.. are SPLINE inside a TAPERED polyline - taper-on-spline\n`;
+              code += `# is not supported in v1; the run falls back to CONSTANT base width and is\n`;
+              code += `# tessellated numerically (Catmull-Rom, matching the canvas preview).\n`;
+              let j2 = i2;
+              while (j2 + 1 < vertSpecs.length && vertMeta[j2 + 1].kind === 'spline') j2++;
+              const ctrl = [numVerts[i2 - 1], ...numVerts.slice(i2, j2 + 1)];
+              if (ctrl.every(p => p && Number.isFinite(p[0]) && Number.isFinite(p[1])) && ctrl.length >= 3) {
+                curvedFallback = true;
+                emitCurveQuadsNumeric(catmullRomTessellate(ctrl, 8),
+                  `${c.id} spline run ${i2}..${j2} (numeric fallback, constant width)`);
+              } else {
+                // Degenerate single-vertex run: a straight segment — the
+                // parametric taper applies (matches taperedBandQuads).
+                for (let k2 = i2; k2 <= j2; k2++) {
+                  emitLineQuad(vertExprs[k2 - 1], vertExprs[k2], effWidthExpr(k2 - 1), effWidthExpr(k2),
+                    `${c.id} segment ${k2} (tapered quad)`);
+                }
+              }
+              i2 = j2 + 1;
+              continue;
+            }
+            // Plain line vertex. Vertex 0 establishes the start point —
+            // no segment enters it.
+            if (i2 === 0) { i2++; continue; }
+            // Fully parametric tapered quad. Skip numerically-degenerate
+            // segments (zero length — the unit normal expression would
+            // divide by zero in HFSS).
+            const sN = numVerts[i2 - 1], eN = numVerts[i2];
+            const segLen = (sN && eN) ? Math.hypot(eN[0] - sN[0], eN[1] - sN[1]) : 0;
+            if (segLen > 1e-12) {
+              emitLineQuad(vertExprs[i2 - 1], vertExprs[i2], effWidthExpr(i2 - 1), effWidthExpr(i2),
+                `${c.id} segment ${i2} (tapered quad)`);
+            } else {
+              code += `# ${c.id} segment ${i2}: zero length at export values - skipped (degenerate normal)\n`;
+            }
+            i2++;
+          }
+          // Closed tapered polyline: closing quad from the last vertex
+          // back to vertex 0 (same butt-join band as the canvas).
+          if (c.closed && vertExprs.length >= 2) {
+            const sN = numVerts[numVerts.length - 1], eN = numVerts[0];
+            const segLen = (sN && eN) ? Math.hypot(eN[0] - sN[0], eN[1] - sN[1]) : 0;
+            if (segLen > 1e-12) {
+              emitLineQuad(vertExprs[vertExprs.length - 1], vertExprs[0],
+                effWidthExpr(vertSpecs.length - 1), effWidthExpr(0),
+                `${c.id} closing segment (tapered quad)`);
+            }
+          }
+          if (sheetNames.length === 0) {
+            code += `# ${c.id}: no non-degenerate segments - nothing emitted\n`;
+            continue;
+          }
+          if (sheetNames.length > 1) {
+            code += `try:
+    oEditor.Unite(
+        ["NAME:Selections", "Selections:=", "${sheetNames.join(',')}"],
+        ["NAME:UniteParameters", "KeepOriginals:=", False])
+except Exception as e:
+    try:
+        oDesktop.AddMessage("", "", 1, "Failed to unite tapered segments of ${id}: " + str(e))
+    except:
+        pass
+`;
+          }
+          if (!isSheet) {
+            code += `try:
+    oEditor.SweepAlongVector(
+        ["NAME:Selections", "Selections:=", "${id}", "NewPartsModelFlag:=", "Model"],
+        ["NAME:VectorSweepParameters",
+         "DraftAngle:=", "0deg", "DraftType:=", "Round",
+         "CheckFaceFaceIntersection:=", False,
+         "SweepVectorX:=", "0um",
+         "SweepVectorY:=", "0um",
+         "SweepVectorZ:=", "${zSizeExpr}"])
+except Exception as e:
+    try:
+        oDesktop.AddMessage("", "", 1, "Failed to thicken tapered polyline ${id}: " + str(e))
+    except:
+        pass
+`;
+          }
+          if (c.layer === 'electrode') emittedElecNames.push(id);
+          else if (c.layer === 'waveguide') emittedWgNames.push(id);
+          else if (c.layer === 'port') emittedPortNames.push(id);
+          if (isSheet && c.layer === 'electrode') zeroThicknessSheets.push(id);
+          if (curvedFallback) {
+            noteFrozen(c.id, 'tapered polyline arc/spline segments frozen at constant base width (numeric tessellation, v1)');
+          }
+          if (!polyHasFrozenVertex) {
+            notePara(c.id, 'pos, vertices, per-vertex taper widths (per-segment parametric corner exprs)');
+          }
+          continue; // tapered path fully emitted — skip the XSection sweep below
+        }
+
+        // Build PLPoint and PLSegment records — ONE pass in path order
+        // so segment records line up with HFSS's point-index bookkeeping:
+        //   line / snap / rel vertex → 1 point, Line segment (2 points)
+        //   arc vertex               → mid + end points (start = previous
+        //                              point; +base start point when the
+        //                              arc is vertex 0), AngularArc
+        //                              segment (NoOfPoints = 3) with
+        //                              parametric ArcCenterX/Y + ArcAngle
+        //   spline run (anchor + N spline-flagged rel vertices)
+        //                             → N points, ONE Spline segment
+        //                              (NoOfPoints = N + 1); HFSS fits a
+        //                              NURBS through the chain-expr points
+        const ptRecords = [];
+        const segRecords = [];
+        const pushPt = (xExpr, yExpr) => {
+          ptRecords.push(`["NAME:PLPoint", "X:=", "${xExpr}", "Y:=", "${yExpr}", "Z:=", "${pathZExpr}"]`);
+          return ptRecords.length - 1;
+        };
+        const lineSegRec = (startIdx) =>
+          `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", ${startIdx}, "NoOfPoints:=", 2]`;
+        let hasSpline = false;
+        let hasArc = false;
+        {
+          let prevPtIdx = -1;
+          let vi = 0;
+          while (vi < vertExprs.length) {
+            const meta = vertMeta[vi];
+            if (meta.kind === 'arc') {
+              hasArc = true;
+              // Arc as vertex 0 starts at the component's base anchor,
+              // which isn't otherwise in the point list — insert it so
+              // the AngularArc segment has its start point.
+              if (vi === 0) prevPtIdx = pushPt(baseCxExpr, baseCyExpr);
+              const startIdx = prevPtIdx;
+              pushPt(meta.arc.midX, meta.arc.midY);
+              const endIdx = pushPt(vertExprs[vi].xExpr, vertExprs[vi].yExpr);
+              segRecords.push(
+                `["NAME:PLSegment", "SegmentType:=", "AngularArc", "StartIndex:=", ${startIdx}, "NoOfPoints:=", 3, "NoOfSegments:=", "0", "ArcAngle:=", "${meta.arc.aDeg}", "ArcCenterX:=", "${meta.arc.cenX}", "ArcCenterY:=", "${meta.arc.cenY}", "ArcCenterZ:=", "${pathZExpr}", "ArcPlane:=", "XY"]`
+              );
+              prevPtIdx = endIdx;
+              vi++;
+              continue;
+            }
+            if (meta.kind === 'spline' && vi > 0) {
+              // Consecutive spline-flagged rel vertices + the anchor
+              // point before the run form ONE Spline segment.
+              let vj = vi;
+              while (vj + 1 < vertExprs.length && vertMeta[vj + 1].kind === 'spline') vj++;
+              const startIdx = prevPtIdx;
+              let lastIdx = startIdx;
+              for (let k = vi; k <= vj; k++) lastIdx = pushPt(vertExprs[k].xExpr, vertExprs[k].yExpr);
+              const nPts = (vj - vi + 1) + 1;
+              if (nPts >= 3) {
+                hasSpline = true;
+                segRecords.push(`["NAME:PLSegment", "SegmentType:=", "Spline", "StartIndex:=", ${startIdx}, "NoOfPoints:=", ${nPts}]`);
+              } else {
+                // A 2-point spline IS a line (matches the canvas's
+                // degenerate-run handling in tessellatePolylinePath).
+                segRecords.push(lineSegRec(startIdx));
+              }
+              prevPtIdx = lastIdx;
+              vi = vj + 1;
+              continue;
+            }
+            const idx = pushPt(vertExprs[vi].xExpr, vertExprs[vi].yExpr);
+            if (vi > 0) segRecords.push(lineSegRec(prevPtIdx));
+            prevPtIdx = idx;
+            vi++;
+          }
+          // Closing edge (polyshape always; polyline when c.closed):
+          // a straight Line back to the FIRST point of the drawn path
+          // (which is the base anchor when vertex 0 is an arc). Matches
+          // the canvas tessellation's straight ring closure.
+          if (polyClosed) {
+            const firstPt = ptRecords[0];
+            ptRecords.push(firstPt);
+            segRecords.push(lineSegRec(prevPtIdx));
+          }
+        }
+        const ptList = ptRecords.join(',\n          ');
+        const segList = segRecords.join(',\n          ');
         // XSection: Rectangle for solid traces, Line for sheets, None
         // for stroke-width-zero (degenerate — emits a 1-D curve) AND
         // for polyshape (it's a covered closed polygon, not a swept
@@ -1590,7 +2063,7 @@ except:
          "IsPolylineCovered:=", True,
          "IsPolylineClosed:=", ${polyClosed ? 'True' : 'False'},
          ["NAME:PolylinePoints",
-          ${ptList}${polyClosed ? `,\n          ["NAME:PLPoint", "X:=", "${vertExprs[0].xExpr}", "Y:=", "${vertExprs[0].yExpr}", "Z:=", "${pathZExpr}"]` : ''}],
+          ${ptList}],
          ["NAME:PolylineSegments",
           ${segList}],
          ["NAME:PolylineXSection",
@@ -1639,7 +2112,12 @@ except Exception as e:
           zeroThicknessSheets.push(id);
         }
         if (!polyHasFrozenVertex) {
-          notePara(c.id, 'pos, vertices, width');
+          notePara(c.id, hasArc
+            ? 'pos, vertices, width, arc centers + sweep angles'
+            : 'pos, vertices, width');
+        }
+        if (hasSpline) {
+          noteCaveat(c.id, 'spline (canvas preview is an approximation of HFSS NURBS)');
         }
         continue; // skip the tessellated-polyline path below
       }
@@ -1965,6 +2443,163 @@ except Exception as e:
     }
     const xLoExprUm = `${cxExprUm} - ${wExprUm}/2`;
     const yLoExprUm = `${cyExprUm} - ${hExprUm}/2`;
+
+    // ── Rect corner fillets (D3): covered + closed CreatePolyline ──────
+    // A rect with cornerRadius > 0 can't be a CreateBox / CreateRectangle
+    // (HFSS boxes have sharp corners). Emit instead an 8-tangent-point
+    // closed polyline — 4 Line edges + 4 AngularArc 90° corners — with
+    // EVERY coordinate parametric: tangent points are (cx ± w/2 ∓ r,
+    // cy ± h/2 ∓ r) built from the rect's live position / size / radius
+    // expressions, arc centers ride the same exprs, and the sheet is
+    // swept up by the layer's parametric thickness (the polyshape idiom).
+    // First-class rotation (if any) is applied by the D6 base-rotation
+    // block downstream — the base polyline here is axis-aligned.
+    const crInfo = cornerRadiusInfo(c);
+    if (crInfo) {
+      const rFE = exprWithUm(crInfo.expr);
+      // Z policy + material per layer (mirrors the sharp-rect dispatch):
+      //   waveguide → uniform extrusion across the WG layer. The rib
+      //     cross-section profile only applies to sharp rects (a swept
+      //     trapezoid can't follow filleted corners), so rounded WG
+      //     rects emit as a uniform slab — flagged in the report.
+      //   electrode → bound conductor layer's Z range (sheet when its
+      //     thickness is zero).
+      //   port → 2-D sheet at the bound conductor's mid-Z.
+      let zBExpr, zSExpr, zSizeNum, matRR, colorRR, transRR, solveRR;
+      if (c.layer === 'waveguide') {
+        zBExpr = withZOffset((wgLayer && layerZ[wgLayer.id]?.zBottomExpr) || '0um', c);
+        zSExpr = (wgLayer && layerZ[wgLayer.id]?.thicknessExpr) || exprWithUm('h_wg');
+        zSizeNum = (wgLayer && layerZ[wgLayer.id]?.thickness) || wg_z;
+        matRR = wgMaterial;
+        colorRR = '(143 175 143)';
+        transRR = '0.0';
+        solveRR = 'True';
+        code += `# ${c.id}: rounded waveguide rect — emitted as a UNIFORM slab (the rib\n`;
+        code += `# cross-section profile only applies to sharp rect waveguides).\n`;
+        noteCaveat(c.id, 'rounded-rect waveguide emitted as uniform slab (no rib cross-section profile)');
+      } else if (c.layer === 'port') {
+        const { layer: portCondL, comment: portCondC } = resolveCondForComp(c);
+        code += `${portCondC}\n`;
+        const pcZB = (portCondL && layerZ[portCondL.id]?.zBottomExpr) || exprWithUm('h_wg');
+        const pcTh = (portCondL && layerZ[portCondL.id]?.thicknessExpr) || '0um';
+        zBExpr = withZOffset(`(${pcZB}) + (${pcTh})/2`, c);
+        zSExpr = '0um';
+        zSizeNum = 0;
+        matRR = 'vacuum';
+        colorRR = '(255 100 100)';
+        transRR = '0.5';
+        solveRR = 'True';
+      } else {
+        const { layer: elecL, comment: elecC } = resolveCondForComp(c);
+        code += `${elecC}\n`;
+        zBExpr = withZOffset((elecL && layerZ[elecL.id]?.zBottomExpr) || '0um', c);
+        zSExpr = (elecL && layerZ[elecL.id]?.thicknessExpr) || `${cond_z.toFixed(4)}um`;
+        zSizeNum = (elecL && layerZ[elecL.id]?.thickness) ?? cond_z;
+        matRR = elecL ? elecL.material : condMaterial;
+        colorRR = '(218 165 32)';
+        transRR = '0.0';
+        solveRR = 'False';
+      }
+      const isSheetRR = Math.abs(zSizeNum) < 1e-9 || c.layer === 'port';
+      // Parametric tangent / center expressions. cxExprUm / cyExprUm /
+      // wExprUm / hExprUm come from the shared rect classification above
+      // (snap chain, mirror reflection, or numeric fallback).
+      const X0 = `(${cxExprUm}) - (${wExprUm})/2`;
+      const X1 = `(${cxExprUm}) + (${wExprUm})/2`;
+      const Y0 = `(${cyExprUm}) - (${hExprUm})/2`;
+      const Y1 = `(${cyExprUm}) + (${hExprUm})/2`;
+      const XL = `(${X0}) + ${rFE}`;
+      const XR = `(${X1}) - ${rFE}`;
+      const YB = `(${Y0}) + ${rFE}`;
+      const YT = `(${Y1}) - ${rFE}`;
+      // Arc mid-points sit at 45° on each corner: center ± r/sqrt(2).
+      const D45 = '0.7071067811865476';
+      const midOff = `${rFE}*${D45}`;
+      // CCW point walk from the right edge's bottom tangent. 13 points
+      // (8 tangents + 4 arc mids + closing repeat of point 0), 8 segs.
+      const ptsRR = [
+        { x: X1, y: YB },                                        // 0  right edge bottom tangent
+        { x: X1, y: YT },                                        // 1  right edge top tangent
+        { x: `(${XR}) + ${midOff}`, y: `(${YT}) + ${midOff}` },  // 2  NE arc mid
+        { x: XR, y: Y1 },                                        // 3  top edge right tangent
+        { x: XL, y: Y1 },                                        // 4  top edge left tangent
+        { x: `(${XL}) - ${midOff}`, y: `(${YT}) + ${midOff}` },  // 5  NW arc mid
+        { x: X0, y: YT },                                        // 6  left edge top tangent
+        { x: X0, y: YB },                                        // 7  left edge bottom tangent
+        { x: `(${XL}) - ${midOff}`, y: `(${YB}) - ${midOff}` },  // 8  SW arc mid
+        { x: XL, y: Y0 },                                        // 9  bottom edge left tangent
+        { x: XR, y: Y0 },                                        // 10 bottom edge right tangent
+        { x: `(${XR}) + ${midOff}`, y: `(${YB}) - ${midOff}` },  // 11 SE arc mid
+        { x: X1, y: YB },                                        // 12 closing repeat of point 0
+      ];
+      const arcSeg = (startIdx, cenX, cenY) =>
+        `["NAME:PLSegment", "SegmentType:=", "AngularArc", "StartIndex:=", ${startIdx}, "NoOfPoints:=", 3, "NoOfSegments:=", "0", "ArcAngle:=", "90deg", "ArcCenterX:=", "${cenX}", "ArcCenterY:=", "${cenY}", "ArcCenterZ:=", "${zBExpr}", "ArcPlane:=", "XY"]`;
+      const lineSegRR = (startIdx) =>
+        `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", ${startIdx}, "NoOfPoints:=", 2]`;
+      const segsRR = [
+        lineSegRR(0),          // right edge
+        arcSeg(1, XR, YT),     // NE corner
+        lineSegRR(3),          // top edge
+        arcSeg(4, XL, YT),     // NW corner
+        lineSegRR(6),          // left edge
+        arcSeg(7, XL, YB),     // SW corner
+        lineSegRR(9),          // bottom edge
+        arcSeg(10, XR, YB),    // SE corner
+      ];
+      const ptListRR = ptsRR.map(p =>
+        `["NAME:PLPoint", "X:=", "${p.x}", "Y:=", "${p.y}", "Z:=", "${zBExpr}"]`
+      ).join(',\n          ');
+      const segListRR = segsRR.join(',\n          ');
+      code += `# ${c.id}: rounded rect (cornerRadius = ${ascii(crInfo.expr)}) as covered closed polyline\n`;
+      code += `# 4 Line edges + 4 AngularArc 90deg corners, all coordinates parametric.\n`;
+      code += `# NOTE: cornerRadius is not clamped in HFSS; keep r <= min(w,h)/2\n`;
+      code += `try:
+    _delete_geom_if_exists("${id}")
+    oEditor.CreatePolyline(
+        ["NAME:PolylineParameters",
+         "IsPolylineCovered:=", True,
+         "IsPolylineClosed:=", True,
+         ["NAME:PolylinePoints",
+          ${ptListRR}],
+         ["NAME:PolylineSegments",
+          ${segListRR}],
+         ["NAME:PolylineXSection",
+          "XSectionType:=", "None",
+          "XSectionOrient:=", "Auto",
+          "XSectionWidth:=", "0um",
+          "XSectionTopWidth:=", "0um",
+          "XSectionHeight:=", "0um",
+          "XSectionNumSegments:=", "0",
+          "XSectionBendType:=", "Corner"]],
+        ["NAME:Attributes",
+         "Name:=", "${id}",
+         "Flags:=", "",
+         "Color:=", "${colorRR}",
+         "Transparency:=", ${transRR},
+         "PartCoordinateSystem:=", "Global",
+         "MaterialValue:=", "\\"${ascii(matRR)}\\"",
+         "SolveInside:=", ${solveRR}])${isSheetRR ? '' : `
+    oEditor.SweepAlongVector(
+        ["NAME:Selections", "Selections:=", "${id}", "NewPartsModelFlag:=", "Model"],
+        ["NAME:VectorSweepParameters",
+         "DraftAngle:=", "0deg", "DraftType:=", "Round",
+         "CheckFaceFaceIntersection:=", False,
+         "SweepVectorX:=", "0um",
+         "SweepVectorY:=", "0um",
+         "SweepVectorZ:=", "${zSExpr}"])`}
+except Exception as e:
+    try:
+        oDesktop.AddMessage("", "", 1, "Failed to build rounded rect ${id}: " + str(e))
+    except:
+        pass
+`;
+      if (c.layer === 'waveguide') emittedWgNames.push(id);
+      else if (c.layer === 'port') emittedPortNames.push(id);
+      else emittedElecNames.push(id);
+      if (isSheetRR && c.layer === 'electrode') zeroThicknessSheets.push(id);
+      notePara(`${c.id}.cornerRadius`, 'corner fillets (parametric tangent points + 90deg AngularArc centers)');
+      continue;
+    }
 
     if (c.layer === 'waveguide') {
       // Rib waveguide: a slab plus a trapezoidal rib swept along the WG axis.
@@ -2859,10 +3494,15 @@ except Exception as e:
   // boolean component so operands without their own transforms map to
   // a single-element list.
   const finalPartIdsByCompId = new Map();
+  // Rib-waveguide rects split into two parts (slab + rib) — EXCEPT
+  // rounded-corner rects (D3), which emit as ONE covered polyline named
+  // `id` (no rib profile). Keep both partIds computations on this rule.
+  const isRibWgRect = (c) =>
+    c.layer === 'waveguide' && (c.kind || 'rect') === 'rect' && !cornerRadiusInfo(c);
   for (const c of solved) {
     if (c.kind === 'boolean') continue;
     const id = c.id.replace(/[^A-Za-z0-9_]/g, '_');
-    const partIds = (c.layer === 'waveguide' && (c.kind || 'rect') === 'rect')
+    const partIds = isRibWgRect(c)
       ? [`${id}_wg_slab`, `${id}_wg_rib`]
       : [id];
     finalPartIdsByCompId.set(c.id, partIds);
@@ -2882,8 +3522,9 @@ except Exception as e:
     // need to move BOTH parts together — repeating only the rib
     // would leave the slab behind, and naming the rib `<id>_rib`
     // (without the `_wg` infix used at creation) would target a
-    // part that doesn't exist.
-    const partIds = (c.layer === 'waveguide' && (c.kind || 'rect') === 'rect')
+    // part that doesn't exist. Rounded rects (D3) emit as a single
+    // part named `id` regardless of layer — see isRibWgRect.
+    const partIds = isRibWgRect(c)
       ? [`${id}_wg_slab`, `${id}_wg_rib`]
       : [id];
     const baseW = typeof c.w === 'number' ? c.w : evalExpr(c.w, paramValues);
@@ -3713,6 +4354,10 @@ except Exception as e:
       lines.push('#   (none -- every emitted element tracks HFSS variables)');
     } else {
       for (const e of reportFrozen) lines.push(`#   - ${ascii(String(e.id))}: ${ascii(String(e.reason))}`);
+    }
+    if (reportNotes.length > 0) {
+      lines.push('# NOTES (parametric, with caveats):');
+      for (const e of reportNotes) lines.push(`#   - ${ascii(String(e.id))}: ${ascii(String(e.text))}`);
     }
     lines.push('# ==========================================');
     code = code.replace('#__PARAMETRIC_REPORT__', () => lines.join('\n'));

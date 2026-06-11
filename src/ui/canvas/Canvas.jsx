@@ -16,10 +16,13 @@ import { evalExpr } from '../../scene/params.js';
 import { solveLayout, applyMirrors, resolveBooleanBboxes } from '../../scene/solver.js';
 import { expandTransforms } from '../../scene/transforms.js';
 import { detectPortIntegrationLine } from '../../scene/lumpedPort.js';
-import { shapeInstanceToRing } from '../../geometry/rings.js';
+import { shapeInstanceToRing, clampCornerRadius } from '../../geometry/rings.js';
 import { buildRacetrackCenterline } from '../../geometry/racetrack.js';
 import { ringToSvgPath } from '../../geometry/paths.js';
-import { resolvePolylineVertices } from '../../geometry/polyline.js';
+import {
+  tessellatePolylinePath, taperedBandQuads, polylineIsTapered,
+  tessellateArcFrom, synthArc90,
+} from '../../geometry/polyline.js';
 
 // Dimension-expression classification, shared by the resize-drag commit,
 // the resize-handle cursors, and the status bar. Three classes:
@@ -170,11 +173,17 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
   // each mousemove updates `cursorPos` for the preview segment.
   // Shape:
   //   {
-  //     vertices: [{ x, y, snap: { compId, anchor } | null }],
+  //     vertices: [{ x, y, snap: { compId, anchor } | null,
+  //                  arc?: { cdx, cdy, angle } }],
   //     cursorPos: { x, y } | null,
   //     cursorSnap: { compId, anchor } | null,
   //     axisGuide:  { axis: 'h'|'v', ref: vertexIdx } | null,
+  //     arcNext: boolean,   // 'a' toggles — next click places a 90° arc
   //   }
+  // An `arc` vertex's (x, y) is the arc ENDPOINT; cdx/cdy are NUMERIC
+  // offsets from the PREVIOUS vertex to the arc center and angle is
+  // ±90 (the draw UX synthesizes quarter-circle arcs; the inspector
+  // can re-shape them afterwards via the cdx/cdy/angle expressions).
   const [polylineDraft, setPolylineDraft] = useState(null);
   // Pre-drag hover snap target for addMode (preview before clicking).
   const [addHoverSnap, setAddHoverSnap] = useState(null);
@@ -239,6 +248,21 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             commitPolylineDraft(polylineDraft.vertices);
           }
           setPolylineDraft(null);
+        } else if ((e.key === 'a' || e.key === 'A') && !e.metaKey && !e.ctrlKey && !e.altKey) {
+          // Toggle ARC mode for the NEXT segment: the next click places
+          // the arc ENDPOINT and the draft synthesizes a 90° circular
+          // arc through it (center on the perpendicular bisector of the
+          // chord — see synthArc90). Needs at least one placed vertex
+          // (an arc sweeps FROM the previous vertex). Ignore key events
+          // targeted at text inputs so typing in the inspector can't
+          // flip the mode.
+          const t = e.target;
+          const tag = t && t.tagName;
+          if (tag === 'INPUT' || tag === 'TEXTAREA' || (t && t.isContentEditable)) return;
+          if (polylineDraft.vertices.length > 0) {
+            setPolylineDraft({ ...polylineDraft, arcNext: !polylineDraft.arcNext });
+            e.preventDefault();
+          }
         }
       }
     };
@@ -310,7 +334,21 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         : layer === 'port' ? 'port'
         : (addMode.conductorLayerId || 'conductor');
       const shapeLabel = addMode.shape || 'rect';
-      if (!addDrag) {
+      if ((addMode.shape === 'polyline' || addMode.shape === 'polyshape') && polylineDraft) {
+        // Polyline / polyshape draw-in-progress: vertex count + the arc-
+        // mode hint ('a' toggles a 90° arc for the NEXT segment).
+        const n = polylineDraft.vertices.length;
+        const arcTag = polylineDraft.arcNext
+          ? `ARC mode — next click places a 90° arc endpoint ('a' to exit)`
+          : `'a' = arc segment`;
+        const finishTag = addMode.shape === 'polyshape'
+          ? 'dbl-click / Enter / click v0 to close'
+          : 'dbl-click / Enter to finish';
+        status = {
+          kind: 'add',
+          line: `Add ${shapeLabel} (${kindLabel}) · ${n} vertex${n === 1 ? '' : 'es'} · ${arcTag} · ${finishTag} · Esc cancels`,
+        };
+      } else if (!addDrag) {
         const hint = addHoverSnap && addHoverSnap.compId
           ? `snap-start: ${addHoverSnap.compId}.${addHoverSnap.anchor}`
           : 'click empty space or an anchor';
@@ -373,7 +411,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       }
     }
     setInteractionStatus(status);
-  }, [snapMode, snapPick, snapHover, snapCursor, shiftKey, altKey, rulerMode, rulerInProgress, rulerSnapPoint, addMode, addDrag, addHoverSnap, drag, moveSnapHover, solved, paramValues, setInteractionStatus]);
+  }, [snapMode, snapPick, snapHover, snapCursor, shiftKey, altKey, rulerMode, rulerInProgress, rulerSnapPoint, addMode, addDrag, addHoverSnap, polylineDraft, drag, moveSnapHover, solved, paramValues, setInteractionStatus]);
 
   const screenToWorld = (sx, sy) => {
     const svg = svgRef.current;
@@ -553,12 +591,30 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     return bestH || bestV;
   };
 
+  // Tessellated point list for the DRAFT path (committed vertices only):
+  // line vertices pass through, arc vertices expand along their circular
+  // arc — mirrors tessellatePolylinePath so the preview shows exactly
+  // what will be committed.
+  const draftPathPoints = (verts) => {
+    const pts = [];
+    for (let i = 0; i < verts.length; i++) {
+      const v = verts[i];
+      if (v.arc && i > 0) {
+        const prev = verts[i - 1];
+        pts.push(...tessellateArcFrom(prev.x, prev.y, prev.x + v.arc.cdx, prev.y + v.arc.cdy, v.arc.angle));
+      } else {
+        pts.push([v.x, v.y]);
+      }
+    }
+    return pts;
+  };
+
   // Commit the current polyline draft to the scene via the parent's
   // commitDragAdd-like callback. We pass a vertices array of
-  //   { x, y, snap?: { compId, anchor } }
+  //   { x, y, snap?: { compId, anchor }, arc?: { cdx, cdy, angle } }
   // ; the parent resolves the first vertex into the component anchor and
-  // the rest into either `rel` (with dx/dy expressions for the deltas) or
-  // `snap` (component-anchor binding).
+  // the rest into `rel` (with dx/dy expressions for the deltas), `snap`
+  // (component-anchor binding), or `arc` (center offset + 90° sweep).
   const commitPolylineDraft = (vertices) => {
     if (!addMode) return;
     // polyshape needs ≥ 3 vertices (a polygon with < 3 has no interior);
@@ -807,6 +863,23 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           vx = first.x; vy = first.y;
         }
       }
+      // ARC mode: the click places the arc ENDPOINT; synthesize the 90°
+      // arc from the last committed vertex through it. The previous move
+      // direction (segment into the last vertex) picks which side of the
+      // chord the arc bulges toward — see synthArc90. Snap bindings are
+      // NOT installed on arc endpoints (an arc vertex's position is
+      // derived from center + sweep, not an anchor binding); the click's
+      // snapped coordinates still land the endpoint exactly on the
+      // anchor at draw time.
+      let arcSpec = null;
+      if (polylineDraft && polylineDraft.arcNext && polylineDraft.vertices.length > 0) {
+        const lastV = polylineDraft.vertices[polylineDraft.vertices.length - 1];
+        const beforeV = polylineDraft.vertices.length >= 2
+          ? polylineDraft.vertices[polylineDraft.vertices.length - 2]
+          : null;
+        const prevDir = beforeV ? { x: lastV.x - beforeV.x, y: lastV.y - beforeV.y } : null;
+        arcSpec = synthArc90(lastV, { x: vx, y: vy }, prevDir);
+      }
       const newVertex = {
         x: vx, y: vy,
         // Snap binding records the target compId + anchor AND the
@@ -816,11 +889,12 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // viewed under its parent boolean's chain at instance N).
         // The HFSS export emits matching parametric expressions for
         // both cases — see instanceChainOffsetExpr.
-        snap: snap ? {
+        snap: (snap && !arcSpec) ? {
           compId: snap.compId,
           anchor: snap.anchor,
           ...(snap.instanceIdx > 0 ? { instanceIdx: snap.instanceIdx } : {}),
         } : null,
+        ...(arcSpec ? { arc: arcSpec } : {}),
       };
       if (!polylineDraft) {
         setPolylineDraft({ vertices: [newVertex], cursorPos: { x: vx, y: vy }, cursorSnap: snap || null });
@@ -2030,6 +2104,10 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     // dark-red translucent rectangle so it stands out against waveguides and
     // electrodes; not part of the layer stack and not exported as a metal sheet.
     port:      { fill: '#b91c1c', stroke: '#7f1d1d', opacity: 0.45 },
+    // Via (D4): vertical interconnect between two stack layers. Slate
+    // body with an amber center dot (drawn in the via render branch) so
+    // it reads as "plug through the stack" rather than a plain circle.
+    via:       { fill: '#94a3b8', stroke: '#334155', opacity: 0.9 },
   };
 
   // Stack-layer lookup so per-component fills can read the BOUND layer's
@@ -2896,7 +2974,9 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         const isBoolOperand = (c) => booleanClusters.operandIds.has(c.id) && !selectedIds.has(c.id);
         const isBoolComp = (c) => c.kind === 'boolean';
         const pass1 = [];
-        for (const layer of ['waveguide', 'electrode', 'port']) {
+        // 'via' renders above electrodes (it's a plug THROUGH the metal)
+        // but below ports (translucent overlays stay on top).
+        for (const layer of ['waveguide', 'electrode', 'via', 'port']) {
           for (const c of solved) {
             if (c.layer === layer && isInPass1(c) && !isBoolOperand(c) && !isBoolComp(c)) pass1.push(c);
           }
@@ -3002,64 +3082,84 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                     <polygon points={pts} {...dataCompProps} />
                   );
                 } else if (shapeKind === 'polyline') {
-                  // Polyline trace: stroke the centerline at the trace
-                  // width parameter. Like racetracks, we use SVG's
-                  // path-stroke rendering instead of building an
-                  // explicit band ring — the browser handles joins and
-                  // butt-caps consistently regardless of zoom. Vertices
-                  // are resolved from the COMPONENT (not the instance)
-                  // each render so vertex snap-target moves are picked
-                  // up live; the instance's cx/cy is the post-transform
-                  // bbox center, which we don't use for the path here.
+                  // Polyline trace. The path is the TESSELLATED centerline
+                  // (arcs expanded, spline runs Catmull-Rom-interpolated) so
+                  // the canvas draws the same geometry HFSS builds from
+                  // AngularArc / Spline segments. Vertices are resolved from
+                  // the COMPONENT (not the instance) each render so vertex
+                  // snap-target moves are picked up live; the instance's
+                  // cx/cy is the post-transform bbox center, which we don't
+                  // use for the path here.
                   const compById_pl = Object.fromEntries(scene.components.map(cc => [cc.id, cc]));
-                  const verts = resolvePolylineVertices(c, compById_pl, paramValues, transformInstances);
                   const wgW = Number.isFinite(inst.width) ? inst.width : evalExpr(c.width, paramValues) || 0;
-                  if (verts.length >= 2 && wgW > 0) {
-                    let d = `M ${verts[0][0]} ${-verts[0][1]}`;
-                    for (let k = 1; k < verts.length; k++) {
-                      d += ` L ${verts[k][0]} ${-verts[k][1]}`;
+                  if (polylineIsTapered(c)) {
+                    // TAPERED trace: SVG strokes can't vary width along a
+                    // path, so render the band as filled per-segment quads
+                    // (endpoint ± (w/2)·normal, BUTT joins) — EXACTLY the
+                    // per-segment sheets the HFSS export unites, keeping
+                    // canvas/HFSS geometric compatibility.
+                    const { quads } = taperedBandQuads(c, compById_pl, paramValues, transformInstances);
+                    if (quads.length > 0) {
+                      let d = '';
+                      for (const q of quads) {
+                        d += `M ${q[0][0]} ${-q[0][1]} L ${q[1][0]} ${-q[1][1]} L ${q[2][0]} ${-q[2][1]} L ${q[3][0]} ${-q[3][1]} Z `;
+                      }
+                      shapeElement = (
+                        <path d={d} {...dataCompProps} />
+                      );
+                    } else {
+                      shapeElement = null;
                     }
-                    if (c.closed) d += ' Z';
-                    const { fill: _f, stroke: _s, strokeWidth: _sw, ...restProps } = dataCompProps;
-                    shapeElement = (
-                      <path
-                        d={d}
-                        fill="none"
-                        stroke={style.fill}
-                        strokeWidth={wgW}
-                        strokeLinejoin="miter"
-                        strokeLinecap="butt"
-                        {...restProps}
-                      />
-                    );
-                  } else if (verts.length >= 2) {
-                    // Width = 0 (or unresolved): show the centerline as
-                    // a thin guide so the polyline is still visible.
-                    let d = `M ${verts[0][0]} ${-verts[0][1]}`;
-                    for (let k = 1; k < verts.length; k++) {
-                      d += ` L ${verts[k][0]} ${-verts[k][1]}`;
-                    }
-                    const { fill: _f, ...restProps } = dataCompProps;
-                    shapeElement = (
-                      <path
-                        d={d}
-                        fill="none"
-                        stroke={style.stroke}
-                        strokeWidth={sw}
-                        strokeDasharray={`${sw * 3},${sw * 3}`}
-                        {...restProps}
-                      />
-                    );
                   } else {
-                    shapeElement = null;
+                    const verts = tessellatePolylinePath(c, compById_pl, paramValues, transformInstances);
+                    if (verts.length >= 2 && wgW > 0) {
+                      let d = `M ${verts[0][0]} ${-verts[0][1]}`;
+                      for (let k = 1; k < verts.length; k++) {
+                        d += ` L ${verts[k][0]} ${-verts[k][1]}`;
+                      }
+                      if (c.closed) d += ' Z';
+                      const { fill: _f, stroke: _s, strokeWidth: _sw, ...restProps } = dataCompProps;
+                      shapeElement = (
+                        <path
+                          d={d}
+                          fill="none"
+                          stroke={style.fill}
+                          strokeWidth={wgW}
+                          strokeLinejoin="miter"
+                          strokeLinecap="butt"
+                          {...restProps}
+                        />
+                      );
+                    } else if (verts.length >= 2) {
+                      // Width = 0 (or unresolved): show the centerline as
+                      // a thin guide so the polyline is still visible.
+                      let d = `M ${verts[0][0]} ${-verts[0][1]}`;
+                      for (let k = 1; k < verts.length; k++) {
+                        d += ` L ${verts[k][0]} ${-verts[k][1]}`;
+                      }
+                      const { fill: _f, ...restProps } = dataCompProps;
+                      shapeElement = (
+                        <path
+                          d={d}
+                          fill="none"
+                          stroke={style.stroke}
+                          strokeWidth={sw}
+                          strokeDasharray={`${sw * 3},${sw * 3}`}
+                          {...restProps}
+                        />
+                      );
+                    } else {
+                      shapeElement = null;
+                    }
                   }
                 } else if (shapeKind === 'polyshape') {
-                  // Closed polygon path. The resolved vertices form the
-                  // perimeter; we emit a <path> with `Z` so the browser
-                  // fills the interior. Width is irrelevant — the layer
-                  // fill color paints the whole region.
+                  // Closed polygon path. The TESSELLATED vertices (arcs
+                  // expanded, spline runs interpolated) form the perimeter;
+                  // we emit a <path> with `Z` so the browser fills the
+                  // interior. Width is irrelevant — the layer fill color
+                  // paints the whole region.
                   const compById_ps = Object.fromEntries(scene.components.map(cc => [cc.id, cc]));
-                  const verts = resolvePolylineVertices(c, compById_ps, paramValues, transformInstances);
+                  const verts = tessellatePolylinePath(c, compById_ps, paramValues, transformInstances);
                   if (verts.length >= 3) {
                     let d = `M ${verts[0][0]} ${-verts[0][1]}`;
                     for (let k = 1; k < verts.length; k++) {
@@ -3115,14 +3215,49 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   } else {
                     shapeElement = null;
                   }
+                } else if (shapeKind === 'via') {
+                  // Via (D4): plan-view annulus — outer circle in the via
+                  // style plus a small center dot so it reads as "vertical
+                  // connection" against ordinary circles. Tooltip names the
+                  // spanned stack layers.
+                  const rVia = Number.isFinite(inst.r) ? inst.r : 0;
+                  const lFrom = (scene.stack || []).find(l => l.id === c.layerFrom);
+                  const lTo = (scene.stack || []).find(l => l.id === c.layerTo);
+                  const viaTip = `via: ${lFrom?.name || c.layerFrom || '?'} → ${lTo?.name || c.layerTo || '?'}`;
+                  shapeElement = (
+                    <g>
+                      <circle
+                        cx={inst.cx} cy={-inst.cy}
+                        r={rVia}
+                        {...dataCompProps}
+                      >
+                        <title>{viaTip}</title>
+                      </circle>
+                      <circle
+                        cx={inst.cx} cy={-inst.cy}
+                        r={rVia * 0.35}
+                        fill="#f59e0b"
+                        stroke="#78350f"
+                        strokeWidth={sw * 0.4}
+                        opacity={instOpacity}
+                        pointerEvents="none"
+                      />
+                    </g>
+                  );
                 } else {
                   // Rectangle: use <rect> with rotation applied via the
-                  // parent <g> for crisp axis-aligned strokes.
+                  // parent <g> for crisp axis-aligned strokes. A positive
+                  // cornerRadius (D3 fillet, clamped to min(w,h)/2 — the
+                  // SAME clamp rings.js applies) renders via the SVG rx
+                  // attribute: visually EXACT for a uniform radius, and
+                  // matching the arc geometry HFSS builds natively.
                   const ix = inst.cx - inst.w / 2;
                   const iy = -(inst.cy + inst.h / 2);
+                  const rxFillet = clampCornerRadius(inst.cornerRadius, inst.w, inst.h);
                   shapeElement = (
                     <rect
                       x={ix} y={iy} width={inst.w} height={inst.h}
+                      {...(rxFillet > 0 ? { rx: rxFillet } : {})}
                       {...dataCompProps}
                     />
                   );
@@ -3796,19 +3931,45 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         const isPolyshape = addMode.shape === 'polyshape';
         const widthExpr = addMode.width || `trace_w`;
         const widthVal = isPolyshape ? 0 : (evalExpr(widthExpr, paramValues) || screen(2));
-        // Build the committed path: M v0 → L v1 → ... ; then a preview
+        // Build the committed path: tessellated through any arc vertices
+        // (so committed 90° arcs preview as true curves); then a preview
         // dashed segment from the last vertex to the cursor.
+        const committedPts = draftPathPoints(verts);
         let pathD = '';
-        for (let i = 0; i < verts.length; i++) {
-          pathD += i === 0 ? `M ${verts[i].x} ${-verts[i].y}` : ` L ${verts[i].x} ${-verts[i].y}`;
+        for (let i = 0; i < committedPts.length; i++) {
+          pathD += i === 0
+            ? `M ${committedPts[i][0]} ${-committedPts[i][1]}`
+            : ` L ${committedPts[i][0]} ${-committedPts[i][1]}`;
         }
+        // Cursor preview geometry: in ARC mode, tessellate the would-be
+        // 90° arc from the last vertex to the cursor (same synthArc90
+        // the click handler will run) so the user sees the exact curve
+        // before committing. Otherwise a straight segment. `cursorPts`
+        // EXCLUDES the last committed vertex (it's the segment's start).
+        let cursorPts = [];
+        if (verts.length > 0 && cur) {
+          const lastV = verts[verts.length - 1];
+          let arcPrev = null;
+          if (polylineDraft.arcNext) {
+            const beforeV = verts.length >= 2 ? verts[verts.length - 2] : null;
+            const prevDir = beforeV ? { x: lastV.x - beforeV.x, y: lastV.y - beforeV.y } : null;
+            arcPrev = synthArc90(lastV, cur, prevDir);
+          }
+          cursorPts = arcPrev
+            ? tessellateArcFrom(lastV.x, lastV.y, lastV.x + arcPrev.cdx, lastV.y + arcPrev.cdy, arcPrev.angle)
+            : [[cur.x, cur.y]];
+        }
+        const cursorPreviewD = (verts.length > 0 && cursorPts.length > 0)
+          ? `M ${verts[verts.length - 1].x} ${-verts[verts.length - 1].y}`
+            + cursorPts.map(([px, py]) => ` L ${px} ${-py}`).join('')
+          : '';
         // For polyshape: build the closed preview path including the
         // cursor as a "phantom last vertex" so the user sees the polygon
         // it would become if they finished now.
         let previewClosedD = '';
-        if (isPolyshape && verts.length >= 1) {
+        if (isPolyshape && committedPts.length >= 1) {
           previewClosedD = pathD;
-          if (cur) previewClosedD += ` L ${cur.x} ${-cur.y}`;
+          for (const [px, py] of cursorPts) previewClosedD += ` L ${px} ${-py}`;
           if (verts.length >= 2) previewClosedD += ' Z';
         }
         return (
@@ -3844,17 +4005,27 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                 )}
               </g>
             ))}
-            {/* Preview segment from last vertex to cursor. For polyshape
-                the closed-polygon fill above already shows the edges, so
-                we skip this extra trace-style stroke. */}
-            {!isPolyshape && verts.length > 0 && cur && (
-              <line
-                x1={verts[verts.length - 1].x}
-                y1={-verts[verts.length - 1].y}
-                x2={cur.x} y2={-cur.y}
-                stroke="#10b981" strokeWidth={widthVal} strokeOpacity={0.3}
+            {/* Preview segment from last vertex to cursor — a straight
+                line normally, or the tessellated 90° arc in ARC mode.
+                For polyshape the closed-polygon fill above already shows
+                the edges, so we skip this extra trace-style stroke. */}
+            {!isPolyshape && cursorPreviewD && (
+              <path
+                d={cursorPreviewD}
+                fill="none"
+                stroke={polylineDraft.arcNext ? '#22d3ee' : '#10b981'}
+                strokeWidth={widthVal} strokeOpacity={0.3}
+                strokeLinecap="butt"
                 strokeDasharray={`${screen(6)},${screen(4)}`}
               />
+            )}
+            {/* ARC-mode badge near the cursor so the modal state is
+                visible right where the user is working. */}
+            {polylineDraft.arcNext && cur && (
+              <text
+                x={cur.x + screen(12)} y={-cur.y - screen(12)}
+                fontSize={screen(10)} fill="#22d3ee" fontFamily="monospace"
+              >arc 90°</text>
             )}
             {/* Axis-aligned guideline through the cursor */}
             {polylineDraft.axisGuide && cur && (() => {
@@ -4147,6 +4318,17 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                 // fits inside the drag bbox.
                 const rp = Math.min(w, h) / 2;
                 return <circle cx={cxP} cy={-cyP} r={rp} {...previewProps} />;
+              }
+              if (shape === 'via') {
+                // Via is click-to-place with a fixed default radius — the
+                // preview shows the default-size annulus at the cursor.
+                const rp = 2;
+                return (
+                  <g>
+                    <circle cx={cxP} cy={-cyP} r={rp} {...previewProps} />
+                    <circle cx={cxP} cy={-cyP} r={rp * 0.35} fill={previewStroke} fillOpacity={0.6} />
+                  </g>
+                );
               }
               if (shape === 'ellipse') {
                 return <ellipse cx={cxP} cy={-cyP} rx={w / 2} ry={h / 2} {...previewProps} />;

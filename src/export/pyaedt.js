@@ -13,7 +13,7 @@ import { anchorLocal } from '../scene/anchors.js';
 import { solveLayout, applyMirrors } from '../scene/solver.js';
 import { shapeInstanceToRing } from '../geometry/rings.js';
 import { buildRacetrackCenterline } from '../geometry/racetrack.js';
-import { resolvePolylineVertices } from '../geometry/polyline.js';
+import { tessellatePolylinePath, taperedBandQuads, polylineIsTapered } from '../geometry/polyline.js';
 import { detectPortIntegrationLine } from '../scene/lumpedPort.js';
 
 // ----------------------------------------------------------------------
@@ -22,6 +22,50 @@ import { detectPortIntegrationLine } from '../scene/lumpedPort.js';
 export function generatePyAEDT(scene, paramValues) {
   const { params, components, snaps, mirrors } = scene;
   const solved = applyMirrors(solveLayout(components, snaps, paramValues), mirrors);
+
+  // Numeric per-layer Z map (zBottom / zTop per stack layer) for via
+  // emission. Same walk as the native exporter's layerZ, NUMERIC ONLY —
+  // pyAEDT is the basic/convenience exporter; the native COM export
+  // carries the fully parametric Z expressions.
+  const numericLayerZ = (() => {
+    const stack = scene.stack || [];
+    const map = {};
+    const isDev = (r) => r === 'waveguide' || r === 'conductor' || r === 'cladding';
+    const tOf = (l) => {
+      const v = evalExpr(l.thickness, paramValues);
+      return Number.isFinite(v) ? v : 1;
+    };
+    let firstDev = stack.findIndex(l => isDev(l.role));
+    if (firstDev === -1) firstDev = stack.length;
+    let z = 0;
+    for (let i = firstDev - 1; i >= 0; i--) {
+      const t = tOf(stack[i]);
+      map[stack[i].id] = { zBottom: z - t, zTop: z };
+      z -= t;
+    }
+    z = 0;
+    let i = firstDev;
+    while (i < stack.length) {
+      if (isDev(stack[i].role)) {
+        let runEnd = i;
+        while (runEnd + 1 < stack.length && isDev(stack[runEnd + 1].role)) runEnd++;
+        let maxT = 0;
+        for (let j = i; j <= runEnd; j++) {
+          const t = tOf(stack[j]);
+          map[stack[j].id] = { zBottom: z, zTop: z + t };
+          if (t > maxT) maxT = t;
+        }
+        z += maxT;
+        i = runEnd + 1;
+      } else {
+        const t = tOf(stack[i]);
+        map[stack[i].id] = { zBottom: z, zTop: z + t };
+        z += t;
+        i++;
+      }
+    }
+    return map;
+  })();
 
   // Bbox-centroid (in solved-world coords) of the group named `groupName`.
   // Used for pivot='group' rotates so every grouped member rotates about
@@ -137,6 +181,24 @@ def build_wg(name, cx, cy, w, h):
       const rNum = (evalExpr(c.r ?? '0', paramValues) || 0).toFixed(3);
       const zOrigin = c.layer === 'waveguide' ? '0' : 'h_wg';
       code += `hfss.modeler.create_cylinder(cs_axis="Z", origin=["${cx}um", "${cy}um", "${zOrigin}"], radius="${rNum}um", height="${layerThk}", name="${id}", material="${layerMat}")\n`;
+    } else if (shapeKind === 'via') {
+      // Via (D4) — BASIC numeric emission: cylinder from layerFrom's
+      // bottom to layerTo's top, Z values baked at export time. The
+      // native COM export keeps the full Z span parametric through the
+      // stack thickness expressions.
+      const rNum = (evalExpr(c.r ?? '0', paramValues) || 0).toFixed(3);
+      const zF = c.layerFrom ? numericLayerZ[c.layerFrom] : null;
+      const zT = c.layerTo ? numericLayerZ[c.layerTo] : null;
+      if (!zF || !zT || c.layerFrom === c.layerTo) {
+        code += `# Skipped via ${id}: layerFrom/layerTo unresolved or identical (fix in the Inspector)\n`;
+      } else {
+        const zStart = zF.zBottom;
+        const heightNum = zT.zTop - zF.zBottom;
+        const toLayer = (scene.stack || []).find(l => l.id === c.layerTo);
+        const viaMat = (toLayer && toLayer.role === 'conductor' && toLayer.material) ? ascii(toLayer.material) : 'gold';
+        code += `# ${c.id}: via ${ascii(String(c.layerFrom))} -> ${ascii(String(c.layerTo))} (numeric Z span; use the native COM export for parametric stack tracking)\n`;
+        code += `hfss.modeler.create_cylinder(cs_axis="Z", origin=["${cx}um", "${cy}um", "${zStart.toFixed(4)}um"], radius="${rNum}um", height="${heightNum.toFixed(4)}um", name="${id}", material="${viaMat}")\n`;
+      }
     } else if (shapeKind === 'ellipse') {
       const rxNum = (evalExpr(c.rx ?? '0', paramValues) || 0).toFixed(3);
       const ryNum = (evalExpr(c.ry ?? '0', paramValues) || 0).toFixed(3);
@@ -160,15 +222,59 @@ def build_wg(name, cx, cy, w, h):
       // a 2-D filled sheet, then thicken to the layer's thickness for
       // a 3-D body. Vertices are resolved numerically (snap-bound
       // vertices follow the target's solved position; rel vertices
-      // chain from the previous one). For parametric vertex tracking
-      // through HFSS sweeps, see the native-COM export.
+      // chain from the previous one; arc vertices expand along their
+      // circular arcs and spline runs interpolate with Catmull-Rom —
+      // the same tessellation the canvas and GDS use). For parametric
+      // vertex / arc / spline tracking through HFSS sweeps, see the
+      // native-COM export.
       const compById_ps = Object.fromEntries(solved.map(cc => [cc.id, cc]));
-      const verts = resolvePolylineVertices(c, compById_ps, paramValues);
+      const verts = tessellatePolylinePath(c, compById_ps, paramValues);
       const zOrigin = c.layer === 'waveguide' ? '0' : 'h_wg';
       const ptsStr = verts.map(([x, y]) => `["${x.toFixed(3)}um", "${y.toFixed(3)}um", "${zOrigin}"]`).join(', ');
-      code += `# ${c.id}: polygon-path (closed 2-D polygon → thicken_sheet)\n`;
+      code += `# ${c.id}: polygon-path (closed 2-D polygon → thicken_sheet; curves tessellated numerically)\n`;
       code += `_${id}_sheet = hfss.modeler.create_polyline(points=[${ptsStr}], cover_surface=True, close_surface=True, name="${id}", material="${layerMat}")\n`;
       code += `hfss.modeler.thicken_sheet("${id}", thickness="${layerThk}")\n`;
+    } else if (shapeKind === 'polyline') {
+      // Polyline trace — NUMERIC tessellation in the pyAEDT export
+      // (arcs, splines, and per-vertex tapers are captured at export
+      // values; the native-COM export is the fully parametric path
+      // with AngularArc / Spline segments and parametric taper quads).
+      const compById_pl = Object.fromEntries(solved.map(cc => [cc.id, cc]));
+      const zOrigin = c.layer === 'waveguide' ? '0' : 'h_wg';
+      if (polylineIsTapered(c)) {
+        // Tapered: per-segment quads (butt joins — same band geometry
+        // as the canvas / GDS / native HFSS export) emitted as covered
+        // sheets, united, then thickened to the layer thickness.
+        const { quads } = taperedBandQuads(c, compById_pl, paramValues);
+        if (quads.length === 0) {
+          code += `# ${c.id}: tapered polyline with no drawable segments — skipped\n`;
+        } else {
+          code += `# ${c.id}: TAPERED polyline — ${quads.length} per-segment quad sheet(s), numeric (see native export for parametric)\n`;
+          const names = [];
+          quads.forEach((q, k) => {
+            const name = k === 0 ? id : `${id}_tseg${k}`;
+            names.push(name);
+            const ptsStr = [...q, q[0]].map(([x, y]) => `["${x.toFixed(3)}um", "${y.toFixed(3)}um", "${zOrigin}"]`).join(', ');
+            code += `hfss.modeler.create_polyline(points=[${ptsStr}], cover_surface=True, close_surface=True, name="${name}", material="${layerMat}")\n`;
+          });
+          if (names.length > 1) {
+            code += `hfss.modeler.unite([${names.map(n => `"${n}"`).join(', ')}])\n`;
+          }
+          code += `hfss.modeler.thicken_sheet("${id}", thickness="${layerThk}")\n`;
+        }
+      } else {
+        // Constant width: tessellated centerline + rectangular
+        // cross-section sweep (the racetrack idiom).
+        const verts = tessellatePolylinePath(c, compById_pl, paramValues);
+        const wNum = evalExpr(c.width ?? '0', paramValues) || 0;
+        if (verts.length < 2 || !(wNum > 0)) {
+          code += `# ${c.id}: polyline with <2 vertices or zero width — skipped\n`;
+        } else {
+          const ptsStr = verts.map(([x, y]) => `["${x.toFixed(3)}um", "${y.toFixed(3)}um", "${zOrigin}"]`).join(', ');
+          code += `# ${c.id}: polyline trace (centerline tessellated numerically; arcs/splines expanded)\n`;
+          code += `hfss.modeler.create_polyline(points=[${ptsStr}]${c.closed ? ', close_surface=True' : ''}, xsection_type="Rectangle", xsection_width="${wNum.toFixed(4)}um", xsection_height="${layerThk}", name="${id}", material="${layerMat}")\n`;
+        }
+      }
     } else if (shapeKind === 'racetrack') {
       const R = evalExpr(c.R ?? '100', paramValues) || 100;
       const Ls = evalExpr(c.L_straight ?? '300', paramValues) || 300;
@@ -180,6 +286,26 @@ def build_wg(name, cx, cy, w, h):
       const ptsStr = pts.map(([x, y]) => `["${x.toFixed(3)}um", "${y.toFixed(3)}um", "${zOrigin}"]`).join(', ');
       code += `# ${c.id}: racetrack (R=${R.toFixed(2)}um, L=${Ls.toFixed(2)}um, p=${pE.toFixed(3)})\n`;
       code += `_${id}_centerline = hfss.modeler.create_polyline(points=[${ptsStr}], close_surface=True, xsection_type="Rectangle", xsection_width="${wgW.toFixed(4)}um", xsection_height="${layerThk}", name="${id}", material="${layerMat}")\n`;
+    } else if (shapeKind === 'rect' && (() => {
+      const crv = c.cornerRadius != null ? evalExpr(c.cornerRadius, paramValues) : 0;
+      return Number.isFinite(crv) && crv > 0;
+    })()) {
+      // Rounded rect (D3 corner fillet) — BASIC numeric emission: the
+      // rounded perimeter ring (same tessellation as the canvas / GDS)
+      // as a covered polyline, thickened to the layer. The native COM
+      // export emits the fully parametric 4-Line + 4-AngularArc version.
+      const crNum = evalExpr(c.cornerRadius, paramValues);
+      const baseInstRR = {
+        kind: 'rect', cx: c.cx, cy: c.cy, w: baseW, h: baseH,
+        cornerRadius: crNum, rotation: 0,
+      };
+      const ringRR = shapeInstanceToRing(baseInstRR);
+      const zOriginRR = c.layer === 'waveguide' ? '0' : 'h_wg';
+      const ptsStrRR = ringRR.map(([x, y]) => `["${x.toFixed(3)}um", "${y.toFixed(3)}um", "${zOriginRR}"]`).join(', ');
+      code += `# ${c.id}: rounded rect (cornerRadius = ${ascii(String(c.cornerRadius))}) — perimeter tessellated numerically\n`;
+      code += `# (use the native COM export for parametric tangent points + AngularArc corners)\n`;
+      code += `_${id}_sheet = hfss.modeler.create_polyline(points=[${ptsStrRR}], cover_surface=True, close_surface=True, name="${id}", material="${layerMat}")\n`;
+      code += `hfss.modeler.thicken_sheet("${id}", thickness="${layerThk}")\n`;
     } else {
       // Rectangle (default). Keep the original w/h expressions so HFSS
       // variable sweeps still drive the rect parametrically.
@@ -212,7 +338,14 @@ def build_wg(name, cx, cy, w, h):
     // a `duplicate_mirror` follows a `repeat` — without it the mirror
     // clone of the original gets the same name as a repeat clone,
     // corrupting the subsequent selection list.
-    let partTargets = c.layer === 'waveguide' && shapeKind === 'rect'
+    // Rounded rects (D3) emit as a single covered-polyline part named
+    // `id` even on the waveguide layer (no `<id>_rib`), so transform
+    // targets must follow suit.
+    const isRoundedRectPart = shapeKind === 'rect' && (() => {
+      const crv = c.cornerRadius != null ? evalExpr(c.cornerRadius, paramValues) : 0;
+      return Number.isFinite(crv) && crv > 0;
+    })();
+    let partTargets = c.layer === 'waveguide' && shapeKind === 'rect' && !isRoundedRectPart
       ? [`${id}_rib`]
       : [id];
     const knownNamesPrim = new Set(partTargets);
@@ -232,7 +365,9 @@ def build_wg(name, cx, cy, w, h):
     // pyAEDT is the convenience exporter; the native COM export keeps
     // zOffset fully parametric. Here we bake the evaluated offset as a
     // single Z move so the geometry matches the canvas/native export.
-    if (c.zOffset != null && String(c.zOffset).trim() !== '') {
+    // Vias are excluded: their Z span is fully determined by the
+    // layerFrom/layerTo bindings (zOffset is never offered on vias).
+    if (shapeKind !== 'via' && c.zOffset != null && String(c.zOffset).trim() !== '') {
       const zOffNum = evalExpr(c.zOffset, paramValues);
       if (Number.isFinite(zOffNum) && Math.abs(zOffNum) > 1e-12) {
         const partsStr0 = partTargets.map(p => `"${p}"`).join(', ');

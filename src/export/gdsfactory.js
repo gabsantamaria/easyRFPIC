@@ -33,8 +33,9 @@ import { solveLayout, applyMirrors } from '../scene/solver.js';
 import { expandTransforms } from '../scene/transforms.js';
 import { shapeInstanceToRing } from '../geometry/rings.js';
 import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/racetrack.js';
-import { resolvePolylineVertices } from '../geometry/polyline.js';
+import { tessellatePolylinePath, taperedBandQuads } from '../geometry/polyline.js';
 import { computeParametricPositions } from './hfss-native.js';
+import { viaGdsLayerMap } from './gds.js';
 
 // ── Expression translation: HFSS-style → Python-style ────────────────
 // computeParametricPositions emits expressions for HFSS, which means:
@@ -123,7 +124,18 @@ export function generateGdsfactory(scene, paramValues, options = {}) {
     layerMap.push({ key: `cond_${pyIdent(l.id)}`, num: 10 + i, datatype: 0, label: `conductor "${l.name || l.id}"` });
   });
   layerMap.push({ key: 'port', num: 100, datatype: 0, label: 'port' });
+  // Vias: one layer per distinct (layerFrom → layerTo) pair, 200+ —
+  // same assignment rule as the binary GDS export (viaGdsLayerMap).
+  const viaLayerEntries = viaGdsLayerMap(components);
+  for (const v of viaLayerEntries) {
+    layerMap.push({ key: `via_${pyIdent(v.key)}`, num: v.layer, datatype: 0, label: `via "${v.layerFrom} -> ${v.layerTo}"` });
+  }
+  const viaKeyByPair = Object.fromEntries(viaLayerEntries.map(v => [v.key, `via_${pyIdent(v.key)}`]));
   const layerKeyForComp = (c) => {
+    if (c.kind === 'via') {
+      return viaKeyByPair[`${c.layerFrom || '?'}->${c.layerTo || '?'}`]
+        || (viaLayerEntries[0] ? `via_${pyIdent(viaLayerEntries[0].key)}` : 'wg');
+    }
     if (c.layer === 'waveguide') return 'wg';
     if (c.layer === 'port') return 'port';
     if (c.layer === 'electrode') {
@@ -345,11 +357,36 @@ export function generateGdsfactory(scene, paramValues, options = {}) {
     const wExpr = exprToPython(c.w ?? '0');
     const hExpr = exprToPython(c.h ?? '0');
     if (kind === 'rect') {
+      // Rounded rect (D3): the corner-filleted perimeter is tessellated
+      // NUMERICALLY at export (same ring the canvas / GDS build) and
+      // emitted as instance-frame offsets — re-export after changing
+      // w / h / cornerRadius. Sharp rects stay fully parametric below.
+      const crNum = c.cornerRadius != null ? evalExpr(c.cornerRadius, paramValues) : 0;
+      if (Number.isFinite(crNum) && crNum > 0) {
+        const wNum = evalExpr(c.w ?? '0', paramValues) || 0;
+        const hNum = evalExpr(c.h ?? '0', paramValues) || 0;
+        const thetaNum = c.rotation != null ? (evalExpr(c.rotation, paramValues) || 0) : 0;
+        const ringRR = shapeInstanceToRing({
+          kind: 'rect', cx: 0, cy: 0, w: wNum, h: hNum,
+          cornerRadius: crNum, rotation: thetaNum,
+        });
+        const ptsToPyRR = '[' + ringRR.map(([x, y]) => `(${pyFloat(x)} + (${instCxExpr}), ${pyFloat(y)} + (${instCyExpr}))`).join(', ') + ']';
+        let outRR = `${indent}# ${c.id}: rounded rect (cornerRadius=${pyFloat(crNum)}) — perimeter baked numerically; re-export after dim changes\n`;
+        outRR += `${indent}c.add_polygon(${ptsToPyRR}, layer=LAYERS["${layerKey}"])\n`;
+        return outRR;
+      }
       return `${indent}c.add_polygon(_rect_pts(${instCxExpr}, ${instCyExpr}, ${wExpr}, ${hExpr}, ${instThetaExpr}), layer=LAYERS["${layerKey}"])\n`;
     }
     if (kind === 'circle') {
       const rExpr = exprToPython(c.r ?? '0');
       return `${indent}c.add_polygon(_circle_pts(${instCxExpr}, ${instCyExpr}, ${rExpr}), layer=LAYERS["${layerKey}"])\n`;
+    }
+    if (kind === 'via') {
+      // Via (D4): plan-view circle on its via-pair layer. Parametric
+      // center + radius like circles; the Z span (layerFrom / layerTo)
+      // has no GDS meaning beyond the layer-number encoding.
+      const rExpr = exprToPython(c.r ?? '0');
+      return `${indent}c.add_polygon(_circle_pts(${instCxExpr}, ${instCyExpr}, ${rExpr}), layer=LAYERS["${layerKey}"])  # via ${c.layerFrom} -> ${c.layerTo}\n`;
     }
     if (kind === 'ellipse') {
       const rxExpr = exprToPython(c.rx ?? '0');
@@ -366,9 +403,32 @@ export function generateGdsfactory(scene, paramValues, options = {}) {
     // the function signature so the polygon's shape sweeps under
     // Python-side parameter overrides. Snap-bound vertices follow the
     // target component's solved position (numerically captured here).
+    // Polyline trace: emit the BAND as numeric per-segment quads (the
+    // same butt-join geometry the canvas and HFSS build). Covers both
+    // constant-width and tapered traces — taperedBandQuads interpolates
+    // per-vertex widths and falls back to the base width along arc /
+    // spline segments (tessellated numerically, matching the canvas).
+    if (kind === 'polyline') {
+      const compById_pl = Object.fromEntries(solved.map(cc => [cc.id, cc]));
+      const { quads } = taperedBandQuads(c, compById_pl, paramValues);
+      if (quads.length === 0) {
+        return `${indent}# ${c.id}: polyline with no drawable segments — skipping\n`;
+      }
+      const ptsToPy = (pts) => '[' + pts.map(([x, y]) => `(${pyFloat(x - c.cx)} + (${instCxExpr}), ${pyFloat(y - c.cy)} + (${instCyExpr}))`).join(', ') + ']';
+      let out = `${indent}# ${c.id}: polyline trace — band emitted as ${quads.length} per-segment quad(s), baked numerically\n`;
+      out += `${indent}# (butt joins; arcs/splines tessellated — matches the canvas + HFSS band geometry)\n`;
+      for (const q of quads) {
+        out += `${indent}c.add_polygon(${ptsToPy(q)}, layer=LAYERS["${layerKey}"])\n`;
+      }
+      return out;
+    }
     if (kind === 'polyshape') {
       const compById_ps = Object.fromEntries(solved.map(cc => [cc.id, cc]));
-      const verts = resolvePolylineVertices(c, compById_ps, paramValues);
+      // Tessellated perimeter: arc vertices expand along their circular
+      // arcs, spline runs interpolate with Catmull-Rom — a numeric
+      // capture of the same geometry the canvas draws and HFSS builds
+      // natively (AngularArc / Spline segments).
+      const verts = tessellatePolylinePath(c, compById_ps, paramValues);
       if (verts.length < 3) {
         return `${indent}# ${c.id}: polyshape with <3 vertices — skipping\n`;
       }

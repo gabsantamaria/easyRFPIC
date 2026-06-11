@@ -98,6 +98,46 @@ export function arcEndpoint(prevX, prevY, cdx, cdy, angleDeg) {
   return rotateAbout(prevX, prevY, cx, cy, angleDeg);
 }
 
+// Synthesize a 90° circular arc from S to E ({x, y} points) for the
+// draw-UX arc mode and the inspector's line→arc converter. The center
+// sits on the perpendicular bisector of chord SE at distance |SE|/2
+// from the midpoint — the unique geometry where the sweep between S
+// and E is exactly 90°. Two candidates exist (one per side of the
+// chord), pairing with a +90° (CCW) or −90° (CW) sweep respectively.
+// We pick the side whose INITIAL TANGENT at S best aligns with
+// `prevDir` (the direction of the segment INTO S), so the arc
+// continues the path's current heading instead of doubling back. With
+// no usable prevDir the +90° CCW side wins (arbitrary but stable).
+// Returns { cdx, cdy, angle } — numeric center offset from S plus the
+// signed sweep — or null for a degenerate (zero-length) chord.
+export function synthArc90(S, E, prevDir = null) {
+  const dx = E.x - S.x, dy = E.y - S.y;
+  const len = Math.hypot(dx, dy);
+  if (!(len > 1e-9)) return null;
+  const ux = dx / len, uy = dy / len;
+  const nx = -uy, ny = ux; // CCW perpendicular of the chord direction
+  const mx = (S.x + E.x) / 2, my = (S.y + E.y) / 2;
+  const d = len / 2;
+  const cand = [
+    { cx: mx + d * nx, cy: my + d * ny, angle: 90 },
+    { cx: mx - d * nx, cy: my - d * ny, angle: -90 },
+  ];
+  let pick = cand[0];
+  if (prevDir && (Math.abs(prevDir.x) > 1e-12 || Math.abs(prevDir.y) > 1e-12)) {
+    let best = -Infinity;
+    for (const cd of cand) {
+      // Velocity at S for a sweep of sign(angle) about C is
+      // sign(angle) × rot90CCW(S − C).
+      const rx = S.x - cd.cx, ry = S.y - cd.cy;
+      const sgn = cd.angle > 0 ? 1 : -1;
+      const tx = sgn * -ry, ty = sgn * rx;
+      const dot = tx * prevDir.x + ty * prevDir.y;
+      if (dot > best) { best = dot; pick = cd; }
+    }
+  }
+  return { cdx: pick.cx - S.x, cdy: pick.cy - S.y, angle: pick.angle };
+}
+
 // Resolve all vertex world positions for a polyline. Returns
 // [[x0, y0], [x1, y1], ...] with length = vertices.length.
 //
@@ -215,8 +255,9 @@ export function catmullRomTessellate(pts, segsPerSpan = 8) {
 
 // Tessellate an arc from (px, py) about center (cx, cy) sweeping
 // `angleDeg` CCW. Returns intermediate + END points (start EXCLUDED so
-// runs can be concatenated).
-function tessellateArcFrom(px, py, cx, cy, angleDeg) {
+// runs can be concatenated). Exported for the canvas draw-UX arc
+// preview and the exporters' tapered-curve fallback.
+export function tessellateArcFrom(px, py, cx, cy, angleDeg) {
   const n = arcSegCount(angleDeg);
   const out = [];
   for (let k = 1; k <= n; k++) {

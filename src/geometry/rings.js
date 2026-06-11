@@ -24,13 +24,55 @@ const CIRCLE_TESSELATION = 64;
 // angle -θ — and `expandTransforms` already negates the rotation field
 // when a mirror transform fires, so applying scale-first here gives
 // the right pixels (see the matching comment in transforms.js).
+// Number of straight segments used to tessellate each 90° corner arc of
+// a rounded rectangle (D3 corner fillets). 8 segments per quarter-circle
+// matches the 64/360° density of CIRCLE_TESSELATION below.
+const FILLET_SEGS = 8;
+
+// Clamp a rect's corner-fillet radius to the geometric maximum
+// min(w, h)/2 (above which adjacent fillets would overlap). Returns 0
+// for non-finite / non-positive inputs so callers can treat "no fillet"
+// and "fillet" with one numeric test. Exported so the canvas renderer
+// and exporters clamp with the SAME rule the ring builder uses.
+export function clampCornerRadius(r, w, h) {
+  if (!Number.isFinite(r) || r <= 0) return 0;
+  const lim = Math.min(Math.abs(w), Math.abs(h)) / 2;
+  return Math.min(r, lim);
+}
+
 export function rectInstanceToRing(inst) {
   const halfW = inst.w / 2;
   const halfH = inst.h / 2;
-  let corners = [
-    [-halfW, -halfH], [halfW, -halfH],
-    [halfW, halfH], [-halfW, halfH],
-  ];
+  // D3 corner fillets: a positive cornerRadius (numeric, populated by
+  // expandTransforms from the component's expression and clamped here
+  // to min(w,h)/2) turns the 4-corner ring into a rounded-rect ring:
+  // 4 straight edges + 4 quarter-circle arcs tessellated FILLET_SEGS
+  // segments each. Downstream consumers (GDS BOUNDARY, boolean masks,
+  // snap bboxes) pick the rounding up with zero special-casing.
+  const rFillet = clampCornerRadius(inst.cornerRadius, inst.w, inst.h);
+  let corners;
+  if (rFillet > 0) {
+    corners = [];
+    // Corner arc centers + start angles, CCW order starting at the
+    // NE corner (right edge → top edge → left edge → bottom edge).
+    const arcs = [
+      [halfW - rFillet,  halfH - rFillet, 0],            // NE: 0° → 90°
+      [-halfW + rFillet, halfH - rFillet, Math.PI / 2],  // NW: 90° → 180°
+      [-halfW + rFillet, -halfH + rFillet, Math.PI],     // SW: 180° → 270°
+      [halfW - rFillet, -halfH + rFillet, 1.5 * Math.PI], // SE: 270° → 360°
+    ];
+    for (const [ax, ay, a0] of arcs) {
+      for (let i = 0; i <= FILLET_SEGS; i++) {
+        const t = a0 + (i / FILLET_SEGS) * (Math.PI / 2);
+        corners.push([ax + rFillet * Math.cos(t), ay + rFillet * Math.sin(t)]);
+      }
+    }
+  } else {
+    corners = [
+      [-halfW, -halfH], [halfW, -halfH],
+      [halfW, halfH], [-halfW, halfH],
+    ];
+  }
   const sx = inst.scaleX ?? 1;
   const sy = inst.scaleY ?? 1;
   if (sx !== 1 || sy !== 1) {
@@ -75,7 +117,11 @@ export function shapeInstanceToRing(inst) {
       inst.cy + mx * sa + my * ca,
     ];
   };
-  if (kind === 'circle') {
+  if (kind === 'circle' || kind === 'via') {
+    // Vias (D4) are geometrically circles in plan view — the layerFrom /
+    // layerTo span only matters in Z (exporters handle that); the ring,
+    // GDS boundary, boolean masks, and snap bbox all reuse the circle
+    // tessellation unchanged.
     const r = Number.isFinite(inst.r) ? inst.r : 0;
     const out = [];
     for (let i = 0; i < CIRCLE_TESSELATION; i++) {
