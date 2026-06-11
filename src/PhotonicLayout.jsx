@@ -2,11 +2,12 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { Plus, Trash2, RotateCcw, RotateCw, Download, Upload, Lock, Unlock, FlipHorizontal, FlipVertical, Layers, Settings2, Box, Square, Link2, Link2Off, Grid3x3, AlertTriangle, Maximize2, Save, FileText, FilePlus, Copy, FolderTree, BookOpen, Package, Boxes, Pencil, Ruler, Eye, EyeOff, ArrowDown, ArrowUp, Move, Repeat, Combine, Minus, X as XIcon, Circle, Hexagon, Radio, HelpCircle } from 'lucide-react';
 import { eulerBend180Centerline, buildRacetrackCenterline, offsetCenterlineToBand } from './geometry/racetrack.js';
 import { tokenizeIdents, tokenizeComponentExprs, resolveParams, evalExpr, RESERVED_IDENTS } from './scene/params.js';
+import { renameIdentInScene } from './scene/rename-ident.js';
 import { ANCHORS, parseAnchor, anchorLocal, anchorWorld } from './scene/anchors.js';
 import { rectInstanceToRing, shapeInstanceToRing } from './geometry/rings.js';
 import { expandTransforms } from './scene/transforms.js';
 import { detectPortIntegrationLine } from './scene/lumpedPort.js';
-import { solveLayout, applyMirrors, resolveBooleanBboxes } from './scene/solver.js';
+import { solveLayout, applyMirrors, resolveBooleanBboxes, validateSnapGraph } from './scene/solver.js';
 import { generateGDS } from './export/gds.js';
 import { generatePyAEDT } from './export/pyaedt.js';
 import { generateHfssNative } from './export/hfss-native.js';
@@ -3695,11 +3696,73 @@ export default function App() {
     });
   };
 
-  // Live count of scene issues (orphan/duplicate-to/cycle/NaN snaps); badges the Diagnose button.
+  // Live scene-issue feed — recomputed on every edit. Cheap O(components +
+  // snaps) checks ONLY; the deeper fix-it pass (validateScene + auto-fix)
+  // stays behind the diagnose button click. Drives the diagnose-button
+  // badge and the per-row ⚠ markers in the SNAPS panel. Every issue is
+  // normalized to validateSnapGraph's shape: { kind, snapId, compId, message }.
   const sceneIssues = useMemo(() => {
-    try { return validateScene(scene, paramValues); }
-    catch { return []; }
-  }, [scene, paramValues]);
+    const out = [];
+    // 1) Snap-graph structure: self-snaps, missing refs, duplicate targets,
+    //    cycles. Lives in the solver module so the checks can't drift from
+    //    what solveLayout actually tolerates.
+    try { out.push(...validateSnapGraph(scene.components, scene.snaps)); }
+    catch { /* never block render on a validator bug */ }
+    // 2) Snap offsets whose dx/dy expressions evaluate non-finite.
+    for (const s of scene.snaps || []) {
+      const dx = evalExpr(s.dx, paramValues);
+      const dy = evalExpr(s.dy, paramValues);
+      if (!Number.isFinite(dx) || !Number.isFinite(dy)) {
+        out.push({ kind: 'nan-offset', snapId: s.id, compId: s.to?.compId ?? null, message: `Snap "${s.id}" has invalid dx="${s.dx}" or dy="${s.dy}" (evaluates to NaN)` });
+      }
+    }
+    // 3) Parameter evaluation errors (circular / unresolvable expressions),
+    //    straight from resolveParams.
+    for (const [name, err] of Object.entries(paramErrors || {})) {
+      out.push({ kind: 'param-error', snapId: null, compId: null, message: `Param "${name}": ${err}` });
+    }
+    // 4) Degenerate dimensions: w/h non-finite or ≤ 0 breaks anchor math
+    //    and exports. Skip kinds whose w/h are solver-written (booleans
+    //    literally store '0'; polyline/polyshape bboxes are refreshed
+    //    numerically post-solve).
+    for (const c of scene.components || []) {
+      if (c.kind === 'boolean' || c.kind === 'polyline' || c.kind === 'polyshape') continue;
+      const w = evalExpr(c.w, paramValues);
+      const h = evalExpr(c.h, paramValues);
+      if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
+        out.push({ kind: 'bad-dims', snapId: null, compId: c.id, message: `"${c.id}" has degenerate size (w="${c.w}" → ${w}, h="${c.h}" → ${h}) — anchors and exports will misbehave` });
+      }
+    }
+    // 5) Conductor-layer binding health for electrode/port components.
+    //    Mirrors the Inspector's binding-picker states: STALE (bound id
+    //    deleted or no longer role='conductor') always flags; UNBOUND
+    //    flags only when 2+ conductors exist (with a single conductor the
+    //    implicit first-conductor fallback is unambiguous).
+    const conductorLayers = (scene.stack || []).filter(l => l.role === 'conductor');
+    if (conductorLayers.length > 0) {
+      for (const c of scene.components || []) {
+        if (c.layer !== 'electrode' && c.layer !== 'port') continue;
+        const bound = c.conductorLayerId || null;
+        if (bound && !conductorLayers.some(l => l.id === bound)) {
+          out.push({ kind: 'stale-conductor', snapId: null, compId: c.id, message: `"${c.id}" is bound to conductor layer "${bound}" which was deleted or is no longer a conductor — rebind in the Inspector` });
+        } else if (!bound && conductorLayers.length >= 2) {
+          out.push({ kind: 'unbound-conductor', snapId: null, compId: c.id, message: `"${c.id}" has no explicit conductor binding — export falls back to the first conductor ("${conductorLayers[0].name || conductorLayers[0].id}") in a ${conductorLayers.length}-conductor stack` });
+        }
+      }
+    }
+    return out;
+  }, [scene.components, scene.snaps, scene.stack, paramErrors, paramValues]);
+
+  // snapId → newline-joined issue messages, for the ⚠ markers on SNAPS
+  // panel rows.
+  const snapIssuesById = useMemo(() => {
+    const m = new Map();
+    for (const it of sceneIssues) {
+      if (it.snapId == null) continue;
+      m.set(it.snapId, m.has(it.snapId) ? `${m.get(it.snapId)}\n${it.message}` : it.message);
+    }
+    return m;
+  }, [sceneIssues]);
 
   const updateParam = (name, patch) => {
     updateScene(prev => ({
@@ -3750,14 +3813,16 @@ export default function App() {
     if (!newName || oldName === newName || scene.params[newName]) return;
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(newName)) return;
     updateScene(prev => {
+      // Rename the param KEY itself (preserving insertion order)…
       const newParams = {};
       for (const [k, v] of Object.entries(prev.params)) newParams[k === oldName ? newName : k] = v;
-      const repl = (e) => typeof e === 'string' ? e.replace(new RegExp(`\\b${oldName}\\b`, 'g'), newName) : e;
-      // Replace inside other params' expressions too
-      for (const k of Object.keys(newParams)) newParams[k] = { ...newParams[k], expr: repl(newParams[k].expr) };
-      const newComps = prev.components.map(c => ({ ...c, w: repl(c.w), h: repl(c.h) }));
-      const newSnaps = prev.snaps.map(s => ({ ...s, dx: repl(s.dx), dy: repl(s.dy) }));
-      return { ...prev, params: newParams, components: newComps, snaps: newSnaps };
+      // …then rewrite every expression field in the scene — param
+      // exprs, component dims and shape knobs, cutouts, transform
+      // chains, polyline/polyshape rel-vertices, snap offsets, stack
+      // layers, and the sim setup — via the shared walker. (The old
+      // inline version only covered params / w / h / snap dx,dy,
+      // leaving stale references everywhere else.)
+      return renameIdentInScene({ ...prev, params: newParams }, oldName, newName);
     });
   };
 
@@ -3788,6 +3853,44 @@ export default function App() {
       delete np[name];
       return { ...prev, params: np };
     });
+  };
+
+  // Gate stack edits that would orphan conductor-bound components.
+  // Passed to LevelGroup/LayerCard (LAYERS panel) in place of the raw
+  // updateScene. When an edit removes a conductor layer, or flips its
+  // role away from 'conductor', while components still bind it via
+  // conductorLayerId, we ask for confirmation first. On proceed the
+  // components keep the (now stale) binding — the Inspector already
+  // warns on stale bindings and offers rebinding there — this gate
+  // just makes the unbinding deliberate instead of silent. Every
+  // other stack edit (thickness, material, reorder, …) passes
+  // straight through synchronously.
+  const guardedStackUpdateScene = (updater) => {
+    let lost = null;
+    try {
+      // Dry-run the updater against the current scene snapshot to see
+      // what it does to the stack. LayerCard updaters are pure, so
+      // running them twice (here + inside updateScene) is safe.
+      const next = typeof updater === 'function' ? updater(scene) : updater;
+      const nextById = new Map((next.stack || []).map(l => [l.id, l]));
+      const lostLayers = (scene.stack || []).filter(l =>
+        l.role === 'conductor' &&
+        (!nextById.has(l.id) || nextById.get(l.id).role !== 'conductor')
+      );
+      if (lostLayers.length > 0) {
+        const lostIds = new Set(lostLayers.map(l => l.id));
+        const affected = scene.components.filter(c => c.conductorLayerId && lostIds.has(c.conductorLayerId));
+        if (affected.length > 0) lost = { layers: lostLayers, comps: affected };
+      }
+    } catch { /* detection failure must never block the edit */ }
+    if (!lost) { updateScene(updater); return; }
+    const layerNames = lost.layers.map(l => l.name || l.id).join(', ');
+    const compIds = lost.comps.map(c => c.id).join(', ');
+    confirmDialog(
+      `Conductor layer "${layerNames}" is still bound by: ${compIds}. Proceeding leaves those components with a stale conductor binding (the Inspector flags stale bindings — rebind them there). Continue?`,
+      'Conductor layer in use',
+      { confirmLabel: 'Proceed', confirmTone: 'danger' }
+    ).then(ok => { if (ok) updateScene(updater); });
   };
 
   const createMirror = (axis) => {
@@ -4562,7 +4665,7 @@ export default function App() {
               style={{ background: sceneIssues.length > 0 ? '#dc2626' : '#334155', color: '#e2e8f0' }}
               title={sceneIssues.length === 0
                 ? 'Validate scene: check for snap conflicts, orphans, cycles, broken expressions'
-                : `${sceneIssues.length} issue${sceneIssues.length === 1 ? '' : 's'} detected — click to diagnose`}
+                : `${sceneIssues.length} issue${sceneIssues.length === 1 ? '' : 's'} detected — click to diagnose\n${sceneIssues.slice(0, 8).map(it => `• ${it.message}`).join('\n')}${sceneIssues.length > 8 ? '\n…' : ''}`}
             >
               <AlertTriangle size={11} /> diagnose{sceneIssues.length > 0 ? ` (${sceneIssues.length})` : ''}
             </button>
@@ -5209,7 +5312,10 @@ export default function App() {
                       level={level}
                       scene={scene}
                       paramValues={paramValues}
-                      updateScene={updateScene}
+                      // Guarded: role changes away from 'conductor' and
+                      // conductor-layer deletes prompt when components
+                      // still bind the layer via conductorLayerId.
+                      updateScene={guardedStackUpdateScene}
                       commitExpr={commitExpr}
                     />
                   ));
@@ -5496,9 +5602,17 @@ export default function App() {
                 <p className="text-[10px] text-slate-500 italic px-1">Snaps form a graph; the root component is freely positioned, the rest follow.</p>
                 {scene.snaps.map(s => (
                   <div key={s.id} className="p-2 rounded text-xs border border-slate-700" style={{ background: '#1e293b' }}>
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="font-mono text-[10px] text-cyan-300 truncate">{s.from.compId}.{s.from.anchor} → {s.to.compId}.{s.to.anchor}</span>
-                      <button onClick={() => deleteSnap(s.id)} className="text-slate-500 hover:text-red-400"><Link2Off size={11} /></button>
+                    <div className="flex items-center gap-1 mb-1">
+                      <span className="font-mono text-[10px] text-cyan-300 truncate flex-1 min-w-0">{s.from.compId}.{s.from.anchor} → {s.to.compId}.{s.to.anchor}</span>
+                      {/* Live-validation marker: this snap id appears in the
+                          sceneIssues feed (orphan ref, duplicate target,
+                          cycle, NaN offset, …). Hover for the message(s). */}
+                      {snapIssuesById.has(s.id) && (
+                        <span className="text-amber-400 shrink-0 cursor-help" title={snapIssuesById.get(s.id)}>
+                          <AlertTriangle size={11} />
+                        </span>
+                      )}
+                      <button onClick={() => deleteSnap(s.id)} className="text-slate-500 hover:text-red-400 shrink-0"><Link2Off size={11} /></button>
                     </div>
                     <div className="grid grid-cols-2 gap-1 mt-1">
                       <div>
@@ -5972,8 +6086,24 @@ export default function App() {
                         const next = { ...c };
                         if (c.id === oldId) next.id = newId;
                         if (c.consumedBy === oldId) next.consumedBy = newId;
+                        // Punch-clone provenance tag — points at the
+                        // original tool component, so it must follow
+                        // a rename of that tool or deleteBoolean's
+                        // clone cleanup loses track of it.
+                        if (c.cloneOf === oldId) next.cloneOf = newId;
                         if (Array.isArray(c.operandIds)) {
                           next.operandIds = c.operandIds.map(opId => opId === oldId ? newId : opId);
+                        }
+                        // Polyline/polyshape snap-bound vertices pin to
+                        // (compId, anchor) — remap any that reference
+                        // the renamed component, or the solver / HFSS
+                        // export chase a dangling id post-rename.
+                        if (Array.isArray(c.vertices)) {
+                          next.vertices = c.vertices.map(v =>
+                            v && v.kind === 'snap' && v.compId === oldId
+                              ? { ...v, compId: newId }
+                              : v
+                          );
                         }
                         for (const f of ['w', 'h', 'r', 'rx', 'ry', 'n', 'R', 'L_straight', 'p', 'wgWidth']) {
                           if (typeof c[f] === 'string') next[f] = renameInExpr(c[f]);

@@ -150,6 +150,28 @@ export function normalizeScene(s) {
     transforms: c.transforms || [],
     ...c,
   }));
+  // Duplicate component ids: keep the first occurrence, rename each
+  // subsequent one to <id>_dup1/_dup2/…. References (snaps, operandIds,
+  // consumedBy, snap vertices) are NOT rewritten — they're ambiguous
+  // (they could mean either duplicate) — so we just warn. Duplicates
+  // would otherwise collapse in the solver's byId map and corrupt the
+  // synthetic _comp_<id>_* params.
+  {
+    const seen = new Set();
+    const renamed = [];
+    migratedComponents = migratedComponents.map(c => {
+      if (!seen.has(c.id)) { seen.add(c.id); return c; }
+      let n = 1;
+      let newId = `${c.id}_dup${n}`;
+      while (seen.has(newId)) newId = `${c.id}_dup${++n}`;
+      seen.add(newId);
+      renamed.push(`${c.id} → ${newId}`);
+      return { ...c, id: newId };
+    });
+    if (renamed.length > 0) {
+      console.warn(`normalizeScene: duplicate component ids renamed: ${renamed.join(', ')} (references left pointing at the first occurrence)`);
+    }
+  }
   const legacyBooleans = s.booleans || [];
   if (legacyBooleans.length > 0) {
     const consumedSet = new Set();
@@ -261,6 +283,39 @@ export function normalizeScene(s) {
         };
       });
     }
+  }
+
+  // Dangling-reference repair. Runs AFTER all component migrations so it
+  // sees the final id set.
+  {
+    const idSet = new Set(migratedComponents.map(c => c.id));
+    // Boolean operandIds pointing at nonexistent components → drop them.
+    // A missing operand would make refreshBooleanBbox silently skip it,
+    // and the SHAPES feature tree would render a ghost child.
+    migratedComponents = migratedComponents.map(c => {
+      if (c.kind !== 'boolean') return c;
+      const ops = c.operandIds || [];
+      const kept = ops.filter(id => idSet.has(id));
+      if (kept.length === ops.length) return c;
+      console.warn(`normalizeScene: boolean ${c.id} referenced missing operand(s): ${ops.filter(id => !idSet.has(id)).join(', ')} — dropped`);
+      return { ...c, operandIds: kept };
+    });
+    // Polyline/polyshape snap vertices pinned to a nonexistent component
+    // → convert to a zero-length rel step so the vertex resolves to the
+    // previous vertex's position instead of NaN.
+    migratedComponents = migratedComponents.map(c => {
+      if (c.kind !== 'polyline' && c.kind !== 'polyshape') return c;
+      let changed = false;
+      const vertices = (c.vertices || []).map(v => {
+        if (v && v.kind === 'snap' && v.compId && !idSet.has(v.compId)) {
+          console.warn(`normalizeScene: ${c.kind} ${c.id} vertex snapped to missing component ${v.compId} — converted to rel (0, 0)`);
+          changed = true;
+          return { kind: 'rel', dx: '0', dy: '0' };
+        }
+        return v;
+      });
+      return changed ? { ...c, vertices } : c;
+    });
   }
 
   // Simulation setup: HFSS-side knobs that aren't part of the layout

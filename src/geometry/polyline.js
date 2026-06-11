@@ -148,7 +148,9 @@ export function polylineBbox(c, verts, paramValues) {
   }
   if (!Number.isFinite(minX)) return { cx: c.cx ?? 0, cy: c.cy ?? 0, w: 0, h: 0 };
   const widthVal = evalExpr(c.width ?? '0', paramValues);
-  const halfW = (Number.isFinite(widthVal) ? widthVal : 0) / 2;
+  // Clamp to non-negative: a negative width expression would SHRINK the
+  // bbox below the vertex extent (or go negative outright).
+  const halfW = Math.max(0, Number.isFinite(widthVal) ? widthVal : 0) / 2;
   return {
     cx: (minX + maxX) / 2,
     cy: (minY + maxY) / 2,

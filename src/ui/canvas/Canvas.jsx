@@ -21,6 +21,18 @@ import { buildRacetrackCenterline } from '../../geometry/racetrack.js';
 import { ringToSvgPath } from '../../geometry/paths.js';
 import { resolvePolylineVertices } from '../../geometry/polyline.js';
 
+// Dimension-expression classification, shared by the resize-drag commit,
+// the resize-handle cursors, and the status bar. Three classes:
+//   - single identifier ("aw"): the parameter IS the dimension — a resize
+//     drag updates the parameter's expr.
+//   - pure numeric literal ("30", "2*(3+4)"): a resize rewrites the literal.
+//   - anything else ("cap_sep/2 - port_L/2"): a DERIVED expression — the
+//     resize drag can't cleanly invert it into parameter changes, so
+//     resizing that axis is a no-op and the UI must say so.
+const isSingleIdentExpr = (s) => typeof s === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(s.trim());
+const isLiteralNumExpr = (s) => typeof s === 'string' && /^[\d\s+\-*/.()]+$/.test(s.trim());
+const isExprBoundDim = (s) => !isSingleIdentExpr(s) && !isLiteralNumExpr(s);
+
 // =========================================================================
 // CANVAS
 // =========================================================================
@@ -331,6 +343,34 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         kind: 'snap',
         line: `Alt-drag · approach another component's anchor to snap`,
       };
+    } else if (drag && drag.kind === 'move' && drag.snapBound) {
+      // Plain move-drag on a solver-positioned component: warn that the
+      // solver will reassert the snap on release. Lives for the whole
+      // drag; clears with the rest of the statuses when drag → null.
+      const { compId, fromCompId, fromAnchor } = drag.snapBound;
+      status = {
+        kind: 'snap',
+        line: `⚠ ${compId} is positioned by snap from ${fromCompId}.${fromAnchor} — it will snap back on release. Alt-drag to re-snap, or edit dx/dy in SNAPS.`,
+      };
+    } else if (drag && drag.kind === 'resize') {
+      // Resize on an expression-bound axis is a no-op (the dimension is a
+      // derived quantity — see the resize commit logic). Tell the user why
+      // nothing is happening and where to actually change the size. Corner
+      // handles engage both axes, so both can report at once.
+      const a = drag.anchor || '';
+      const parts = [];
+      if ((a.includes('E') || a.includes('W')) && isExprBoundDim(drag.wExpr)) {
+        parts.push(`w is driven by '${drag.wExpr}'`);
+      }
+      if ((a.includes('N') || a.includes('S')) && isExprBoundDim(drag.hExpr)) {
+        parts.push(`h is driven by '${drag.hExpr}'`);
+      }
+      if (parts.length) {
+        status = {
+          kind: 'resize',
+          line: `${parts.join(' · ')} — edit the parameter(s) in PARAMS/Inspector to resize`,
+        };
+      }
     }
     setInteractionStatus(status);
   }, [snapMode, snapPick, snapHover, snapCursor, shiftKey, altKey, rulerMode, rulerInProgress, rulerSnapPoint, addMode, addDrag, addHoverSnap, drag, moveSnapHover, solved, paramValues, setInteractionStatus]);
@@ -722,6 +762,18 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         if (Math.abs(ddx) > Math.abs(ddy)) vy = last.y;
         else                                vx = last.x;
       }
+      // Polyshape close-by-click magnetism: mirror the mousemove handler's
+      // first-vertex snap so a click the preview shows as "closing" lands
+      // EXACTLY on vertex 0 — the 1e-6 closeOnFirst equality check below
+      // then triggers. Without this the click coordinates are recomputed
+      // fresh from the event and the click adds a stray vertex instead of
+      // closing the polygon.
+      if (addMode.shape === 'polyshape' && polylineDraft && polylineDraft.vertices.length >= 3) {
+        const first = polylineDraft.vertices[0];
+        if (Math.hypot(vx - first.x, vy - first.y) < worldThresh) {
+          vx = first.x; vy = first.y;
+        }
+      }
       const newVertex = {
         x: vx, y: vy,
         // Snap binding records the target compId + anchor AND the
@@ -870,6 +922,14 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       };
       const rootId = findSnapRoot(id);
       const rootComp = solved.find(c => c.id === rootId);
+      // Snap-bound detection: if the clicked component (or the cluster
+      // root) is the TO-side of any snap, its position is owned by the
+      // solver — a plain move-drag will be overwritten on the next solve
+      // and the part "snaps back" on release. We don't change the drag
+      // mechanics (that snap-back IS the intended constraint behavior);
+      // we surface a status-bar warning for the duration of the drag so
+      // the user knows why, and what to do instead.
+      const boundSnap = scene.snaps.find(s => s.to.compId === id || s.to.compId === rootId);
       // Boolean-cluster expansion: if the clicked component participates in
       // an enabled boolean, drag all its cluster mates' snap-roots together
       // so the boolean cluster moves as a single unit. Each co-mover is
@@ -994,6 +1054,13 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           clusterBboxH,
           clusterSet,                   // ids to EXCLUDE from alt-drag snap target search
           coMovers,                     // primitives to translate by drag delta
+          // Snap-bound warning payload (null when free): which component is
+          // solver-positioned and which snap from-side owns it.
+          snapBound: boundSnap ? {
+            compId: boundSnap.to.compId,
+            fromCompId: boundSnap.from.compId,
+            fromAnchor: boundSnap.from.anchor,
+          } : null,
         });
       }
       return;
@@ -1563,16 +1630,16 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         //     we also DON'T clobber c.w/c.h to a literal: that would break
         //     the parametric chain that other components (span rects) rely on.
         //   - Literal number (e.g., "30"): replace with the new numeric.
-        const isSingleIdent = (s) => typeof s === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(s.trim());
-        const isLiteralNum = (s) => typeof s === 'string' && /^[\d\s+\-*/.()]+$/.test(s.trim());
-        const wIsParam = isSingleIdent(drag.wExpr);
-        const hIsParam = isSingleIdent(drag.hExpr);
-        const wIsLiteral = !wIsParam && isLiteralNum(drag.wExpr || '');
-        const hIsLiteral = !hIsParam && isLiteralNum(drag.hExpr || '');
+        const wIsParam = isSingleIdentExpr(drag.wExpr);
+        const hIsParam = isSingleIdentExpr(drag.hExpr);
+        const wIsLiteral = !wIsParam && isLiteralNumExpr(drag.wExpr || '');
+        const hIsLiteral = !hIsParam && isLiteralNumExpr(drag.hExpr || '');
         // If w/h is an EXPRESSION (not single ident, not pure literal), we
         // leave it alone. The visual size won't reflect the drag attempt.
-        const wIsExpr = !wIsParam && !wIsLiteral;
-        const hIsExpr = !hIsParam && !hIsLiteral;
+        // (Same classification feeds the resize-handle cursors and the
+        // status-bar warning — see isExprBoundDim at module scope.)
+        const wIsExpr = isExprBoundDim(drag.wExpr);
+        const hIsExpr = isExprBoundDim(drag.hExpr);
 
         updateScene(prev => {
           let newParams = prev.params;
@@ -3197,11 +3264,17 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                 const local = anchorLocal(a, w, h);
                 const ax = c.cx + local.x;
                 const ay = -(c.cy + local.y);
+                // Expression-bound axes can't be resized by dragging (the
+                // commit logic skips them — the dimension is derived from
+                // parameters). Show 'not-allowed' on the handles that would
+                // engage a bound axis: E/W → w, N/S → h, corners → either.
+                const wBound = isExprBoundDim(c.w);
+                const hBound = isExprBoundDim(c.h);
                 let cursor = 'move';
-                if (a === 'NE' || a === 'SW') cursor = 'nesw-resize';
-                else if (a === 'NW' || a === 'SE') cursor = 'nwse-resize';
-                else if (a === 'N' || a === 'S') cursor = 'ns-resize';
-                else if (a === 'E' || a === 'W') cursor = 'ew-resize';
+                if (a === 'NE' || a === 'SW') cursor = (wBound || hBound) ? 'not-allowed' : 'nesw-resize';
+                else if (a === 'NW' || a === 'SE') cursor = (wBound || hBound) ? 'not-allowed' : 'nwse-resize';
+                else if (a === 'N' || a === 'S') cursor = hBound ? 'not-allowed' : 'ns-resize';
+                else if (a === 'E' || a === 'W') cursor = wBound ? 'not-allowed' : 'ew-resize';
                 return (
                   <rect
                     key={'h_' + a}

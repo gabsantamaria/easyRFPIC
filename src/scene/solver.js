@@ -25,6 +25,90 @@ import { anchorLocal, anchorWorld } from './anchors.js';
 import { expandTransforms } from './transforms.js';
 import { resolvePolylineVertices, polylineBbox, polyshapeBbox } from '../geometry/polyline.js';
 
+// ── Solve diagnostics ──────────────────────────────────────────────────
+// Module-level record refreshed by every solveLayout call. `converged`
+// flips false when the fixed-point iteration cap is hit while progress
+// was still being made; `issues` collects non-fatal solve anomalies
+// (e.g. snap offsets that evaluated non-finite and were zeroed). The UI
+// reads this after a solve to surface "your scene didn't settle" hints.
+let lastSolveDiagnostics = { converged: true, iterations: 0, issues: [] };
+
+export function getLastSolveDiagnostics() {
+  return lastSolveDiagnostics;
+}
+
+// Validate the snap graph for structural problems BEFORE solving. Cheap
+// (O(components + snaps)) so the UI can run it on every edit. Returns a
+// list of findings; an empty array means the graph is structurally sound.
+//
+// Checks:
+//   - 'duplicate-to':  two+ snaps share the same to.compId (a component's
+//                      position must be determined by exactly one snap) —
+//                      every snap after the first is flagged.
+//   - 'self-snap':     from.compId === to.compId.
+//   - 'missing-from':  from.compId references no existing component.
+//   - 'missing-to':    to.compId references no existing component.
+//   - 'cycle':         following to ← from parent edges loops back on
+//                      itself (the solver would never place any member).
+export function validateSnapGraph(components, snaps) {
+  const out = [];
+  const compIds = new Set((components || []).map(c => c.id));
+  // child compId → the FIRST snap that places it (duplicates flagged, and
+  // excluded from cycle detection so the parent map stays functional).
+  const parentSnap = new Map();
+  for (const s of snaps || []) {
+    if (!s) continue;
+    const sid = s.id ?? null;
+    const fromId = s.from?.compId ?? null;
+    const toId = s.to?.compId ?? null;
+    if (fromId && toId && fromId === toId) {
+      out.push({ kind: 'self-snap', snapId: sid, compId: fromId, message: `Snap targets its own source component "${fromId}"` });
+    }
+    if (fromId && !compIds.has(fromId)) {
+      out.push({ kind: 'missing-from', snapId: sid, compId: fromId, message: `Snap "from" references missing component "${fromId}"` });
+    }
+    if (toId && !compIds.has(toId)) {
+      out.push({ kind: 'missing-to', snapId: sid, compId: toId, message: `Snap "to" references missing component "${toId}"` });
+    }
+    if (toId) {
+      if (parentSnap.has(toId)) {
+        out.push({ kind: 'duplicate-to', snapId: sid, compId: toId, message: `Component "${toId}" is the target of more than one snap` });
+      } else {
+        parentSnap.set(toId, s);
+      }
+    }
+  }
+  // Cycle detection over the functional child → parent graph. Colors:
+  // 1 = on the current walk (in-stack), 2 = fully explored. Each node is
+  // walked at most once, so the whole pass stays O(n).
+  const color = new Map();
+  for (const startId of parentSnap.keys()) {
+    if (color.has(startId)) continue;
+    const stack = [];
+    let cur = startId;
+    while (cur != null && parentSnap.has(cur) && !color.has(cur)) {
+      color.set(cur, 1);
+      stack.push(cur);
+      cur = parentSnap.get(cur).from?.compId ?? null;
+    }
+    if (cur != null && color.get(cur) === 1) {
+      // `cur` is on the current walk → the tail of `stack` from `cur` on
+      // forms the cycle. Report it once, anchored on the closing snap.
+      const idx = stack.indexOf(cur);
+      const cycleNodes = stack.slice(idx);
+      const closing = parentSnap.get(cycleNodes[cycleNodes.length - 1]);
+      out.push({
+        kind: 'cycle',
+        snapId: closing?.id ?? null,
+        compId: cur,
+        message: `Snap cycle: ${cycleNodes.join(' → ')} → ${cur}`,
+      });
+    }
+    for (const n of stack) color.set(n, 2);
+  }
+  return out;
+}
+
 // Each snap is directional: `from` is the parent (already placed), `to` is the
 // child (placed relative to from). Snaps form a DAG. The solver settles
 // roots (components with no incoming snap) at their raw cx/cy, then iteratively
@@ -37,6 +121,9 @@ import { resolvePolylineVertices, polylineBbox, polyshapeBbox } from '../geometr
 // This way a component can be involved in many snaps: one positions it, the
 // rest propagate outward through it.
 export function solveLayout(components, snaps, paramValues) {
+  // Fresh diagnostics record for this solve; finalized before return.
+  const diag = { converged: true, iterations: 0, issues: [] };
+  lastSolveDiagnostics = diag;
   const byId = Object.fromEntries(components.map(c => [c.id, { ...c }]));
   // Working paramValues that grows with synthetic per-component position
   // entries (`_comp_<id>_cx`, `_comp_<id>_cy`) as components get placed.
@@ -50,56 +137,103 @@ export function solveLayout(components, snaps, paramValues) {
   // its operands' CURRENT positions. Used to make booleans participate in
   // the snap graph as first-class objects: their anchors derive from the
   // operand-bbox AABB, and snaps from/to the boolean use those anchors.
-  const refreshBooleanBbox = (b) => {
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    const visit = (cid) => {
+  // `inProgress` guards the refreshBooleanBbox → refreshBooleanBbox
+  // recursion (subtract/intersect base operands that are themselves
+  // booleans): a cyclic operand structure bails out instead of looping
+  // forever. The per-operand `visited` set inside operandBbox guards the
+  // nested-operand walk the same way.
+  const refreshBooleanBbox = (b, inProgress = new Set()) => {
+    if (inProgress.has(b.id)) return false; // cyclic operand structure
+    inProgress.add(b.id);
+    const done = (ok) => { inProgress.delete(b.id); return ok; };
+    // AABB of a single operand. Nested booleans contribute the union of
+    // their own operands (recursively). We DON'T expand transforms here
+    // (solveLayout is pre-transform); transform-based expansion happens
+    // in expandTransforms downstream. The bbox here is the BASE rect,
+    // which is what snap targets should use.
+    const operandBbox = (cid, visited) => {
+      if (visited.has(cid)) return null; // cycle — already on this walk
+      visited.add(cid);
       const c = byId[cid];
-      if (!c) return;
+      if (!c) return null;
       if (c.kind === 'boolean') {
-        // Recurse: nested boolean's bbox is built from its own operands.
-        for (const opid of (c.operandIds || [])) visit(opid);
-        return;
+        let bb = null;
+        for (const opid of (c.operandIds || [])) {
+          const obb = operandBbox(opid, visited);
+          if (!obb) continue;
+          bb = bb
+            ? {
+                minX: Math.min(bb.minX, obb.minX), maxX: Math.max(bb.maxX, obb.maxX),
+                minY: Math.min(bb.minY, obb.minY), maxY: Math.max(bb.maxY, obb.maxY),
+              }
+            : obb;
+        }
+        return bb;
       }
-      // Primitive: account for its w/h and position. We DON'T expand
-      // transforms here (solveLayout is pre-transform); transform-based
-      // expansion would happen in expandTransforms downstream. The bbox
-      // here is the BASE rect, which is what snap targets should use.
       const w = evalExpr(c.w, workingPV);
       const h = evalExpr(c.h, workingPV);
-      if (!Number.isFinite(w) || !Number.isFinite(h)) return;
-      const x0 = c.cx - w / 2, x1 = c.cx + w / 2;
-      const y0 = c.cy - h / 2, y1 = c.cy + h / 2;
-      if (x0 < minX) minX = x0; if (x1 > maxX) maxX = x1;
-      if (y0 < minY) minY = y0; if (y1 > maxY) maxY = y1;
+      if (!Number.isFinite(w) || !Number.isFinite(h)) return null;
+      return { minX: c.cx - w / 2, maxX: c.cx + w / 2, minY: c.cy - h / 2, maxY: c.cy + h / 2 };
     };
-    for (const opid of (b.operandIds || [])) visit(opid);
-    if (!Number.isFinite(minX)) return false;
-    // For SUBTRACT and INTERSECT, restrict the bbox to operand 0 (the base).
+    // Per-operand bboxes, kept separate so INTERSECT can take the AABB
+    // intersection instead of the union. Each operand gets a fresh
+    // visited set (seeded with b.id so a self-referencing operand bails
+    // immediately); sharing one set across operands would wrongly zero
+    // out diamond-shared sub-operands in the intersect math.
+    const opBbs = (b.operandIds || []).map(opid => operandBbox(opid, new Set([b.id])));
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const bb of opBbs) {
+      if (!bb) continue;
+      if (bb.minX < minX) minX = bb.minX; if (bb.maxX > maxX) maxX = bb.maxX;
+      if (bb.minY < minY) minY = bb.minY; if (bb.maxY > maxY) maxY = bb.maxY;
+    }
+    if (!Number.isFinite(minX)) return done(false);
+    // For SUBTRACT/PUNCH, restrict the bbox to operand 0 (the base). For
+    // INTERSECT, take the AABB intersection of all operand bboxes — the
+    // result region can't extend past any operand. An empty intersection
+    // (disjoint operands) falls back to the base bbox: degenerate but
+    // defined, so snaps targeting the boolean don't explode.
     if (b.op === 'subtract' || b.op === 'intersect' || b.op === 'punch') {
-      minX = Infinity; maxX = -Infinity; minY = Infinity; maxY = -Infinity;
-      const base = byId[b.operandIds?.[0]];
+      const baseId = b.operandIds?.[0];
+      const base = baseId != null ? byId[baseId] : null;
+      let baseBb = null;
       if (base) {
         if (base.kind === 'boolean') {
-          // Recurse to get the base boolean's bbox.
-          if (!refreshBooleanBbox(base)) return false;
-          const bw = base.w, bh = base.h;
-          minX = base.cx - bw / 2; maxX = base.cx + bw / 2;
-          minY = base.cy - bh / 2; maxY = base.cy + bh / 2;
+          // Recurse to get the base boolean's bbox with ITS op-specific
+          // restriction applied (operandBbox's union would be looser).
+          if (refreshBooleanBbox(base, inProgress)) {
+            baseBb = {
+              minX: base.cx - base.w / 2, maxX: base.cx + base.w / 2,
+              minY: base.cy - base.h / 2, maxY: base.cy + base.h / 2,
+            };
+          }
         } else {
-          const w = evalExpr(base.w, workingPV);
-          const h = evalExpr(base.h, workingPV);
-          if (!Number.isFinite(w) || !Number.isFinite(h)) return false;
-          minX = base.cx - w / 2; maxX = base.cx + w / 2;
-          minY = base.cy - h / 2; maxY = base.cy + h / 2;
+          baseBb = opBbs[0];
         }
       }
-      if (!Number.isFinite(minX)) return false;
+      if (!baseBb) return done(false);
+      if (b.op === 'intersect') {
+        let ix0 = baseBb.minX, ix1 = baseBb.maxX, iy0 = baseBb.minY, iy1 = baseBb.maxY;
+        for (let i = 1; i < opBbs.length; i++) {
+          const obb = opBbs[i];
+          if (!obb) continue;
+          ix0 = Math.max(ix0, obb.minX); ix1 = Math.min(ix1, obb.maxX);
+          iy0 = Math.max(iy0, obb.minY); iy1 = Math.min(iy1, obb.maxY);
+        }
+        if (ix0 <= ix1 && iy0 <= iy1) {
+          minX = ix0; maxX = ix1; minY = iy0; maxY = iy1;
+        } else {
+          minX = baseBb.minX; maxX = baseBb.maxX; minY = baseBb.minY; maxY = baseBb.maxY;
+        }
+      } else {
+        minX = baseBb.minX; maxX = baseBb.maxX; minY = baseBb.minY; maxY = baseBb.maxY;
+      }
     }
     b.cx = (minX + maxX) / 2;
     b.cy = (minY + maxY) / 2;
     b.w = maxX - minX;
     b.h = maxY - minY;
-    return true;
+    return done(true);
   };
   // Recompute a polyline's AABB-derived w/h from its resolved vertex
   // positions. UNLIKE refreshBooleanBbox we do NOT overwrite c.cx /
@@ -135,14 +269,20 @@ export function solveLayout(components, snaps, paramValues) {
     // half-width padding) rather than operand AABBs.
     if (c.kind === 'polyline') refreshPolylineBbox(c);
     if (c.kind === 'polyshape') refreshPolyshapeBbox(c);
-    workingPV[`_comp_${c.id}_cx`] = c.cx;
-    workingPV[`_comp_${c.id}_cy`] = c.cy;
+    // NaN guards: never write a non-finite synthetic. A NaN here would
+    // silently poison every downstream expression that references it
+    // (the poisoned expression evaluates to 0 via evalExpr's fallback,
+    // collapsing dependent geometry to the origin).
+    if (Number.isFinite(c.cx)) workingPV[`_comp_${c.id}_cx`] = c.cx;
+    if (Number.isFinite(c.cy)) workingPV[`_comp_${c.id}_cy`] = c.cy;
     // Resolved width/height too. Span expressions read these so the spanning
     // child stays connected to a parent even when the parent's width/height
     // is itself an expression like "cap_sep/2 - port_L/2" (which would
     // otherwise be embedded as TEXT in the span and not track parent edits).
-    workingPV[`_comp_${c.id}_w`] = typeof c.w === 'number' ? c.w : evalExpr(c.w, workingPV);
-    workingPV[`_comp_${c.id}_h`] = typeof c.h === 'number' ? c.h : evalExpr(c.h, workingPV);
+    const wNum = typeof c.w === 'number' ? c.w : evalExpr(c.w, workingPV);
+    const hNum = typeof c.h === 'number' ? c.h : evalExpr(c.h, workingPV);
+    if (Number.isFinite(wNum)) workingPV[`_comp_${c.id}_w`] = wNum;
+    if (Number.isFinite(hNum)) workingPV[`_comp_${c.id}_h`] = hNum;
   };
   const placed = new Set();
   const dependents = new Set(snaps.map(s => s.to.compId));
@@ -189,8 +329,19 @@ export function solveLayout(components, snaps, paramValues) {
       const tw = typeof toComp.w === 'number' ? toComp.w : evalExpr(toComp.w, workingPV);
       const th = typeof toComp.h === 'number' ? toComp.h : evalExpr(toComp.h, workingPV);
       const toLocal = anchorLocal(s.to.anchor, tw, th);
-      const dx = evalExpr(s.dx, workingPV);
-      const dy = evalExpr(s.dy, workingPV);
+      // Non-finite snap offsets (e.g. a dx expression that divides by a
+      // zero-valued param) are zeroed so the child still lands somewhere
+      // sane; the anomaly is surfaced via solve diagnostics.
+      let dx = evalExpr(s.dx, workingPV);
+      let dy = evalExpr(s.dy, workingPV);
+      if (!Number.isFinite(dx)) {
+        diag.issues.push({ kind: 'nan-snap-offset', message: `Snap ${s.id ?? `${s.from.compId}→${s.to.compId}`}: dx "${s.dx}" evaluated non-finite — treated as 0` });
+        dx = 0;
+      }
+      if (!Number.isFinite(dy)) {
+        diag.issues.push({ kind: 'nan-snap-offset', message: `Snap ${s.id ?? `${s.from.compId}→${s.to.compId}`}: dy "${s.dy}" evaluated non-finite — treated as 0` });
+        dy = 0;
+      }
       const targetCx = fromAnchor.x + dx - toLocal.x;
       const targetCy = fromAnchor.y + dy - toLocal.y;
       if (toComp.kind === 'boolean') {
@@ -203,7 +354,10 @@ export function solveLayout(components, snaps, paramValues) {
           // Only shift CONSUMED operands. A punch keeps its tool
           // independent, so a snap on the boolean must not drag the
           // tool along — that would mimic KeepOriginals=False semantics.
+          const shiftVisited = new Set([toComp.id]); // cycle guard for nested booleans
           const shiftCluster = (cid, parentBoolId) => {
+            if (shiftVisited.has(cid)) return;
+            shiftVisited.add(cid);
             const c = byId[cid];
             if (!c) return;
             if (parentBoolId && c.consumedBy !== parentBoolId) return;
@@ -213,8 +367,8 @@ export function solveLayout(components, snaps, paramValues) {
               c.cx += dxShift;
               c.cy += dyShift;
               if (placed.has(c.id)) {
-                workingPV[`_comp_${c.id}_cx`] = c.cx;
-                workingPV[`_comp_${c.id}_cy`] = c.cy;
+                if (Number.isFinite(c.cx)) workingPV[`_comp_${c.id}_cx`] = c.cx;
+                if (Number.isFinite(c.cy)) workingPV[`_comp_${c.id}_cy`] = c.cy;
               }
             }
           };
@@ -241,6 +395,13 @@ export function solveLayout(components, snaps, paramValues) {
       progressed = true;
     }
   }
+  diag.iterations = iters;
+  if (progressed && iters >= 100) {
+    // Loop exited on the iteration cap while still making progress —
+    // the snap graph didn't settle (likely a cycle or pathological chain).
+    diag.converged = false;
+    diag.issues.push({ kind: 'iteration-cap', message: 'Snap solver hit the 100-iteration cap without settling' });
+  }
   // Final pass: refresh boolean bboxes for ANY boolean whose operands have
   // moved since the boolean was last refreshed. This catches consumed
   // (nested) booleans that don't get re-placed in the snap loop above.
@@ -256,11 +417,12 @@ export function solveLayout(components, snaps, paramValues) {
       if (stored.cx !== beforeCx || stored.cy !== beforeCy ||
           stored.w !== beforeW || stored.h !== beforeH) {
         changed = true;
-        // Re-record synthetics for this boolean.
-        workingPV[`_comp_${c.id}_cx`] = stored.cx;
-        workingPV[`_comp_${c.id}_cy`] = stored.cy;
-        workingPV[`_comp_${c.id}_w`] = stored.w;
-        workingPV[`_comp_${c.id}_h`] = stored.h;
+        // Re-record synthetics for this boolean (finite values only —
+        // see the NaN-guard note in recordPlaced).
+        if (Number.isFinite(stored.cx)) workingPV[`_comp_${c.id}_cx`] = stored.cx;
+        if (Number.isFinite(stored.cy)) workingPV[`_comp_${c.id}_cy`] = stored.cy;
+        if (Number.isFinite(stored.w)) workingPV[`_comp_${c.id}_w`] = stored.w;
+        if (Number.isFinite(stored.h)) workingPV[`_comp_${c.id}_h`] = stored.h;
       }
     }
     if (!changed) break;
@@ -375,10 +537,11 @@ export function resolveBooleanBboxes(solved, paramValues) {
       const ops = (c.operandIds || []).map(id => byId[id]).filter(Boolean);
       if (ops.length < 2) continue;
       if (!ops.every(o => o.kind !== 'boolean' || resolved.has(o.id))) continue;
-      // Compute the AABB.
+      // Compute the AABB. Per-operand bboxes are kept so INTERSECT can
+      // take the AABB intersection below.
+      const opBbs = ops.map(op => bboxOfComponent(op));
       let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-      for (const op of ops) {
-        const bb = bboxOfComponent(op);
+      for (const bb of opBbs) {
         if (!bb) continue;
         if (bb.minX < minX) minX = bb.minX;
         if (bb.maxX > maxX) maxX = bb.maxX;
@@ -390,16 +553,33 @@ export function resolveBooleanBboxes(solved, paramValues) {
         resolved.add(c.id);
         continue;
       }
-      // For SUBTRACT and INTERSECT, the result region is bounded by the
-      // BASE operand (operand 0) — using its bbox is a tighter estimate
-      // than the full operand-union bbox. INTERSECT is bounded by the
-      // intersection of operands, but that requires polygon math; we use
-      // the base bbox as a safe over-approximation.
-      if (c.op === 'subtract' || c.op === 'intersect' || c.op === 'punch') {
-        const bb0 = bboxOfComponent(ops[0]);
+      // For SUBTRACT and PUNCH, the result region is bounded by the BASE
+      // operand (operand 0) — using its bbox is a tighter estimate than
+      // the full operand-union bbox. For INTERSECT, the result can't
+      // extend past ANY operand, so take the AABB intersection of all
+      // operand bboxes (max of mins / min of maxs); if the operands are
+      // disjoint (empty intersection), fall back to the base bbox —
+      // degenerate but defined, so snaps targeting it don't explode.
+      if (c.op === 'subtract' || c.op === 'punch') {
+        const bb0 = opBbs[0];
         if (bb0) {
           minX = bb0.minX; maxX = bb0.maxX;
           minY = bb0.minY; maxY = bb0.maxY;
+        }
+      } else if (c.op === 'intersect') {
+        let ix0 = -Infinity, ix1 = Infinity, iy0 = -Infinity, iy1 = Infinity;
+        let any = false;
+        for (const bb of opBbs) {
+          if (!bb) continue; // unknown operand bbox — don't constrain
+          any = true;
+          ix0 = Math.max(ix0, bb.minX); ix1 = Math.min(ix1, bb.maxX);
+          iy0 = Math.max(iy0, bb.minY); iy1 = Math.min(iy1, bb.maxY);
+        }
+        if (any && ix0 <= ix1 && iy0 <= iy1) {
+          minX = ix0; maxX = ix1; minY = iy0; maxY = iy1;
+        } else if (opBbs[0]) {
+          minX = opBbs[0].minX; maxX = opBbs[0].maxX;
+          minY = opBbs[0].minY; maxY = opBbs[0].maxY;
         }
       }
       // Boolean's stored cx/cy is its anchor for drag; we keep that intact

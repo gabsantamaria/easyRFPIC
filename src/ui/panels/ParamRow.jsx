@@ -10,6 +10,7 @@
 // Extracted from PhotonicLayout.jsx as Stage 4.5 of the planned refactor.
 import React, { useState, useRef, useEffect } from 'react';
 import { Trash2, AlertTriangle } from 'lucide-react';
+import { RESERVED_IDENTS } from '../../scene/params.js';
 import { HoverTooltip } from '../HoverTooltip.jsx';
 import { ParamTuner } from './ParamTuner.jsx'; // EXPERIMENTAL — see ParamTuner.jsx for removal instructions
 import { DeferredTextInput } from '../DeferredTextInput.jsx';
@@ -66,6 +67,15 @@ export function ParamRow({ name, p, onRename, onUpdateExpr, onCommitExpr, onUpda
       {/* Compact single row */}
       <div className="flex items-center gap-1 px-1.5 py-1">
         {isUnused && <span className="text-amber-500 text-[10px]" title="Unused">○</span>}
+        {/* Hygiene warning: the param name shadows a built-in math
+            function / constant / unit suffix (RESERVED_IDENTS). The
+            evaluator resolves the built-in first, so expressions that
+            call it break in confusing ways. */}
+        {RESERVED_IDENTS.has(name) && (
+          <span className="text-amber-400 shrink-0 cursor-help" title={`shadows built-in '${name}' — expressions like ${name}(x) will break`}>
+            <AlertTriangle size={10} />
+          </span>
+        )}
         <HoverTooltip text={nameTooltip}>
           <input
             ref={inputRef}
