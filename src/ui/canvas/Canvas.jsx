@@ -16,7 +16,7 @@ import { evalExpr } from '../../scene/params.js';
 import { solveLayout, applyMirrors, resolveBooleanBboxes } from '../../scene/solver.js';
 import { expandTransforms } from '../../scene/transforms.js';
 import { detectPortIntegrationLine } from '../../scene/lumpedPort.js';
-import { shapeInstanceToRing, clampCornerRadius } from '../../geometry/rings.js';
+import { shapeInstanceToRing, clampCornerRadius, remapPointsToInstance } from '../../geometry/rings.js';
 import { buildRacetrackCenterline } from '../../geometry/racetrack.js';
 import { ringToSvgPath } from '../../geometry/paths.js';
 import {
@@ -3688,11 +3688,16 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                     // (endpoint ± (w/2)·normal, BUTT joins) — EXACTLY the
                     // per-segment sheets the HFSS export unites, keeping
                     // canvas/HFSS geometric compatibility.
+                    // Quads are computed at the component's BASE pose;
+                    // remap into this instance's frame so repeat / mirror
+                    // / rotate clones land where expandTransforms put
+                    // them (same math as rings.js → GDS / boolean masks).
                     const { quads } = taperedBandQuads(cPl, compById_pl, paramValues, transformInstances);
                     if (quads.length > 0) {
                       let d = '';
                       for (const q of quads) {
-                        d += `M ${q[0][0]} ${-q[0][1]} L ${q[1][0]} ${-q[1][1]} L ${q[2][0]} ${-q[2][1]} L ${q[3][0]} ${-q[3][1]} Z `;
+                        const qi = remapPointsToInstance(q, inst, c.cx, c.cy);
+                        d += `M ${qi[0][0]} ${-qi[0][1]} L ${qi[1][0]} ${-qi[1][1]} L ${qi[2][0]} ${-qi[2][1]} L ${qi[3][0]} ${-qi[3][1]} Z `;
                       }
                       shapeElement = (
                         <path d={d} {...dataCompProps} />
@@ -3701,7 +3706,12 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                       shapeElement = null;
                     }
                   } else {
-                    const verts = tessellatePolylinePath(cPl, compById_pl, paramValues, transformInstances);
+                    // Tessellated at the BASE pose, remapped per instance —
+                    // without the remap every repeat clone drew the same
+                    // path stacked on the original (the repeat appeared to
+                    // do nothing for polylines/polyshapes).
+                    const baseVerts = tessellatePolylinePath(cPl, compById_pl, paramValues, transformInstances);
+                    const verts = remapPointsToInstance(baseVerts, inst, c.cx, c.cy);
                     if (verts.length >= 2 && wgW > 0) {
                       let d = `M ${verts[0][0]} ${-verts[0][1]}`;
                       for (let k = 1; k < verts.length; k++) {
@@ -3752,7 +3762,13 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   // C3 live preview (see the polyline branch above).
                   const cPs = (vertexDrag && vertexDrag.compId === c.id && vertexDrag.preview)
                     ? { ...c, vertices: vertexDrag.preview } : c;
-                  const verts = tessellatePolylinePath(cPs, compById_ps, paramValues, transformInstances);
+                  // BASE-pose tessellation remapped into this instance's
+                  // frame (translate + mirror scale + rotation about the
+                  // instance anchor) — the same xform rings.js applies for
+                  // GDS / boolean masks. Without it, repeat clones all drew
+                  // at the base position (repeat looked like a no-op).
+                  const baseVerts = tessellatePolylinePath(cPs, compById_ps, paramValues, transformInstances);
+                  const verts = remapPointsToInstance(baseVerts, inst, c.cx, c.cy);
                   if (verts.length >= 3) {
                     let d = `M ${verts[0][0]} ${-verts[0][1]}`;
                     for (let k = 1; k < verts.length; k++) {
@@ -3858,7 +3874,12 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                 // For polygons, racetracks, and polylines the ring/path
                 // already includes the per-vertex rotation; skip double-
                 // rotating via the wrapping group.
-                const wrapTransform = (shapeKind === 'polygon' || shapeKind === 'racetrack' || shapeKind === 'polyline') ? undefined : rotAttr;
+                // Shapes whose path math already bakes the instance's
+                // rotation into the points (rings / remapPointsToInstance)
+                // must NOT also get the SVG rotate wrapper — that would
+                // double-rotate. polyshape joined this set when its render
+                // switched to remapPointsToInstance.
+                const wrapTransform = (shapeKind === 'polygon' || shapeKind === 'racetrack' || shapeKind === 'polyline' || shapeKind === 'polyshape') ? undefined : rotAttr;
                 // Hit-pad: a transparent rect sized to at least
                 // MIN_HIT_PX on each axis, rendered BELOW the visible
                 // shape with the same data-comp-id. Only emitted when

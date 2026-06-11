@@ -40,6 +40,32 @@ export function clampCornerRadius(r, w, h) {
   return Math.min(r, lim);
 }
 
+// Remap world-space points that were resolved at a component's BASE pose
+// into a transform-instance's frame: translate to local about (bx, by),
+// apply the instance's mirror scale then rotation, re-anchor at
+// (inst.cx, inst.cy). This is EXACTLY the xform shapeInstanceToRing
+// applies to a polyline/polyshape's `_resolvedVerts` — exported so the
+// canvas renderers draw repeat/mirror/rotate clones with the SAME math
+// that feeds GDS and the boolean masks. Identity poses return the input
+// array unchanged (cheap fast path for the base instance).
+export function remapPointsToInstance(pts, inst, bx, by) {
+  const baseX = Number.isFinite(bx) ? bx : inst.cx;
+  const baseY = Number.isFinite(by) ? by : inst.cy;
+  const rot = inst.rotation || 0;
+  const sx = inst.scaleX ?? 1;
+  const sy = inst.scaleY ?? 1;
+  if (inst.cx === baseX && inst.cy === baseY && !rot && sx === 1 && sy === 1) {
+    return pts;
+  }
+  const rad = rot * Math.PI / 180;
+  const ca = Math.cos(rad), sa = Math.sin(rad);
+  return pts.map(([px, py]) => {
+    const mx = (px - baseX) * sx;
+    const my = (py - baseY) * sy;
+    return [inst.cx + mx * ca - my * sa, inst.cy + mx * sa + my * ca];
+  });
+}
+
 export function rectInstanceToRing(inst) {
   const halfW = inst.w / 2;
   const halfH = inst.h / 2;
