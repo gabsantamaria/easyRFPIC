@@ -228,6 +228,19 @@ Define once, instantiate many, update all (`src/scene/cells.js`):
 - **Storage**: defs persist per-workspace under `cellPrefix` (`src/storage/workspace.js`: `listCellDefs`/`loadCellDef`/`saveCellDef`/`deleteCellDef`, bundled into workspace export/import via `library-items.js`) AND embed into `scene.cells` (normalizeScene passthrough) so a shared design brings its cells along. The app overlays `scene.cells` over workspace defs for display.
 - **UI**: CELLS section in the library panel — save selection as cell (warnings surfaced), insert instance (prompted prefix, auto-suggested `u<n>`, post-insert hint pointing at the `<prefix>_*` params), update instances (per-instance change summary confirm).
 
+## AI geometry assistant
+
+Natural-language / sketch-image → parametric scene fragment, via the user's own Anthropic API key (✨ header button → `src/ui/AiAssistantDialog.jsx`).
+
+- **`src/ai/assistant.js`** (pure, fully tested — `tests/ai-assistant.test.js`):
+  - `buildSystemPrompt(scene, prefix, paramValues)` — teaches Claude THIS app: component schema per kind (numeric cx/cy, expression-string dimensions), vertex model, snap mechanics (9 anchors, parent→child, one-snap-per-child, chains), transforms (repeat/displace/rotate), the parametrize-everything mission, plus a live summary of the CURRENT scene (params, components, stack/conductor ids) so generated geometry can snap onto existing components. Update this whenever the scene schema grows a feature, or Claude won't know about it.
+  - `GEOMETRY_TOOL` — Anthropic tool def; the tool input IS the fragment `{ params[], components[], snaps[], notes }`. `tool_choice` stays auto so Claude can answer with a clarifying question (plain text) instead of guessing.
+  - `normalizeFragment` → `validateFragment(fragment, scene)` — string-coerce + derive AABBs, then gate: known kinds/layers, required fields per kind, identifier-resolution check on every expression (`tokenizeIdents`, because `evalExpr` falls back to 0 on unknowns), vertex/transform shape checks, snap endpoints + anchors + duplicate-to (against existing scene snaps too; new snaps may not re-position EXISTING components), then a trial `validateSnapGraph` + `solveLayout` on the merged scene. Errors block insert; warnings don't.
+  - `applyFragment(prev, fragment, {viewport, paramValues})` — template-insert semantics (id collision-rename incl. snap + snap-vertex remap, params merge with scene-wins, bbox centered on viewport) finished by `normalizeScene`. One `updateScene` call = one undo step.
+  - `suggestPrefix(scene)` — next free `ai<N>`; ALL new ids/params must carry it (HFSS parametricity is then free, and the PARAMS panel groups `ai<N>_*` automatically).
+- **`src/ai/client.js`** — browser-direct Anthropic call (`dangerouslyAllowBrowser`, SDK lazy-imported into its own chunk); models claude-opus-4-8 (default) / sonnet-4-6 / haiku-4-5; adaptive thinking except haiku; typed-error → friendly message mapping; `fileToImagePayload` downscales sketches to ≤1568 px and flattens transparency onto white.
+- **`src/ai/settings.js`** — API key + model in `localStorage` ONLY (key `photonic_layout_ai_settings`, outside every workspace prefix), so the key can never ride along in design/workspace exports or generated scripts. Never log it, never embed it in exports.
+
 ## Rendering
 
 Canvas uses SVG with `y-up world → y-down screen` transform.
@@ -330,6 +343,11 @@ npx vitest run
 #   tests/canvas-perf-helpers.test.js — uniform-grid spatial index + anchor-snap / alt-drag index
 #                                       EQUIVALENCE vs the old full-scan oracles (probe sweeps +
 #                                       seeded fuzz), boolean-operand cells, tie-order preservation
+#   tests/ai-assistant.test.js        — AI geometry assistant deterministic half: prefix alloc,
+#                                       system-prompt scene context, fragment normalize/validate
+#                                       (every error category), applyFragment → solve + snap-graph
+#                                       + HFSS set_var parametricity, collision rename incl. snap
+#                                       vertices (network call NOT covered — browser-only)
 # (plus per-module unit files: anchors, geometry, params, schema, solver, transforms, versions)
 
 # Production build
@@ -340,7 +358,7 @@ All four drag scenarios should produce position outputs matching the expected po
 
 ## Rejected directions (do not re-propose without strong evidence)
 
-- Vision LLM sketch parsing
+- ~~Vision LLM sketch parsing~~ — SUPERSEDED: the user explicitly requested it; shipped as the AI geometry assistant (see that section). The rejection was about auto-parsing sketches into exact geometry; the shipped form generates a *parametric fragment* that is validated and user-confirmed before insert.
 - Per-axis snaps (separate X and Y constraint dimensions)
 - Soft constraints / least-squares solver
 - Martinez-Rueda polygon clipper inline (boolean ops via SVG mask is sufficient)

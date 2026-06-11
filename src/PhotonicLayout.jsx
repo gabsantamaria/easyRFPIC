@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { Plus, Trash2, RotateCcw, RotateCw, Download, Upload, Lock, Unlock, FlipHorizontal, FlipVertical, Layers, Settings2, Box, Square, Link2, Link2Off, Grid3x3, AlertTriangle, Maximize2, Save, FileText, FilePlus, Copy, FolderTree, BookOpen, Package, Boxes, Pencil, Ruler, Eye, EyeOff, ArrowDown, ArrowUp, Move, Repeat, Combine, Minus, X as XIcon, Circle, Hexagon, Radio, HelpCircle, Search, ChevronDown, ChevronRight } from 'lucide-react';
+import { Plus, Trash2, RotateCcw, RotateCw, Download, Upload, Lock, Unlock, FlipHorizontal, FlipVertical, Layers, Settings2, Box, Square, Link2, Link2Off, Grid3x3, AlertTriangle, Maximize2, Save, FileText, FilePlus, Copy, FolderTree, BookOpen, Package, Boxes, Pencil, Ruler, Eye, EyeOff, ArrowDown, ArrowUp, Move, Repeat, Combine, Minus, X as XIcon, Circle, Hexagon, Radio, HelpCircle, Search, ChevronDown, ChevronRight, Sparkles } from 'lucide-react';
 import { eulerBend180Centerline, buildRacetrackCenterline, offsetCenterlineToBand } from './geometry/racetrack.js';
 import { tokenizeIdents, tokenizeComponentExprs, resolveParams, evalExpr, RESERVED_IDENTS } from './scene/params.js';
 import { renameIdentInScene } from './scene/rename-ident.js';
@@ -72,6 +72,8 @@ import { HoverTooltip } from './ui/HoverTooltip.jsx';
 import { DropdownMenu } from './ui/DropdownMenu.jsx';
 import { ModalDialog } from './ui/ModalDialog.jsx';
 import { HelpTutorial } from './ui/HelpTutorial.jsx';
+import { AiAssistantDialog } from './ui/AiAssistantDialog.jsx';
+import { applyFragment as applyAiGeometryFragment } from './ai/assistant.js';
 import { WorkspaceCreateRow, LibraryItemRow } from './ui/panels/LibraryPanelRows.jsx';
 import { ParamRow } from './ui/panels/ParamRow.jsx';
 import { SnapAxisField, SnapConnectionRow } from './ui/panels/SnapConnectionRow.jsx';
@@ -267,6 +269,9 @@ export default function App() {
   const [showDimensions, setShowDimensions] = useState(false);
   // Help / tutorial overlay. Opened from the "?" button in the header.
   const [showHelp, setShowHelp] = useState(false);
+  // AI geometry assistant dialog (✨ header button): natural-language /
+  // sketch input → Claude → validated parametric fragment insert.
+  const [showAiAssistant, setShowAiAssistant] = useState(false);
   // Reference to the canvas <svg> element. Used by the figure exporter
   // to clone the live DOM (so SVG/PDF figures include rulers, dimension
   // overlays, mirror axes, replications — everything the user sees on
@@ -5062,6 +5067,17 @@ export default function App() {
               )}
               <span className="text-[9px] opacity-70 normal-case font-normal">▾</span>
             </button>
+            {/* AI geometry assistant — describe a structure in plain
+                language (or paste a sketch) and Claude generates a
+                parametric fragment that inserts like a template. */}
+            <button
+              onClick={() => setShowAiAssistant(true)}
+              className="flex items-center justify-center w-7 h-7 rounded-full border border-slate-600 hover:bg-slate-800 hover:border-violet-500 text-slate-400 hover:text-violet-300 ml-1"
+              title="AI geometry assistant — describe or sketch a structure, get parametric geometry"
+              aria-label="AI geometry assistant"
+            >
+              <Sparkles size={14} />
+            </button>
             {/* Help / tutorial — opens an animated walkthrough of the
                 app's main capabilities (stack, drawing, params, snap,
                 ops, save/versions, library, dimensions, export). */}
@@ -7681,6 +7697,13 @@ export default function App() {
 
       {/* Animated help tutorial overlay */}
       <HelpTutorial open={showHelp} onClose={() => setShowHelp(false)} />
+      <AiAssistantDialog
+        open={showAiAssistant}
+        onClose={() => setShowAiAssistant(false)}
+        scene={scene}
+        paramValues={paramValues}
+        onApply={(fragment) => updateScene((prev) => applyAiGeometryFragment(prev, fragment, { viewport, paramValues }))}
+      />
 
       {/* Modal dialog (confirm/prompt/alert) */}
       <ModalDialog
