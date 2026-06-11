@@ -71,6 +71,9 @@ export function tokenizeComponentExprs(c) {
   // rect corner fillet radius (µm, D3). Via components (D4) reuse the
   // `r` field above, so they're already covered.
   push(c.rotation); push(c.zOffset); push(c.cornerRadius);
+  // Parametric root position (µm, C8) — applied by the solver on
+  // unsnapped roots; expressions can reference any param.
+  push(c.cxExpr); push(c.cyExpr);
   // Polyline trace width + per-vertex expression fields (rel dx/dy,
   // arc cdx/cdy/angle, taper width). Non-string fields are skipped by
   // push(), so snap vertices pass through harmlessly.
@@ -90,6 +93,9 @@ export function tokenizeComponentExprs(c) {
     // `offset` is the parametric shift used by duplicate_mirror —
     // it's an expression like '-cap_d/2' and can reference any param.
     push(t.offset);
+    // px / py: custom rotate-pivot world coordinates (µm, C9). Mirrors
+    // TRANSFORM_EXPR_FIELDS in rename-ident.js — keep both in sync.
+    push(t.px); push(t.py);
   }
   return out;
 }

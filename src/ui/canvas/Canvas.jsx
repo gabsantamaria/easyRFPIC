@@ -21,7 +21,7 @@ import { buildRacetrackCenterline } from '../../geometry/racetrack.js';
 import { ringToSvgPath } from '../../geometry/paths.js';
 import {
   tessellatePolylinePath, taperedBandQuads, polylineIsTapered,
-  tessellateArcFrom, synthArc90,
+  tessellateArcFrom, synthArc90, resolvePolylineVertices,
 } from '../../geometry/polyline.js';
 
 // Dimension-expression classification, shared by the resize-drag commit,
@@ -37,9 +37,219 @@ const isLiteralNumExpr = (s) => typeof s === 'string' && /^[\d\s+\-*/.()]+$/.tes
 const isExprBoundDim = (s) => !isSingleIdentExpr(s) && !isLiteralNumExpr(s);
 
 // =========================================================================
+// C3 — on-canvas vertex editing: pure helpers (exported for tests)
+// =========================================================================
+// Format a numeric drag result as a clean literal expression. 4 decimals —
+// the user is dragging by mouse, sub-0.1nm precision past that is noise.
+// String(-0) === '0' in JS, so negative-zero never leaks into the scene.
+export const fmtVertexLit = (v) => String(Number((Number.isFinite(v) ? v : 0).toFixed(4)));
+
+// A vertex that on-canvas editing may rewrite: kind 'rel' (or absent — the
+// default) with BOTH dx and dy pure numeric literals. Snap / arc vertices
+// and expression-driven rel vertices are parametric definitions that must
+// be edited in the Inspector. Spline-flagged rel vertices still qualify
+// (their dx/dy are ordinary literals; the spline only affects tessellation).
+export const isRelNumericVertex = (v) =>
+  !!v && (v.kind === 'rel' || v.kind == null)
+  && isLiteralNumExpr(String(v.dx ?? ''))
+  && isLiteralNumExpr(String(v.dy ?? ''));
+
+// Why a vertex handle can't be dragged (null = draggable). Mirrors the
+// A9/A10 resize-status convention: tell the user WHAT owns the vertex and
+// WHERE to edit it instead.
+export function vertexDragBlock(v) {
+  if (!v) return 'vertex spec missing — edit in Inspector';
+  if (v.kind === 'snap') return `vertex is snap-bound to ${v.compId}.${v.anchor} — edit in Inspector`;
+  if (v.kind === 'arc') return 'vertex is an arc endpoint — edit cdx/cdy/angle in Inspector';
+  const dxLit = isLiteralNumExpr(String(v.dx ?? ''));
+  const dyLit = isLiteralNumExpr(String(v.dy ?? ''));
+  if (!dxLit || !dyLit) return `vertex is driven by '${!dxLit ? v.dx : v.dy}' — edit in Inspector`;
+  return null;
+}
+
+// Rewrite the vertices array for a handle drag: vertex `idx` (rel-numeric —
+// caller has already checked vertexDragBlock) moves to world point `p`, so
+// its dx/dy become the offset from the PREVIOUS resolved vertex (or the
+// component's own cx/cy for vertex 0). The FOLLOWING vertex, when it is
+// rel-numeric, gets the inverse adjustment so its resolved position — and
+// everything downstream — stays fixed (standard CAD vertex-drag semantics).
+// A snap follower is absolute (unaffected); an arc / expression follower is
+// left untouched, so the downstream chain shifts rigidly with the drag —
+// acceptable in the rel model.
+// `verts` is resolvePolylineVertices output captured at DRAG START (stable
+// reference frame for the whole gesture). Returns the patched vertices array.
+export function dragVertexPatch(comp, verts, idx, p) {
+  const specs = comp.vertices || [];
+  if (idx < 0 || idx >= specs.length) return specs;
+  const prev = idx === 0
+    ? [Number.isFinite(comp.cx) ? comp.cx : 0, Number.isFinite(comp.cy) ? comp.cy : 0]
+    : verts[idx - 1];
+  if (!prev || !Number.isFinite(prev[0]) || !Number.isFinite(prev[1])) return specs;
+  const out = specs.slice();
+  out[idx] = { ...specs[idx], dx: fmtVertexLit(p.x - prev[0]), dy: fmtVertexLit(p.y - prev[1]) };
+  const next = specs[idx + 1];
+  if (next && isRelNumericVertex(next)) {
+    const nextPos = verts[idx + 1];
+    if (nextPos && Number.isFinite(nextPos[0]) && Number.isFinite(nextPos[1])) {
+      out[idx + 1] = { ...next, dx: fmtVertexLit(nextPos[0] - p.x), dy: fmtVertexLit(nextPos[1] - p.y) };
+    }
+  }
+  return out;
+}
+
+// Nearest straight segment of a resolved vertex chain to point p. Segments
+// run verts[i-1] → verts[i] for i in 1..n-1, plus the implicit closing edge
+// (verts[n-1] → verts[0]) when `closed` — reported as endIdx === n. Returns
+// { endIdx, dist, point, t } where `point` is p projected onto the segment
+// (clamped), or null for degenerate input. Curved (arc / spline) spans are
+// represented by their CHORD here — close enough for hit-testing, and the
+// insert path refuses curved neighbors anyway.
+export function nearestPolySegment(verts, p, closed = false) {
+  if (!verts || verts.length < 2) return null;
+  let best = null;
+  const trySeg = (a, b, endIdx) => {
+    if (!a || !b || !Number.isFinite(a[0]) || !Number.isFinite(a[1])
+        || !Number.isFinite(b[0]) || !Number.isFinite(b[1])) return;
+    const abx = b[0] - a[0], aby = b[1] - a[1];
+    const len2 = abx * abx + aby * aby;
+    let t = len2 > 1e-18 ? ((p.x - a[0]) * abx + (p.y - a[1]) * aby) / len2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    const qx = a[0] + t * abx, qy = a[1] + t * aby;
+    const d = Math.hypot(p.x - qx, p.y - qy);
+    if (!best || d < best.dist) best = { endIdx, dist: d, point: { x: qx, y: qy }, t };
+  };
+  for (let i = 1; i < verts.length; i++) trySeg(verts[i - 1], verts[i], i);
+  if (closed) trySeg(verts[verts.length - 1], verts[0], verts.length);
+  return best;
+}
+
+// Insert a rel-numeric vertex at point `p`, splitting the segment that ENDS
+// at spec index `endIdx` (endIdx === specs.length = the implicit closing
+// edge of a closed shape). Geometry is preserved exactly: the new vertex's
+// dx/dy is the offset from the previous resolved vertex, and the follower's
+// dx/dy is recomputed so its position doesn't move. Both segment endpoints
+// must be rel-numeric (and the segment must not be part of a spline run /
+// arc) — refusals return { error } so the caller can surface WHY instead of
+// silently mangling a parametric or curved definition.
+// Returns { vertices } | { error }.
+export function insertVertexInSegment(comp, verts, endIdx, p) {
+  const specs = comp.vertices || [];
+  const closing = endIdx === specs.length;
+  if (endIdx < 1 || endIdx > specs.length) return { error: 'segment index out of range' };
+  const why = (v) => v?.kind === 'snap' ? 'snap-bound'
+    : v?.kind === 'arc' ? 'an arc'
+    : v?.spline ? 'a spline point'
+    : `driven by '${v?.dx} / ${v?.dy}'`;
+  const prevSpec = specs[endIdx - 1];
+  if (!isRelNumericVertex(prevSpec)) {
+    return { error: `segment start is ${why(prevSpec)} — edit in Inspector` };
+  }
+  const prevPos = verts[endIdx - 1];
+  if (!prevPos || !Number.isFinite(prevPos[0]) || !Number.isFinite(prevPos[1])) {
+    return { error: 'segment endpoints are unresolved' };
+  }
+  const newSpec = { kind: 'rel', dx: fmtVertexLit(p.x - prevPos[0]), dy: fmtVertexLit(p.y - prevPos[1]) };
+  if (closing) {
+    // Closing edge: appending never touches vertex 0 (it's relative to the
+    // component's cx/cy, not the previous vertex), so downstream geometry
+    // is fixed by construction.
+    return { vertices: [...specs, newSpec] };
+  }
+  const nextSpec = specs[endIdx];
+  if (!isRelNumericVertex(nextSpec) || nextSpec.spline) {
+    return { error: `segment end is ${why(nextSpec)} — edit in Inspector` };
+  }
+  const nextPos = verts[endIdx];
+  if (!nextPos || !Number.isFinite(nextPos[0]) || !Number.isFinite(nextPos[1])) {
+    return { error: 'segment endpoints are unresolved' };
+  }
+  const newNext = { ...nextSpec, dx: fmtVertexLit(nextPos[0] - p.x), dy: fmtVertexLit(nextPos[1] - p.y) };
+  return { vertices: [...specs.slice(0, endIdx), newSpec, newNext, ...specs.slice(endIdx + 1)] };
+}
+
+// Delete vertex `idx`, keeping every DOWNSTREAM vertex's resolved position
+// fixed when possible. The follower's dx/dy (when rel-numeric) is rewritten
+// to the absolute offset from the deleted vertex's predecessor — for plain
+// rel-numeric chains this equals the classic "merge the two dx/dy pairs".
+// A snap follower is absolute and needs no rewrite. An arc follower (its
+// center hangs off the previous vertex) or an expression-driven follower
+// refuses — deleting would silently bend the curve / break the parametric
+// chain. Enforces the shape's minimum vertex count: 2 polyline / 3 polyshape.
+// Returns { vertices } | { error }.
+export function deleteVertexFixDownstream(comp, verts, idx) {
+  const specs = comp.vertices || [];
+  const minVerts = comp.kind === 'polyshape' ? 3 : 2;
+  if (idx < 0 || idx >= specs.length) return { error: 'vertex index out of range' };
+  if (specs.length <= minVerts) {
+    return { error: `${comp.kind === 'polyshape' ? 'polyshape' : 'polyline'} needs at least ${minVerts} vertices` };
+  }
+  const next = specs[idx + 1];
+  const out = specs.slice();
+  if (next) {
+    if (next.kind === 'snap') {
+      // Absolute position — nothing to rewrite.
+    } else if (isRelNumericVertex(next)) {
+      const base = idx === 0
+        ? [Number.isFinite(comp.cx) ? comp.cx : 0, Number.isFinite(comp.cy) ? comp.cy : 0]
+        : verts[idx - 1];
+      const pos = verts[idx + 1];
+      if (!base || !pos || !Number.isFinite(base[0]) || !Number.isFinite(pos[0])) {
+        return { error: 'vertex positions are unresolved' };
+      }
+      out[idx + 1] = { ...next, dx: fmtVertexLit(pos[0] - base[0]), dy: fmtVertexLit(pos[1] - base[1]) };
+    } else if (next.kind === 'arc') {
+      return { error: 'following vertex is an arc — delete it first or edit in Inspector' };
+    } else {
+      return { error: `following vertex is driven by '${next.dx} / ${next.dy}' — edit in Inspector` };
+    }
+  }
+  out.splice(idx, 1);
+  return { vertices: out };
+}
+
+// =========================================================================
+// C5 — smart alignment guides: pure helper (exported for tests)
+// =========================================================================
+// One-axis alignment search. `dragVals` = the dragged bbox's candidate
+// coordinates on this axis ([L, C, R] for x; [B, C, T] for y); `targets` =
+// candidate coordinates from all other visible instances, each
+// { val, compId }. Picks the smallest |delta| within `thresh`, then reports
+// EVERY distinct target coordinate that some dragged edge lands exactly on
+// after applying that delta — so the caller can draw one guide line per
+// aligned coordinate (a single shift often satisfies L-against-one-comp AND
+// R-against-another simultaneously). Returns { delta, guides } | null.
+export function alignAxis(dragVals, targets, thresh) {
+  if (!dragVals || !targets || !(thresh > 0)) return null;
+  let best = null;
+  for (const dv of dragVals) {
+    if (!Number.isFinite(dv)) continue;
+    for (const t of targets) {
+      if (!t || !Number.isFinite(t.val)) continue;
+      const delta = t.val - dv;
+      const ad = Math.abs(delta);
+      if (ad <= thresh && (!best || ad < Math.abs(best.delta))) best = { delta };
+    }
+  }
+  if (!best) return null;
+  const guides = [];
+  const seen = new Set();
+  for (const t of targets) {
+    if (!t || !Number.isFinite(t.val)) continue;
+    for (const dv of dragVals) {
+      if (Number.isFinite(dv) && Math.abs(dv + best.delta - t.val) < 1e-6) {
+        const key = t.val.toFixed(9);
+        if (!seen.has(key)) { seen.add(key); guides.push({ val: t.val, compId: t.compId }); }
+        break;
+      }
+    }
+  }
+  return { delta: best.delta, guides };
+}
+
+// =========================================================================
 // CANVAS
 // =========================================================================
-export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelection, viewport, setViewport, snapMode, setSnapMode, gridSize, gridSnapEnabled, showGrid = true, paramValues, addParam, updateParamExpr, rulerMode, setRulerMode, rulerMeasurements, setRulerMeasurements, rulerInProgress, setRulerInProgress, rulerSnapPoint, setRulerSnapPoint, alertDialog, setInteractionStatus, showDimensions, addMode, setAddMode, commitDragAdd, onComponentContextMenu, onSvgElement }) {
+export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelection, viewport, setViewport, snapMode, setSnapMode, gridSize, gridSnapEnabled, showGrid = true, paramValues, addParam, updateParamExpr, rulerMode, setRulerMode, rulerMeasurements, setRulerMeasurements, rulerInProgress, setRulerInProgress, rulerSnapPoint, setRulerSnapPoint, alertDialog, setInteractionStatus, showDimensions, addMode, setAddMode, commitDragAdd, onComponentContextMenu, onSvgElement, flashAnchor = null }) {
   // Drop a single committed ruler measurement by id.
   const deleteRuler = (id) => setRulerMeasurements((prev) => prev.filter((m) => m.id !== id));
   const svgRef = useRef(null);
@@ -193,6 +403,45 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
   // to on release. Re-evaluated on every mousemove while Alt is held.
   const [moveSnapHover, setMoveSnapHover] = useState(null);
   // ^ shape: { x, y, compId, anchor } | null
+  // C3: in-flight vertex-handle drag on a primary-selected polyline /
+  // polyshape. `origVerts` / `comp` are the drag-start snapshots (stable
+  // reference frame); `preview` is the live-patched vertices array — the
+  // render path substitutes it so the user sees the result WITHOUT touching
+  // the scene; the single updateScene commit happens on mouseup (one undo
+  // step).
+  const [vertexDrag, setVertexDrag] = useState(null);
+  // ^ shape: { compId, idx, comp, origVerts, preview } | null
+  // C3: transient status-bar message for refused vertex edits ("vertex is
+  // snap-bound — edit in Inspector" etc.). Auto-clears after a few seconds.
+  const [vertexEditStatus, setVertexEditStatus] = useState(null);
+  // ^ shape: { line } | null
+  // C5: smart-alignment guides active during a PLAIN move-drag. Each entry
+  // is an aligned coordinate (world units) + the component that produced
+  // it; rendered as full-viewport magenta lines. Numeric-only convenience —
+  // no scene snaps are ever created from these.
+  const [alignGuides, setAlignGuides] = useState(null);
+  // ^ shape: { x: [{ val, compId }], y: [{ val, compId }] } | null
+  // C10: whether the flash-anchor halo is currently visible (set on nonce
+  // bump, cleared by timeout ~1.5 s later).
+  const [flashVisible, setFlashVisible] = useState(false);
+
+  // C3: auto-clear the vertex-edit refusal status so it doesn't linger in
+  // the status bar after the user has read it.
+  useEffect(() => {
+    if (!vertexEditStatus) return;
+    const t = setTimeout(() => setVertexEditStatus(null), 3000);
+    return () => clearTimeout(t);
+  }, [vertexEditStatus]);
+
+  // C10: flash-anchor lifecycle. A nonce bump (re)triggers the 3-pulse halo;
+  // the <g key={nonce}> in the render path remounts the SMIL animation so
+  // repeat flashes on the same anchor restart cleanly.
+  useEffect(() => {
+    if (!flashAnchor || !flashAnchor.compId) { setFlashVisible(false); return; }
+    setFlashVisible(true);
+    const t = setTimeout(() => setFlashVisible(false), 1500);
+    return () => clearTimeout(t);
+  }, [flashAnchor?.nonce, flashAnchor?.compId, flashAnchor?.anchor]);
 
   useEffect(() => {
     const down = (e) => {
@@ -381,6 +630,16 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         kind: 'snap',
         line: `Alt-drag · approach another component's anchor to snap`,
       };
+    } else if (drag && drag.kind === 'move' && alignGuides) {
+      // C5: numeric alignment engaged. Remind the user this is a literal
+      // position only — a parametric relationship needs an Alt-drag snap.
+      const ids = [...new Set(
+        [...(alignGuides.x || []), ...(alignGuides.y || [])].map(g => g.compId).filter(Boolean)
+      )];
+      status = {
+        kind: 'align',
+        line: `aligned with ${ids.join(', ')} — use Alt-drag for a parametric snap`,
+      };
     } else if (drag && drag.kind === 'move' && drag.snapBound) {
       // Plain move-drag on a solver-positioned component: warn that the
       // solver will reassert the snap on release. Lives for the whole
@@ -409,9 +668,19 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           line: `${parts.join(' · ')} — edit the parameter(s) in PARAMS/Inspector to resize`,
         };
       }
+    } else if (vertexDrag) {
+      // C3: live vertex-drag feedback.
+      status = {
+        kind: 'vertex',
+        line: `Vertex ${vertexDrag.idx} of ${vertexDrag.compId} · release to commit (grid snap applies; hold ⌘ to disable)`,
+      };
+    } else if (vertexEditStatus) {
+      // C3: refused vertex edit (snap-bound / arc / expression-driven /
+      // minimum vertex count) — explain why and where to edit instead.
+      status = { kind: 'vertex', line: vertexEditStatus.line };
     }
     setInteractionStatus(status);
-  }, [snapMode, snapPick, snapHover, snapCursor, shiftKey, altKey, rulerMode, rulerInProgress, rulerSnapPoint, addMode, addDrag, addHoverSnap, polylineDraft, drag, moveSnapHover, solved, paramValues, setInteractionStatus]);
+  }, [snapMode, snapPick, snapHover, snapCursor, shiftKey, altKey, rulerMode, rulerInProgress, rulerSnapPoint, addMode, addDrag, addHoverSnap, polylineDraft, drag, moveSnapHover, alignGuides, vertexDrag, vertexEditStatus, solved, paramValues, setInteractionStatus]);
 
   const screenToWorld = (sx, sy) => {
     const svg = svgRef.current;
@@ -757,6 +1026,52 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       for (const opid of (b.operandIds || [])) visitOp(opid);
     }
     return best;
+  };
+
+  // Scene-component map for polyline vertex resolution (snap-vertex targets
+  // are looked up by id). Matches what the polyline/polyshape render
+  // branches build inline, so the C3 handles sit exactly on the drawn path.
+  const sceneCompById = useMemo(
+    () => Object.fromEntries(scene.components.map(c => [c.id, c])),
+    [scene.components]
+  );
+
+  // C3: resolved vertex positions (one per vertex spec — index-stable) for a
+  // polyline / polyshape, from the SOLVED component so solver-positioned
+  // paths put handles where the geometry actually renders.
+  const resolveVertsFor = (comp) =>
+    resolvePolylineVertices(comp, sceneCompById, paramValues, transformInstances);
+
+  // C3: mousedown on a vertex handle. Alt+click deletes the vertex (merging
+  // its offset into a rel-numeric follower so downstream geometry stays
+  // fixed); plain click starts a handle drag when the vertex is rel-numeric,
+  // otherwise surfaces WHY it can't be dragged in the status bar.
+  const onVertexHandleMouseDown = (e, compId, idx) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    e.preventDefault();
+    const comp = solved.find(cc => cc.id === compId);
+    if (!comp) return;
+    const specs = comp.vertices || [];
+    const verts = resolveVertsFor(comp);
+    if (e.altKey) {
+      const res = deleteVertexFixDownstream(comp, verts, idx);
+      if (res.error) {
+        setVertexEditStatus({ line: `Delete refused: ${res.error}` });
+      } else {
+        updateScene(prev => ({
+          ...prev,
+          components: prev.components.map(cc => cc.id === compId ? { ...cc, vertices: res.vertices } : cc),
+        }));
+      }
+      return;
+    }
+    const block = vertexDragBlock(specs[idx]);
+    if (block) {
+      setVertexEditStatus({ line: block });
+      return;
+    }
+    setVertexDrag({ compId, idx, comp, origVerts: verts, preview: null });
   };
 
   const onWheel = (e) => {
@@ -1196,6 +1511,18 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
   };
 
   const onMouseMove = (e) => {
+    // C3: vertex-handle drag — live preview through local state only; the
+    // scene commit happens once on mouseup (single undo step). Grid snap
+    // applies to the dragged vertex's world position (Cmd disables, same
+    // convention as component drags).
+    if (vertexDrag) {
+      const wp = screenToWorld(e.clientX, e.clientY);
+      const p = { x: snapToGrid(wp.x), y: snapToGrid(wp.y) };
+      setVertexDrag(vd => vd
+        ? { ...vd, preview: dragVertexPatch(vd.comp, vd.origVerts, vd.idx, p) }
+        : vd);
+      return;
+    }
     // Ruler: track current snap target for the preview dot/line
     if (rulerMode) {
       const wp = screenToWorld(e.clientX, e.clientY);
@@ -1312,6 +1639,9 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // exactly together. The visual preview shows the dragged rect
         // already snapped, and onMouseUp installs the real snap relationship.
         if (e.altKey) {
+          // C5 alignment is PLAIN-drag only — Alt-drag (parametric snap
+          // mode) must be completely unaffected, so drop any leftover guides.
+          if (alignGuides) setAlignGuides(null);
           const screenThresh = 30; // px — generous, since the gesture is approximate
           const worldThresh = screenThresh * (viewport.w / (svgRef.current?.clientWidth || 1));
           // The "dragged shape" is the CLUSTER's bbox (so anchor math reflects
@@ -1662,8 +1992,56 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           // Clear any leftover snap target when Alt is released mid-drag.
           if (moveSnapHover) setMoveSnapHover(null);
         }
-        const newCx = snapToGrid(drag.startCx + dx);
-        const newCy = snapToGrid(drag.startCy + dy);
+        // C5: smart alignment guides — PLAIN move-drags only (no Alt; Cmd/
+        // Ctrl disables, same convention as grid snap). Compare the dragged
+        // cluster bbox's edges + center (x: L/C/R, y: B/C/T) at the proposed
+        // position against every other visible transform-expanded instance's
+        // edges/centers. Within ~6 screen px, magnetically snap the drag
+        // position to the alignment and surface full-viewport magenta guide
+        // lines (Figma-style). Numeric-only convenience — NO scene snaps are
+        // created here; the status bar points at Alt-drag for a parametric
+        // relationship.
+        let propCx = drag.startCx + dx;
+        let propCy = drag.startCy + dy;
+        let guidesX = null, guidesY = null;
+        if (!e.altKey && !modifier) {
+          const alignThresh = 6 * (viewport.w / (svgRef.current?.clientWidth || 1));
+          const targetsX = [];
+          const targetsY = [];
+          for (const inst of transformInstances) {
+            // Skip the dragged cluster itself and operands consumed by a
+            // boolean (they don't render standalone — the boolean instance
+            // already contributes the composite bbox).
+            if (drag.clusterSet && drag.clusterSet.has(inst.compId)) continue;
+            if (booleanClusters.operandIds.has(inst.compId)) continue;
+            const iw = inst.w, ih = inst.h;
+            if (!Number.isFinite(inst.cx) || !Number.isFinite(inst.cy)) continue;
+            if (!Number.isFinite(iw) || !Number.isFinite(ih) || iw <= 0 || ih <= 0) continue;
+            targetsX.push(
+              { val: inst.cx - iw / 2, compId: inst.compId },
+              { val: inst.cx, compId: inst.compId },
+              { val: inst.cx + iw / 2, compId: inst.compId },
+            );
+            targetsY.push(
+              { val: inst.cy - ih / 2, compId: inst.compId },
+              { val: inst.cy, compId: inst.compId },
+              { val: inst.cy + ih / 2, compId: inst.compId },
+            );
+          }
+          const dwA = drag.clusterBboxW || 0;
+          const dhA = drag.clusterBboxH || 0;
+          const dragValsX = dwA > 0 ? [propCx - dwA / 2, propCx, propCx + dwA / 2] : [propCx];
+          const dragValsY = dhA > 0 ? [propCy - dhA / 2, propCy, propCy + dhA / 2] : [propCy];
+          const ax = alignAxis(dragValsX, targetsX, alignThresh);
+          const ay = alignAxis(dragValsY, targetsY, alignThresh);
+          if (ax) { propCx += ax.delta; guidesX = ax.guides; }
+          if (ay) { propCy += ay.delta; guidesY = ay.guides; }
+        }
+        setAlignGuides((guidesX || guidesY) ? { x: guidesX || [], y: guidesY || [] } : null);
+        // An aligned axis pins to the aligned coordinate exactly; unaligned
+        // axes keep the normal grid-snap behavior.
+        const newCx = guidesX ? propCx : snapToGrid(propCx);
+        const newCy = guidesY ? propCy : snapToGrid(propCy);
         const tdx = newCx - drag.startCx;
         const tdy = newCy - drag.startCy;
         const moversById = Object.fromEntries((drag.coMovers || []).map(m => [m.id, m]));
@@ -1810,6 +2188,20 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
   };
 
   const onMouseUp = () => {
+    // C3: commit an in-flight vertex-handle drag — ONE updateScene call so
+    // the whole gesture is a single undo step. A click with no movement
+    // (preview === null) commits nothing.
+    if (vertexDrag) {
+      const { compId, preview } = vertexDrag;
+      if (preview) {
+        updateScene(prev => ({
+          ...prev,
+          components: prev.components.map(cc => cc.id === compId ? { ...cc, vertices: preview } : cc),
+        }));
+      }
+      setVertexDrag(null);
+      return;
+    }
     // Commit add-drag: create the new component with sensible parametric bindings
     if (addDrag) {
       const { p1, p2, snapStart, snapEnd } = addDrag;
@@ -1989,6 +2381,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     setPan(null);
     setMarquee(null);
     if (moveSnapHover) setMoveSnapHover(null);
+    if (alignGuides) setAlignGuides(null);
   };
 
   const onAnchorClick = (compId, anchor, evt) => {
@@ -2217,6 +2610,40 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             commitPolylineDraft(polylineDraft.vertices);
           }
           setPolylineDraft(null);
+          e.stopPropagation();
+          e.preventDefault();
+          return;
+        }
+        // C3: double-click on a SEGMENT of the primary-selected polyline /
+        // polyshape inserts a rel-numeric vertex at the click point
+        // (projected onto the segment so the path's geometry is unchanged
+        // until the new vertex is dragged). Only straight, literal-driven
+        // segments split cleanly — snap / arc / spline / expression-bound
+        // neighbors refuse with a status-bar explanation.
+        if (!addMode && !rulerMode && snapMode !== 'creating') {
+          const cSel = solved.find(cc => cc.id === selectedId);
+          if (!cSel || (cSel.kind !== 'polyline' && cSel.kind !== 'polyshape')) return;
+          const wp = screenToWorld(e.clientX, e.clientY);
+          const verts = resolveVertsFor(cSel);
+          const pxw = viewport.w / (svgRef.current?.clientWidth || 1); // world units per px
+          // Ignore double-clicks on (or hugging) an existing handle — that's
+          // a vertex, not a segment.
+          if (verts.some(([vx, vy]) => Number.isFinite(vx) && Math.hypot(vx - wp.x, vy - wp.y) <= 8 * pxw)) return;
+          const widthVal = cSel.kind === 'polyline'
+            ? (evalExpr(cSel.width, paramValues) || 0) / 2 : 0;
+          const thresh = Math.max(6 * pxw, widthVal);
+          const isClosed = cSel.kind === 'polyshape' || !!cSel.closed;
+          const seg = nearestPolySegment(verts, wp, isClosed);
+          if (!seg || seg.dist > thresh) return;
+          const res = insertVertexInSegment(cSel, verts, seg.endIdx, seg.point);
+          if (res.error) {
+            setVertexEditStatus({ line: `Insert refused: ${res.error}` });
+          } else {
+            updateScene(prev => ({
+              ...prev,
+              components: prev.components.map(cc => cc.id === cSel.id ? { ...cc, vertices: res.vertices } : cc),
+            }));
+          }
           e.stopPropagation();
           e.preventDefault();
         }
@@ -3092,13 +3519,18 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   // use for the path here.
                   const compById_pl = Object.fromEntries(scene.components.map(cc => [cc.id, cc]));
                   const wgW = Number.isFinite(inst.width) ? inst.width : evalExpr(c.width, paramValues) || 0;
-                  if (polylineIsTapered(c)) {
+                  // C3 live preview: while a vertex-handle drag is in
+                  // flight, render from the locally patched vertices (the
+                  // scene commit happens once on mouseup).
+                  const cPl = (vertexDrag && vertexDrag.compId === c.id && vertexDrag.preview)
+                    ? { ...c, vertices: vertexDrag.preview } : c;
+                  if (polylineIsTapered(cPl)) {
                     // TAPERED trace: SVG strokes can't vary width along a
                     // path, so render the band as filled per-segment quads
                     // (endpoint ± (w/2)·normal, BUTT joins) — EXACTLY the
                     // per-segment sheets the HFSS export unites, keeping
                     // canvas/HFSS geometric compatibility.
-                    const { quads } = taperedBandQuads(c, compById_pl, paramValues, transformInstances);
+                    const { quads } = taperedBandQuads(cPl, compById_pl, paramValues, transformInstances);
                     if (quads.length > 0) {
                       let d = '';
                       for (const q of quads) {
@@ -3111,13 +3543,13 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                       shapeElement = null;
                     }
                   } else {
-                    const verts = tessellatePolylinePath(c, compById_pl, paramValues, transformInstances);
+                    const verts = tessellatePolylinePath(cPl, compById_pl, paramValues, transformInstances);
                     if (verts.length >= 2 && wgW > 0) {
                       let d = `M ${verts[0][0]} ${-verts[0][1]}`;
                       for (let k = 1; k < verts.length; k++) {
                         d += ` L ${verts[k][0]} ${-verts[k][1]}`;
                       }
-                      if (c.closed) d += ' Z';
+                      if (cPl.closed) d += ' Z';
                       const { fill: _f, stroke: _s, strokeWidth: _sw, ...restProps } = dataCompProps;
                       shapeElement = (
                         <path
@@ -3159,7 +3591,10 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   // interior. Width is irrelevant — the layer fill color
                   // paints the whole region.
                   const compById_ps = Object.fromEntries(scene.components.map(cc => [cc.id, cc]));
-                  const verts = tessellatePolylinePath(c, compById_ps, paramValues, transformInstances);
+                  // C3 live preview (see the polyline branch above).
+                  const cPs = (vertexDrag && vertexDrag.compId === c.id && vertexDrag.preview)
+                    ? { ...c, vertices: vertexDrag.preview } : c;
+                  const verts = tessellatePolylinePath(cPs, compById_ps, paramValues, transformInstances);
                   if (verts.length >= 3) {
                     let d = `M ${verts[0][0]} ${-verts[0][1]}`;
                     for (let k = 1; k < verts.length; k++) {
@@ -4224,6 +4659,30 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         </g>
       )}
 
+      {/* C5: smart alignment guides during a PLAIN move-drag. Full-viewport
+          1px magenta lines through every aligned coordinate (Figma-style).
+          The drag position is already magnetically snapped to these in
+          onMouseMove; the lines just SHOW the alignment. No scene snaps are
+          created — the status bar points at Alt-drag for that. */}
+      {drag && drag.kind === 'move' && alignGuides && (
+        <g pointerEvents="none">
+          {(alignGuides.x || []).map((g, i) => (
+            <line
+              key={`agx-${i}`}
+              x1={g.val} y1={vbY} x2={g.val} y2={vbY + viewport.h}
+              stroke="#ff00ff" strokeWidth={screen(1)} opacity={0.85}
+            />
+          ))}
+          {(alignGuides.y || []).map((g, i) => (
+            <line
+              key={`agy-${i}`}
+              x1={vbX} y1={-g.val} x2={vbX + viewport.w} y2={-g.val}
+              stroke="#ff00ff" strokeWidth={screen(1)} opacity={0.85}
+            />
+          ))}
+        </g>
+      )}
+
       {/* Add-drag preview: live rectangle while user drags to size a new
           component. Snapped corners get a brighter halo so you can see they
           are anchored to existing geometry. Dimension-match labels appear on
@@ -4582,6 +5041,64 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         </g>
       )}
 
+      {/* C3: on-canvas vertex-edit handles for the PRIMARY-selected
+          polyline / polyshape (hidden while any draw / ruler / snap tool is
+          active). One square handle per vertex spec (resolvePolylineVertices
+          — index-stable): white squares with an emerald border, visually
+          distinct from the sky-blue resize handles. Snap-bound vertices get
+          an amber ring, arc vertices a cyan ring — both are NOT draggable
+          (not-allowed cursor; a drag attempt explains why in the status
+          bar), same for expression-driven rel vertices. Handles render on
+          top of the shapes and stop mousedown propagation so they never
+          fight the component-drag hit area. Alt+click deletes a vertex;
+          double-click on a segment (handled on the SVG) inserts one. */}
+      {!addMode && !rulerMode && snapMode !== 'creating' && (() => {
+        const cSel = solved.find(cc => cc.id === selectedId);
+        if (!cSel || (cSel.kind !== 'polyline' && cSel.kind !== 'polyshape')) return null;
+        const cEff = (vertexDrag && vertexDrag.compId === cSel.id && vertexDrag.preview)
+          ? { ...cSel, vertices: vertexDrag.preview } : cSel;
+        const verts = resolvePolylineVertices(cEff, sceneCompById, paramValues, transformInstances);
+        const specs = cEff.vertices || [];
+        const hs = screen(4); // half-size of the square handle (~8 px)
+        return (
+          <g key={`vtx-handles-${cSel.id}`}>
+            {verts.map(([vx, vy], i) => {
+              if (!Number.isFinite(vx) || !Number.isFinite(vy)) return null;
+              const spec = specs[i];
+              const block = vertexDragBlock(spec);
+              const isDragging = vertexDrag && vertexDrag.compId === cSel.id && vertexDrag.idx === i;
+              const ringColor = spec?.kind === 'snap' ? '#f59e0b'
+                : spec?.kind === 'arc' ? '#22d3ee'
+                : null;
+              return (
+                <g key={`vh-${i}`}>
+                  {ringColor && (
+                    <circle
+                      cx={vx} cy={-vy} r={hs * 2}
+                      fill="none" stroke={ringColor} strokeWidth={screen(1.2)}
+                      opacity={0.85} pointerEvents="none"
+                    />
+                  )}
+                  <rect
+                    x={vx - hs} y={-vy - hs} width={hs * 2} height={hs * 2}
+                    fill={isDragging ? '#d1fae5' : 'white'}
+                    stroke="#059669" strokeWidth={screen(1.2)}
+                    style={{ cursor: block ? 'not-allowed' : 'move' }}
+                    onMouseDown={(e) => onVertexHandleMouseDown(e, cSel.id, i)}
+                  >
+                    <title>
+                      {block
+                        ? block
+                        : `vertex ${i} — drag to move · Alt+click to delete`}
+                    </title>
+                  </rect>
+                </g>
+              );
+            })}
+          </g>
+        );
+      })()}
+
       {/* Marquee selection rectangle */}
       {marquee && (() => {
         const x1 = Math.min(marquee.startWorld.x, marquee.currentWorld.x);
@@ -4635,6 +5152,35 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           </g>
         );
       })}
+
+      {/* C10: flash-anchor halo. When the parent bumps flashAnchor.nonce,
+          a 3-pulse animated ring draws attention to that component's anchor
+          for ~1.5 s. Rotation-aware via anchorWorld (first-class rotation
+          rotates the anchor offset with the shape); boolean targets resolve
+          through the SOLVED instance, whose bbox resolveBooleanBboxes /
+          displayBbox already refreshed. keyed on the nonce so the SMIL
+          animation restarts on every bump. */}
+      {flashVisible && flashAnchor && flashAnchor.compId && (() => {
+        const comp = solved.find(cc => cc.id === flashAnchor.compId);
+        if (!comp) return null;
+        const p = anchorWorld(comp, flashAnchor.anchor || 'C', paramValues);
+        if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return null;
+        return (
+          <g key={`flash-${flashAnchor.nonce ?? 0}`} pointerEvents="none">
+            <circle cx={p.x} cy={-p.y} r={hr * 0.8} fill="#f59e0b" stroke="white" strokeWidth={sw * 0.6}>
+              <animate attributeName="opacity" values="1;1;0.25" dur="0.5s" repeatCount="3" />
+            </circle>
+            <circle cx={p.x} cy={-p.y} r={hr} fill="none" stroke="#f59e0b" strokeWidth={sw * 1.4}>
+              <animate attributeName="r" values={`${hr};${hr * 4}`} dur="0.5s" repeatCount="3" />
+              <animate attributeName="opacity" values="0.9;0" dur="0.5s" repeatCount="3" />
+            </circle>
+            <circle cx={p.x} cy={-p.y} r={hr} fill="none" stroke="#fbbf24" strokeWidth={sw * 0.8}>
+              <animate attributeName="r" values={`${hr * 1.6};${hr * 5.5}`} dur="0.5s" repeatCount="3" />
+              <animate attributeName="opacity" values="0.6;0" dur="0.5s" repeatCount="3" />
+            </circle>
+          </g>
+        );
+      })()}
     </svg>
   );
 }

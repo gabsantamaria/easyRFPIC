@@ -98,31 +98,55 @@ function TransformRow({
         </div>
       )}
       {t.kind === 'rotate' && (
-        <div className="flex gap-1.5">
-          <ExprField label="angle (deg)" value={t.angle} onChange={(v) => onUpdate({ angle: v })} fieldKey="angle" paramValues={paramValues} commitExpr={commitExpr} suggestions={suggestions} />
-          <div className="flex-1 min-w-0">
-            <label className="text-[9px] uppercase tracking-wider text-slate-500">pivot</label>
-            <select
-              value={t.pivot || 'C'}
-              onChange={(e) => onUpdate({ pivot: e.target.value })}
-              className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[11px] font-mono text-white outline-none focus:border-cyan-400"
-            >
-              <option value="C">C (center)</option>
-              <option value="N">N</option>
-              <option value="S">S</option>
-              <option value="E">E</option>
-              <option value="W">W</option>
-              <option value="NE">NE</option>
-              <option value="NW">NW</option>
-              <option value="SE">SE</option>
-              <option value="SW">SW</option>
-              <option value="origin">world origin</option>
-              {isGrouped && <option value="group">group centroid</option>}
-            </select>
-            <p className="text-[9px] text-slate-500 mt-0.5">
-              {t.pivot === 'group' ? 'about the group\'s shared centroid' : 'about this point'}
-            </p>
+        <div className="space-y-1">
+          <div className="flex gap-1.5">
+            <ExprField label="angle (deg)" value={t.angle} onChange={(v) => onUpdate({ angle: v })} fieldKey="angle" paramValues={paramValues} commitExpr={commitExpr} suggestions={suggestions} />
+            <div className="flex-1 min-w-0">
+              <label className="text-[9px] uppercase tracking-wider text-slate-500">pivot</label>
+              <select
+                value={t.pivot || 'C'}
+                onChange={(e) => {
+                  const pivot = e.target.value;
+                  // C9: picking 'custom' seeds px/py to '0' (matching the
+                  // normalizeScene default) so the ExprFields below have a
+                  // defined expression to edit.
+                  onUpdate({
+                    pivot,
+                    ...(pivot === 'custom' && t.px == null ? { px: '0' } : {}),
+                    ...(pivot === 'custom' && t.py == null ? { py: '0' } : {}),
+                  });
+                }}
+                className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[11px] font-mono text-white outline-none focus:border-cyan-400"
+              >
+                <option value="C">C (center)</option>
+                <option value="N">N</option>
+                <option value="S">S</option>
+                <option value="E">E</option>
+                <option value="W">W</option>
+                <option value="NE">NE</option>
+                <option value="NW">NW</option>
+                <option value="SE">SE</option>
+                <option value="SW">SW</option>
+                <option value="origin">world origin</option>
+                <option value="custom">custom (x, y)</option>
+                {isGrouped && <option value="group">group centroid</option>}
+              </select>
+              <p className="text-[9px] text-slate-500 mt-0.5">
+                {t.pivot === 'group' ? 'about the group\'s shared centroid'
+                  : t.pivot === 'custom' ? 'about the explicit world point below'
+                  : 'about this point'}
+              </p>
+            </div>
           </div>
+          {/* C9: custom-pivot world coordinates — parametric expressions,
+              same ExprField pattern (auto-create params, suggestions) as
+              the dx/dy fields. */}
+          {t.pivot === 'custom' && (
+            <div className="flex gap-1.5">
+              <ExprField label="px (pivot x)" value={t.px ?? '0'} onChange={(v) => onUpdate({ px: v })} fieldKey="px" paramValues={paramValues} commitExpr={commitExpr} suggestions={suggestions} />
+              <ExprField label="py (pivot y)" value={t.py ?? '0'} onChange={(v) => onUpdate({ py: v })} fieldKey="py" paramValues={paramValues} commitExpr={commitExpr} suggestions={suggestions} />
+            </div>
+          )}
         </div>
       )}
       {t.kind === 'repeat' && (

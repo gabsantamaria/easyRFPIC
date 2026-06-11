@@ -42,9 +42,20 @@ scene = {
                // Absent or '0' = none. Seeds the base instance's rotation in
                // expandTransforms; chain rotates ADD to it. Anchors/snap dots
                // rotate with the shape (anchorWorld / anchorLocalRotated).
-  zOffset? }   // OPTIONAL expression (µm) on rect/circle/ellipse/polygon/
+  zOffset?,    // OPTIONAL expression (µm) on rect/circle/ellipse/polygon/
                // polyline/polyshape: shifts the part's Z placement relative
                // to its layer (HFSS-parametric; no canvas visual in top view).
+  cxExpr?, cyExpr? }
+               // OPTIONAL parametric root position (µm expression strings).
+               // Applied by the solver on UNSNAPPED roots only — the exprs
+               // overwrite cx/cy on EVERY solve (a numeric drag is overwritten
+               // on the next solve, same UX as snap-bound parts). Snap-bound
+               // components ignore them (the snap wins); booleans never apply
+               // them. Non-finite evaluation keeps the numeric cx/cy and
+               // surfaces a 'nan-pos-expr' solve diagnostic. HFSS native COM
+               // export keeps them LIVE (rootPosExpr — the whole downstream
+               // snap chain inherits the referenced params); pyAEDT bakes them
+               // numerically with a pointer comment to the native export.
 // where kind is one of:
 //   'rect':       w, h, cornerRadius? (optional fillet expr; ring/GDS/HFSS
 //                              emit 4 straight edges + 4 90-deg corner arcs;
@@ -123,7 +134,14 @@ Each component has a `transforms` array — an ordered list of operations applie
 
 ```js
 { id, kind: 'displace', enabled, dx, dy }
-{ id, kind: 'rotate', enabled, angle, pivot }   // pivot: 'C'|'origin'|anchor name
+{ id, kind: 'rotate', enabled, angle, pivot, px?, py? }
+    // pivot: 'C'|'origin'|anchor name|'group'|'custom'
+    // 'custom' = explicit world-point pivot; px/py are µm EXPRESSION strings
+    // (normalizeScene coerces stray numerics). expandTransforms rotates every
+    // instance rigidly about the one (px, py) point; non-finite px/py skips
+    // the transform. HFSS native keeps px/py PARAMETRIC (exprWithUm pivot in
+    // the translate-rotate-translate); pyAEDT bakes them numerically with a
+    // pointer comment to the native export.
 { id, kind: 'repeat', enabled, n, dx, dy, includeOriginal }
 ```
 
@@ -150,6 +168,41 @@ For non-rect shapes, `expandTransforms` propagates shape-specific fields (r, rx,
 **Snap-anchor reading on booleans** (CRITICAL): the scene model has booleans with literal `w='0'`, `h='0'`. To read a boolean's bbox for snap anchor math, ALWAYS look up the SOLVED instance (from the `solved` array produced by `solveLayout` + `resolveBooleanBboxes`), not the scene component directly. Using `scene.b.w` will give you '0' and snap math will collapse the boolean to a point.
 
 **Hysteresis** on alt-drag: when multiple snap anchor pairs are equidistant from the cursor, the solver could oscillate between them frame-to-frame, creating visual jitter and unstable snap selection. We apply hysteresis: once a snap anchor pair is "stuck", switching requires the cursor to move closer than `stickThresh = worldThresh * 0.5` to another pair. Prevents the bug class where moving the mouse 1px flips the snap selection.
+
+**Snap-graph validation** (`validateSnapGraph`): live check surfaced in the UI; flags `duplicate-to` (two+ snaps target the same component) and dangling compId references. Run it after any programmatic snap surgery.
+
+## Canvas editing UX (Phase 4)
+
+**On-canvas vertex editing** (Canvas.jsx, helpers exported for tests): the PRIMARY-selected polyline/polyshape shows index-stable vertex handles (from `resolvePolylineVertices`).
+- Drag a handle: only rel-numeric vertices are draggable (`isRelNumericVertex` — kind 'rel'/absent with literal dx/dy). `dragVertexPatch` rewrites the dragged vertex's dx/dy AND the follower's, so everything downstream stays fixed (standard CAD semantics). Snap-bound / arc / expression-driven vertices REFUSE with a status-bar reason (`vertexDragBlock`) — edit those in the Inspector.
+- Double-click a segment: inserts a rel-numeric vertex splitting that segment, geometry-preserving (`insertVertexInSegment`; refused on spline runs / non-rel followers).
+- Alt+click a handle: deletes the vertex, keeping all DOWNSTREAM resolved positions (`deleteVertexFixDownstream`); enforces min vertex count (2 polyline / 3 polyshape).
+- Live preview goes through local state; the commit is ONE `updateScene` call.
+
+**Smart alignment guides** (`alignAxis`, exported): PLAIN move-drags only (never Alt-drag — that's parametric snap creation). Per axis, the dragged bbox's L/C/R (or B/C/T) values are tested against every other visible instance's edges/center within a threshold; the smallest delta wins, the position snaps to it (overriding grid snap on that axis), and full-viewport magenta guide lines are drawn for EVERY coordinate that aligns after the shift. This is a numeric literal alignment — the status bar reminds the user it creates no constraint.
+
+**Keyboard shortcuts** (window-level handler; suppressed when focus is in an input/textarea/select):
+- `F` fit-all, `⇧F` zoom to selection
+- Arrow keys: nudge selection by one grid step (`⇧` = 10×); boolean clusters co-move (`collectNudgeCluster`); snap/cxExpr-bound parts re-solve back onto their constraint (matches drag semantics); world is y-up (ArrowUp = +cy)
+- `⌘D` duplicate selection, `⌘A` select all, `Esc` clear selection
+- `Delete`/`Backspace` delete, `⌘Z`/`⌘⇧Z` undo/redo (pre-existing)
+- `a` while drawing a polyline: toggle arc mode (pre-existing)
+
+**Duplication** (`duplicateIds` + module-scope `cloneSnapsForDuplicate`, exported): copies get `<id>_copy` (then `_copy2`…) ids and a grid-based offset. Snap cloning rules: INTERNAL snaps (both endpoints in the selection) clone fully remapped; EXTERNAL INCOMING snaps (parent outside → child inside) clone with only the `to` side remapped, so the copy hangs off the same external parent; EXTERNAL OUTGOING snaps are DROPPED (cloning would create a duplicate-to violation). Result always passes `validateSnapGraph`.
+
+**PARAMS panel search + grouping**: a search box filters the param list (Esc clears); `groupParamPrefixes` (exported) collapses params sharing a `<prefix>_` (≥4 by default) into sections — keeps template-generated param families (e.g. `cpw_*`, `gsg_*`) manageable.
+
+**Anchor flash** (C10): clicking a from/to anchor label in the SNAPS panel (or inspector snap rows) flashes that anchor dot on the canvas — `flashAnchor = { compId, anchor, nonce }` state; Canvas keys its timeout on the nonce so re-clicks re-flash.
+
+## Templates
+
+`src/templates/index.js` exports `BUILTIN_TEMPLATES` — modules of shape `{ id, name, description, insert(prev, { viewport }) => nextScene }`. Insertion adds id-prefixed params + components + snaps to the scene (positions via SNAPS, not literals, so HFSS sweeps stay parametric). The library panel's "Save as built-in template" generates the module source (`_codify.js`); user payload insertion goes through `_library-insert.js`. Current built-ins:
+- `builtin_racetrack` — Racetrack resonator
+- `builtin_ring_resonator` — Ring resonator
+- `builtin_meander_electrode` / `builtin_meander_electrode_horizontal` — meander electrodes
+- `builtin_cpw_gsg` — **CPW (G-S-G)**: signal + 2 grounds; `<id>_gap` sweeps both grounds symmetrically via snap dy
+- `builtin_gsg_probe_pads` — **GSG probe pads + tapers**: 3 pads + 3 TAPERED polyline tapers (per-segment parametric corner exprs in HFSS) + stubs
+- `builtin_idc_comb` — **Interdigitated capacitor**: 2 bus bars + finger combs via parametric `repeat` (HFSS DuplicateAlongLine)
 
 ## Rendering
 
@@ -225,19 +278,28 @@ node tests/test_shapes.mjs
 node tests/test_polyshape.mjs
 node tests/test_racetrack.mjs
 node tests/test_racetrack_export.mjs
+node tests/test_edge_stickiness.mjs
 
 # Full vitest suite (covers everything below; run targeted files while iterating)
 npx vitest run
-#   tests/curved-paths.test.js     — arc/spline/taper vertex model (geometry + solver + walkers)
-#   tests/fillet-via.test.js       — rect cornerRadius + via component (rings, schema, walkers)
-#   tests/rotation_zoffset.test.js — first-class rotation + per-component zOffset
-#   tests/sweep-ui.test.js         — analysis setup / frequency sweep / Optimetrics emission
-#   tests/solver_guards.test.js    — NaN guards, snap-graph validation
-#   tests/rename-ident.test.js     — rename walker over every expression field
-#   tests/exports.test.js          — export emission + Python AST checks (incl. cross-feature
-#                                    interactions: rotated rounded rect, via vs zOffset,
-#                                    tapered polyline with snap-bound vertex)
-#   tests/boolean_render.test.js   — boolean mask composition (incl. polyshape arc operand)
+#   tests/curved-paths.test.js        — arc/spline/taper vertex model (geometry + solver + walkers)
+#   tests/fillet-via.test.js          — rect cornerRadius + via component (rings, schema, walkers)
+#   tests/rotation_zoffset.test.js    — first-class rotation + per-component zOffset
+#   tests/sweep-ui.test.js            — analysis setup / frequency sweep / Optimetrics emission
+#   tests/solver_guards.test.js       — NaN guards, snap-graph validation
+#   tests/rename-ident.test.js        — rename walker over every expression field
+#   tests/exports.test.js             — export emission + Python AST checks (incl. cross-feature
+#                                       interactions: rotated rounded rect, via vs zOffset,
+#                                       tapered polyline with snap-bound vertex)
+#   tests/boolean_render.test.js      — boolean mask composition (incl. polyshape arc operand)
+#   tests/templates.test.js           — built-in template registry + insert/solve/export for every
+#                                       template (incl. CPW gap parametricity, taper corner exprs,
+#                                       IDC repeat emission); _codify/_library-insert round-trips
+#   tests/canvas-vertex-edit.test.js  — vertex drag/insert/delete helpers, drag-block reasons,
+#                                       alignAxis smart-guide math
+#   tests/keyboard-dup-params.test.js — nudge cluster expansion, cloneSnapsForDuplicate rules,
+#                                       groupParamPrefixes param-section grouping
+#   tests/posexpr-pivot.test.js       — cxExpr/cyExpr solver + export behavior, custom rotate pivots
 
 # Production build
 npm run build

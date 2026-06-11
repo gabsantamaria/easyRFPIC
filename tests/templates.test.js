@@ -1,12 +1,18 @@
 import { describe, it, expect } from 'vitest';
+import { execSync } from 'child_process';
+import { writeFileSync, mkdirSync } from 'fs';
 import racetrack from '../src/templates/racetrack.js';
 import ringResonator from '../src/templates/ring-resonator.js';
 import meanderElectrode from '../src/templates/meander-electrode.js';
+import cpwGsg from '../src/templates/cpw-gsg.js';
+import gsgProbePads from '../src/templates/gsg-probe-pads.js';
+import idcComb from '../src/templates/idc-comb.js';
+import { generateHfssNative } from '../src/export/hfss-native.js';
 import { BUILTIN_TEMPLATES } from '../src/templates/index.js';
 import { insertLibraryPayload } from '../src/templates/_library-insert.js';
 import { generateTemplateModuleSource } from '../src/templates/_codify.js';
 import { makeBlankScene } from '../src/scene/schema.js';
-import { resolveParams } from '../src/scene/params.js';
+import { resolveParams, evalExpr } from '../src/scene/params.js';
 import { solveLayout, resolveBooleanBboxes } from '../src/scene/solver.js';
 import { expandTransforms } from '../src/scene/transforms.js';
 
@@ -237,3 +243,299 @@ describe('generateTemplateModuleSource', () => {
     expect(filename).toMatch(/^[a-z0-9_]+\.js$/);
   });
 });
+
+// ── RF building-block templates: cpw_gsg / gsg_probe_pads / idc_comb ────
+// Each sanity-runs through solveLayout AND generateHfssNative (ast.parse
+// green + at least one load-bearing parametric string proving the canvas
+// parametrization survives into the HFSS script).
+
+const solveScene = (scene) => {
+  const { values: pv } = resolveParams(scene.params);
+  let solved = solveLayout(scene.components, scene.snaps, pv);
+  solved = resolveBooleanBboxes(solved, pv);
+  return { solved, pv };
+};
+const hfssParses = (code, name) => {
+  mkdirSync('tests/out', { recursive: true });
+  writeFileSync(`tests/out/${name}.py`, code);
+  expect(() => execSync(
+    `python3 -c "import ast; ast.parse(open('tests/out/${name}.py').read())"`,
+    { stdio: 'pipe' }
+  )).not.toThrow();
+};
+// Locate the safe_create_* block that names a given component, so
+// assertions read THAT component's position exprs, not an earlier one's.
+const blockFor = (out, compId) => {
+  const nameIdx = out.indexOf(`"Name:=", "${compId}"`);
+  expect(nameIdx).toBeGreaterThan(0);
+  const blockStart = out.lastIndexOf('safe_create_', nameIdx);
+  expect(blockStart).toBeGreaterThan(0);
+  return out.slice(blockStart, nameIdx);
+};
+
+describe('cpw_gsg template', () => {
+  it('is registered in BUILTIN_TEMPLATES', () => {
+    expect(BUILTIN_TEMPLATES.map((t) => t.id)).toContain('builtin_cpw_gsg');
+  });
+
+  it('adds signal + two grounds with gap-parametric snaps', () => {
+    const prev = makeBlankScene();
+    const next = cpwGsg.insert(prev, ctx);
+    expect(next.components.length).toBe(prev.components.length + 3);
+    expect(next.snaps.length).toBe(prev.snaps.length + 2);
+    const sig = next.components.find((c) => c.id.endsWith('_sig'));
+    const gndT = next.components.find((c) => c.id.endsWith('_gnd_top'));
+    const gndB = next.components.find((c) => c.id.endsWith('_gnd_bot'));
+    expect(sig).toBeDefined();
+    expect(gndT).toBeDefined();
+    expect(gndB).toBeDefined();
+    for (const c of [sig, gndT, gndB]) expect(c.layer).toBe('electrode');
+    const newNames = Object.keys(next.params).filter((k) => !prev.params[k]);
+    for (const suffix of ['_w_sig', '_gap', '_w_gnd', '_L']) {
+      expect(newNames.some((n) => n.endsWith(suffix))).toBe(true);
+    }
+    // Both ground snaps hang off the signal and carry the gap param.
+    const added = next.snaps.slice(prev.snaps.length);
+    for (const s of added) {
+      expect(s.from.compId).toBe(sig.id);
+      expect(s.dy).toMatch(/_gap/);
+    }
+  });
+
+  it('solves grounds symmetric about the signal, edge gap = <p>_gap', () => {
+    // Defaults: w_sig=10, gap=6, w_gnd=60 → ground centers at ±(5+6+30)=±41.
+    const next = cpwGsg.insert(makeBlankScene(), ctx);
+    const { solved } = solveScene(next);
+    const gndT = solved.find((c) => c.id.endsWith('_gnd_top'));
+    const gndB = solved.find((c) => c.id.endsWith('_gnd_bot'));
+    expect(gndT.cy).toBeCloseTo(41, 6);
+    expect(gndB.cy).toBeCloseTo(-41, 6);
+  });
+
+  it('sweeping <p>_gap moves both grounds', () => {
+    const next = cpwGsg.insert(makeBlankScene(), ctx);
+    const gapName = Object.keys(next.params).find((k) => k.endsWith('_gap'));
+    next.params[gapName] = { ...next.params[gapName], expr: '20' };
+    const { solved } = solveScene(next);
+    const gndT = solved.find((c) => c.id.endsWith('_gnd_top'));
+    expect(gndT.cy).toBeCloseTo(5 + 20 + 30, 6);
+  });
+
+  it('HFSS export keeps the gap param in the grounds\' placement + parses', () => {
+    const next = cpwGsg.insert(makeBlankScene(), ctx);
+    const { pv } = solveScene(next);
+    const out = generateHfssNative(next, pv);
+    const gapName = Object.keys(next.params).find((k) => k.endsWith('_gap'));
+    const gndT = next.components.find((c) => c.id.endsWith('_gnd_top'));
+    const gndB = next.components.find((c) => c.id.endsWith('_gnd_bot'));
+    expect(blockFor(out, gndT.id)).toContain(gapName);
+    expect(blockFor(out, gndB.id)).toContain(gapName);
+    hfssParses(out, 'vitest_tpl_cpw_gsg');
+  });
+});
+
+describe('gsg_probe_pads template', () => {
+  it('is registered in BUILTIN_TEMPLATES', () => {
+    expect(BUILTIN_TEMPLATES.map((t) => t.id)).toContain('builtin_gsg_probe_pads');
+  });
+
+  it('adds 3 pads + 3 stubs + 3 tapered polylines, 8 snaps, fillet param on pads', () => {
+    const prev = makeBlankScene();
+    const next = gsgProbePads.insert(prev, ctx);
+    expect(next.components.length).toBe(prev.components.length + 9);
+    expect(next.snaps.length).toBe(prev.snaps.length + 8);
+    const pads = next.components.filter((c) => c.id.includes('_pad_'));
+    const stubs = next.components.filter((c) => c.id.includes('_stub_'));
+    const tapers = next.components.filter((c) => c.kind === 'polyline');
+    expect(pads.length).toBe(3);
+    expect(stubs.length).toBe(3);
+    expect(tapers.length).toBe(3);
+    // Pads carry the optional cornerRadius param (default expr '0').
+    const padRName = Object.keys(next.params).find((k) => k.endsWith('_pad_r'));
+    expect(padRName).toBeDefined();
+    expect(next.params[padRName].expr).toBe('0');
+    for (const p of pads) expect(p.cornerRadius).toBe(padRName);
+    // Each taper: base width = pad height param; vertex 0 is a zero-
+    // offset rel (rides cx/cy = the pad's E anchor via component snap);
+    // vertex 1 is snap-bound to the stub and carries the end (trace)
+    // width → tapered polyline.
+    const padHName = Object.keys(next.params).find((k) => k.endsWith('_pad_h'));
+    for (const t of tapers) {
+      expect(t.width).toBe(padHName);
+      expect(t.vertices.length).toBe(2);
+      expect(t.vertices[0].kind).toBe('rel');
+      expect(t.vertices[1].kind).toBe('snap');
+      expect(t.vertices[1].anchor).toBe('W');
+      expect(t.vertices[1].width).toMatch(/_w_(sig|gnd)$/);
+    }
+  });
+
+  it('solves a coherent launch: pitch pads in, CPW-gap stubs out', () => {
+    // Defaults: pad_w=80, pad_h=80, pitch=150, taper_L=200, stub_L=50,
+    // w_sig=10, gap=6, w_gnd=60.
+    const next = gsgProbePads.insert(makeBlankScene(), ctx);
+    const { solved } = solveScene(next);
+    const padGT = solved.find((c) => c.id.endsWith('_pad_gnd_top'));
+    const padGB = solved.find((c) => c.id.endsWith('_pad_gnd_bot'));
+    const stubS = solved.find((c) => c.id.endsWith('_stub_sig'));
+    const stubGT = solved.find((c) => c.id.endsWith('_stub_gnd_top'));
+    const tapS = solved.find((c) => c.id.endsWith('_taper_sig'));
+    expect(padGT.cy).toBeCloseTo(150, 6);
+    expect(padGB.cy).toBeCloseTo(-150, 6);
+    // stub_sig.W = pad_sig.E + taper_L → cx = 40 + 200 + 25 = 265.
+    expect(stubS.cx).toBeCloseTo(265, 6);
+    expect(stubS.cy).toBeCloseTo(0, 6);
+    // ground stub rides the SIGNAL stub at the CPW gap: 5 + 6 + 30 = 41.
+    expect(stubGT.cy).toBeCloseTo(41, 6);
+    // taper vertex 0 pinned to pad_sig.E = (40, 0).
+    expect(tapS.cx).toBeCloseTo(40, 6);
+    expect(tapS.cy).toBeCloseTo(0, 6);
+  });
+
+  it('pitch sweep moves ground pads AND their taper roots in lockstep', () => {
+    const next = gsgProbePads.insert(makeBlankScene(), ctx);
+    const pitchName = Object.keys(next.params).find((k) => k.endsWith('_pitch'));
+    next.params[pitchName] = { ...next.params[pitchName], expr: '200' };
+    const { solved } = solveScene(next);
+    const padGT = solved.find((c) => c.id.endsWith('_pad_gnd_top'));
+    const tapGT = solved.find((c) => c.id.endsWith('_taper_gnd_top'));
+    expect(padGT.cy).toBeCloseTo(200, 6);
+    expect(tapGT.cy).toBeCloseTo(200, 6); // taper root pinned to pad.E
+  });
+
+  it('HFSS export emits parametric tapered transitions (sqrt corners) + parses', () => {
+    const next = gsgProbePads.insert(makeBlankScene(), ctx);
+    const { pv } = solveScene(next);
+    const out = generateHfssNative(next, pv);
+    expect(out).toContain('TAPERED polyline trace');
+    // Parametric unit-normal corner expressions.
+    expect(out).toContain('sqrt(');
+    // Corner exprs ride the pad width (vertex-0 chain = pad.E anchor
+    // offset) AND the live trace-width params — not baked numerics.
+    const padWName = Object.keys(next.params).find((k) => k.endsWith('_pad_w'));
+    const wSigName = Object.keys(next.params).find((k) => k.endsWith('_w_sig'));
+    expect(out).toMatch(new RegExp(`"[XY]:=", "[^"]*${padWName}[^"]*"`));
+    expect(out).toMatch(new RegExp(`"[XY]:=", "[^"]*${wSigName}[^"]*"`));
+    // Safety report lists the taper widths as parametric.
+    expect(out).toContain('per-vertex taper widths');
+    hfssParses(out, 'vitest_tpl_gsg_probe_pads');
+  });
+});
+
+describe('idc_comb template', () => {
+  it('is registered in BUILTIN_TEMPLATES', () => {
+    expect(BUILTIN_TEMPLATES.map((t) => t.id)).toContain('builtin_idc_comb');
+  });
+
+  it('adds 2 buses + 2 fingers consumed into one union per side, 3 snaps', () => {
+    const prev = makeBlankScene();
+    const next = idcComb.insert(prev, ctx);
+    expect(next.components.length).toBe(prev.components.length + 6);
+    expect(next.snaps.length).toBe(prev.snaps.length + 3);
+    const unions = next.components.filter((c) => c.kind === 'boolean');
+    expect(unions.length).toBe(2);
+    for (const u of unions) {
+      expect(u.op).toBe('union');
+      expect(u.operandIds.length).toBe(2);
+      for (const id of u.operandIds) {
+        const op = next.components.find((c) => c.id === id);
+        expect(op.consumedBy).toBe(u.id);
+        expect(op.layer).toBe('electrode');
+      }
+      // Bus first so Unite's surviving part renames cleanly.
+      expect(u.operandIds[0]).toMatch(/_bus_/);
+    }
+  });
+
+  it('fingers carry an N-driven repeat transform (one same-side pitch in y)', () => {
+    const prev = makeBlankScene();
+    const next = idcComb.insert(prev, ctx);
+    const fingers = next.components.filter((c) => c.id.includes('_finger_'));
+    expect(fingers.length).toBe(2);
+    for (const f of fingers) {
+      expect(f.transforms.length).toBe(1);
+      const t = f.transforms[0];
+      expect(t.kind).toBe('repeat');
+      expect(t.enabled).toBe(true);
+      expect(t.includeOriginal).toBe(true);
+      expect(t.n).toMatch(/_N\)?\s*-\s*1/);   // repeat count tracks <p>_N
+      expect(t.dx).toBe('0');
+      expect(t.dy).toMatch(/_finger_w/);
+      expect(t.dy).toMatch(/_gap/);
+    }
+    // Default N=5 → 5 instances per side, spaced 2*(4+3)=14 in y.
+    const { solved, pv } = solveScene(next);
+    const fL = solved.find((c) => c.id.endsWith('_finger_left'));
+    const insts = expandTransforms([fL], pv);
+    expect(insts.length).toBe(5);
+    expect(insts[1].cy - insts[0].cy).toBeCloseTo(14, 6);
+  });
+
+  it('N sweep changes the expanded finger count', () => {
+    const next = idcComb.insert(makeBlankScene(), ctx);
+    const nName = Object.keys(next.params).find((k) => k.endsWith('_N'));
+    next.params[nName] = { ...next.params[nName], expr: '8' };
+    const { solved, pv } = solveScene(next);
+    const fR = solved.find((c) => c.id.endsWith('_finger_right'));
+    expect(expandTransforms([fR], pv).length).toBe(8);
+  });
+
+  it('solves interdigitated geometry: overlap + opposing-finger gap honored', () => {
+    // Defaults: finger_w=4, finger_L=60, gap=3, overlap=50, bus_w=10.
+    const next = idcComb.insert(makeBlankScene(), ctx);
+    const { solved, pv } = solveScene(next);
+    const busL = solved.find((c) => c.id.endsWith('_bus_left'));
+    const busR = solved.find((c) => c.id.endsWith('_bus_right'));
+    const fL = solved.find((c) => c.id.endsWith('_finger_left'));
+    const fR = solved.find((c) => c.id.endsWith('_finger_right'));
+    // Bus height covers both combs: (2*5-1)*(4+3)+4 = 39+28 = 67... = 67? (9*7+4)=67.
+    expect(evalOrNum(busL.h, pv)).toBeCloseTo(67, 6);
+    // Inner faces D = 2*60-50 = 70 apart → busR.cx = busL.cx + bus_w + D.
+    expect(busR.cx - busL.cx).toBeCloseTo(10 + 70, 6);
+    // x-overlap of opposing fingers = overlap param (50).
+    const fLRight = fL.cx + 30, fRLeft = fR.cx - 30;
+    expect(fLRight - fRLeft).toBeCloseTo(50, 6);
+    // y gap between adjacent opposing fingers = gap param (3).
+    expect((fR.cy - 2) - (fL.cy + 2)).toBeCloseTo(3, 6);
+  });
+
+  it('HFSS export: parametric duplicate step, N-count clones, per-side Unite + parses', () => {
+    const next = idcComb.insert(makeBlankScene(), ctx);
+    const { pv } = solveScene(next);
+    const out = generateHfssNative(next, pv);
+    expect(out).toContain('DuplicateAlongLine');
+    // Duplicate step stays a LIVE expression of finger_w + gap.
+    const fwName = Object.keys(next.params).find((k) => k.endsWith('_finger_w'));
+    const gapName = Object.keys(next.params).find((k) => k.endsWith('_gap'));
+    expect(out).toMatch(new RegExp(`"YComponent:=", "[^"]*${fwName}[^"]*${gapName}[^"]*"`));
+    // Default N=5 → repeat n=4 → NumClones emitted as n+1 = 5.
+    expect(out).toContain('"NumClones:=", "5"');
+    // Per-side Unite selections start with the bus and include the finger.
+    const busLId = next.components.find((c) => c.id.endsWith('_bus_left')).id;
+    const fLId = next.components.find((c) => c.id.endsWith('_finger_left')).id;
+    expect(out).toMatch(new RegExp(`"Selections:=", "${busLId},${fLId}`));
+    hfssParses(out, 'vitest_tpl_idc_comb');
+  });
+
+  it('avoids id/param collisions on repeated insert', () => {
+    let scene = makeBlankScene();
+    scene = idcComb.insert(scene, ctx);
+    scene = idcComb.insert(scene, ctx);
+    scene = cpwGsg.insert(scene, ctx);
+    scene = gsgProbePads.insert(scene, ctx);
+    const ids = scene.components.map((c) => c.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    const paramKeys = Object.keys(scene.params);
+    expect(new Set(paramKeys).size).toBe(paramKeys.length);
+    // The whole multi-template scene still solves and exports.
+    const { solved, pv } = solveScene(scene);
+    expect(solved.every((c) => Number.isFinite(c.cx) && Number.isFinite(c.cy))).toBe(true);
+    const out = generateHfssNative(scene, pv);
+    hfssParses(out, 'vitest_tpl_rf_combo');
+  });
+});
+
+// Tiny helper: components solved by solveLayout keep w/h as expressions.
+function evalOrNum(v, pv) {
+  return typeof v === 'number' ? v : evalExpr(v, pv);
+}

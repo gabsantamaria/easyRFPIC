@@ -177,6 +177,13 @@ def build_wg(name, cx, cy, w, h):
     const id = ascii(c.id);
     const cx = c.cx.toFixed(3);
     const cy = c.cy.toFixed(3);
+    // Parametric root position (C8) — BASIC numeric emission: the solver
+    // already applied cxExpr/cyExpr to the solved cx/cy, so the geometry
+    // matches the canvas; the expressions themselves are kept live only
+    // in the native COM export.
+    if ((c.cxExpr != null && String(c.cxExpr).trim() !== '') || (c.cyExpr != null && String(c.cyExpr).trim() !== '')) {
+      code += `# ${c.id}: position expression (cxExpr=${ascii(String(c.cxExpr ?? ''))}, cyExpr=${ascii(String(c.cyExpr ?? ''))}) baked numerically; use the native COM export for a parametric position\n`;
+    }
     if (shapeKind === 'circle') {
       const rNum = (evalExpr(c.r ?? '0', paramValues) || 0).toFixed(3);
       const zOrigin = c.layer === 'waveguide' ? '0' : 'h_wg';
@@ -431,6 +438,15 @@ def build_wg(name, cx, cy, w, h):
           if (pivot === 'group') {
             const gc = groupCentroid(c.group);
             if (gc) { pivotX = gc.x; pivotY = gc.y; }
+          } else if (pivot === 'custom') {
+            // C9: explicit (px, py) world-coordinate pivot — BASIC
+            // numeric emission (the native COM export keeps px/py
+            // parametric).
+            const pxNum = evalExpr(t.px ?? '0', paramValues);
+            const pyNum = evalExpr(t.py ?? '0', paramValues);
+            if (Number.isFinite(pxNum)) pivotX = pxNum;
+            if (Number.isFinite(pyNum)) pivotY = pyNum;
+            code += `# ${c.id}: rotate about custom pivot (px=${ascii(String(t.px ?? '0'))}, py=${ascii(String(t.py ?? '0'))}) baked numerically; use the native COM export for a parametric pivot\n`;
           } else if (pivot !== 'C') {
             // Resolve local anchor offset on the part's BASE w/h. Then
             // rotate by curRotation since the part has been rotated.
@@ -588,6 +604,14 @@ def build_wg(name, cx, cy, w, h):
           if (pivot === 'group') {
             const gc = groupCentroid(componentGroup);
             if (gc) { pivotX = gc.x; pivotY = gc.y; }
+          } else if (pivot === 'custom') {
+            // C9: explicit (px, py) world-coordinate pivot — numeric
+            // here (parametric in the native COM export).
+            const pxNum = evalExpr(t.px ?? '0', paramValues);
+            const pyNum = evalExpr(t.py ?? '0', paramValues);
+            if (Number.isFinite(pxNum)) pivotX = pxNum;
+            if (Number.isFinite(pyNum)) pivotY = pyNum;
+            code += `# rotate about custom pivot (px=${ascii(String(t.px ?? '0'))}, py=${ascii(String(t.py ?? '0'))}) baked numerically; use the native COM export for a parametric pivot\n`;
           } else if (pivot !== 'C') {
             const localOff = anchorLocal(pivot, baseW, baseH);
             const rad = curRotation * Math.PI / 180;

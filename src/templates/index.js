@@ -13,10 +13,16 @@ import racetrack from './racetrack.js';
 import ringResonator from './ring-resonator.js';
 import meanderElectrode from './meander-electrode.js';
 import meanderElectrodeHorizontal from './meander-electrode-horizontal.js';
+import cpwGsg from './cpw-gsg.js';
+import gsgProbePads from './gsg-probe-pads.js';
+import idcComb from './idc-comb.js';
 
 export const BUILTIN_TEMPLATES = [
   racetrack,
   ringResonator,
   meanderElectrode,
   meanderElectrodeHorizontal,
+  cpwGsg,
+  gsgProbePads,
+  idcComb,
 ];

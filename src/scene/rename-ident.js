@@ -23,9 +23,11 @@ const COMPONENT_EXPR_FIELDS = [
   'rotation',                                // first-class rotation (deg, CCW)
   'zOffset',                                 // Z shift relative to the layer (µm)
   'cornerRadius',                            // rect corner fillet radius (µm, D3)
+  'cxExpr', 'cyExpr',                        // parametric root position (µm, C8)
 ];
 const CUTOUT_EXPR_FIELDS    = ['dx', 'dy', 'w', 'h'];
-const TRANSFORM_EXPR_FIELDS = ['dx', 'dy', 'angle', 'n', 'offset'];
+// px / py: custom rotate-pivot world coordinates (µm, C9).
+const TRANSFORM_EXPR_FIELDS = ['dx', 'dy', 'angle', 'n', 'offset', 'px', 'py'];
 // Polyline/polyshape vertex expression fields:
 //   dx/dy        — rel-kind step from the previous vertex
 //   cdx/cdy/angle — arc-kind center offset + sweep (degrees CCW)

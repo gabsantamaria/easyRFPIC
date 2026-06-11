@@ -114,6 +114,27 @@ export function computeParametricPositions(components, snaps, paramValues = {}) 
     if (/^-?\d+(?:\.\d+)?$/.test(s.trim())) return `${s}um`;
     return s;
   };
+  // ── C8: parametric position on UNSNAPPED roots ─────────────────────
+  // A free component may carry cxExpr / cyExpr (expression strings,
+  // µm). When present (and evaluating finite, mirroring the solver's
+  // gate), the ROOT position expression is the user's expression
+  // instead of the solved numeric literal — so the WHOLE downstream
+  // snap chain inherits the referenced parameters and an HFSS-side
+  // sweep over them moves the entire subtree. Snap-bound components
+  // never reach this helper (the snap branch wins), matching the
+  // solver's "snap wins" rule. Bare numerics get the "um" tag (same
+  // base-unit hazard as dimExprStr above).
+  const rootPosExpr = (c, axis) => {
+    const num = axis === 'x' ? c?.cx : c?.cy;
+    const fallback = `${Number.isFinite(num) ? num : 0}um`;
+    if (!c || c.kind === 'boolean') return fallback;
+    const expr = axis === 'x' ? c.cxExpr : c.cyExpr;
+    if (expr == null) return fallback;
+    const s = String(expr).trim();
+    if (s === '' || !Number.isFinite(evalExpr(s, paramValues))) return fallback;
+    if (/^-?\d+(?:\.\d+)?$/.test(s)) return `${s}um`;
+    return `(${s})`;
+  };
   // Optional 4th arg `rotExpr`: the owning component's first-class
   // rotation expression (degrees, CCW). When present, the offsets are
   // wrapped in the HFSS-trig rotation matrix so the anchor tracks the
@@ -256,9 +277,11 @@ export function computeParametricPositions(components, snaps, paramValues = {}) 
     if (!cc) return null;
     const sn = incomingSnap.get(compId);
     if (!sn) {
+      // Free root: honor cxExpr / cyExpr (C8) the same way `resolve`
+      // does, so union-bbox edge expressions track the root params too.
       return {
-        cxExpr: `${Number.isFinite(cc.cx) ? cc.cx : 0}um`,
-        cyExpr: `${Number.isFinite(cc.cy) ? cc.cy : 0}um`,
+        cxExpr: rootPosExpr(cc, 'x'),
+        cyExpr: rootPosExpr(cc, 'y'),
       };
     }
     const parent = byId[sn.from.compId];
@@ -370,13 +393,14 @@ export function computeParametricPositions(components, snaps, paramValues = {}) 
           return result;
         }
       }
-      // Free component: position is its raw cx/cy literal. Append "um" so that
-      // when this leaf is composed into a chain expression with parameters
-      // (which are unit-bearing), HFSS evaluates the whole chain in length units.
-      const cx = Number.isFinite(c.cx) ? c.cx : 0;
-      const cy = Number.isFinite(c.cy) ? c.cy : 0;
+      // Free component: position is its raw cx/cy literal — UNLESS the
+      // component carries cxExpr / cyExpr (C8), in which case the
+      // user's parametric expression becomes the root of the chain.
+      // Numeric leaves get "um" appended so that when composed into a
+      // chain expression with parameters (which are unit-bearing),
+      // HFSS evaluates the whole chain in length units.
       const dims = dimExprForComp(c);
-      const result = { cxExpr: `${cx}um`, cyExpr: `${cy}um`, wExpr: dims.wExpr, hExpr: dims.hExpr };
+      const result = { cxExpr: rootPosExpr(c, 'x'), cyExpr: rootPosExpr(c, 'y'), wExpr: dims.wExpr, hExpr: dims.hExpr };
       positions[compId] = result;
       visiting.delete(compId);
       return result;
@@ -3257,6 +3281,19 @@ except Exception as e:
               pivotYExpr = `${pivotY.toFixed(4)}um`;
               noteFrozen(chainReportId, 'rotate pivot (group centroid of mixed members - baked numerically)');
             }
+          } else if (pivot === 'custom') {
+            // C9: explicit (px, py) world-coordinate pivot. px/py are
+            // expression strings (µm) — emitted PARAMETRICALLY via
+            // exprWithUm so HFSS sweeps over any variable they
+            // reference move the pivot (and the rotated copy) in
+            // lockstep. Numeric tracking mirrors expandTransforms.
+            const pxNum = evalExpr(t.px ?? '0', paramValues);
+            const pyNum = evalExpr(t.py ?? '0', paramValues);
+            pivotX = Number.isFinite(pxNum) ? pxNum : 0;
+            pivotY = Number.isFinite(pyNum) ? pyNum : 0;
+            pivotXExpr = exprWithUm(t.px ?? '0');
+            pivotYExpr = exprWithUm(t.py ?? '0');
+            notePara(`${chainReportId}.rotate(custom)`, 'custom pivot (parametric px/py + angle)');
           } else if (pivot !== 'C') {
             // Anchor offset on the part's BASE w/h, then rotate by
             // curRotation (accumulated rotation so far, numeric).

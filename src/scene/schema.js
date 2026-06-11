@@ -155,12 +155,37 @@ export function normalizeScene(s) {
     //   zOffset      — Z shift (µm) relative to the component's layer.
     //   cornerRadius — rect corner fillet radius (µm, D3). Absent or
     //                  '0' = sharp corners.
+    //   cxExpr/cyExpr — parametric position (µm, C8) applied by the
+    //                  solver on UNSNAPPED roots; snap-bound components
+    //                  ignore them.
     // All are expression STRINGS; coerce stray numerics from hand-
     // edited JSON so every downstream consumer can assume strings.
     ...(c.rotation != null && typeof c.rotation !== 'string' ? { rotation: String(c.rotation) } : {}),
     ...(c.zOffset != null && typeof c.zOffset !== 'string' ? { zOffset: String(c.zOffset) } : {}),
     ...(c.cornerRadius != null && typeof c.cornerRadius !== 'string' ? { cornerRadius: String(c.cornerRadius) } : {}),
+    ...(c.cxExpr != null && typeof c.cxExpr !== 'string' ? { cxExpr: String(c.cxExpr) } : {}),
+    ...(c.cyExpr != null && typeof c.cyExpr !== 'string' ? { cyExpr: String(c.cyExpr) } : {}),
   }));
+  // Rotate-transform custom pivots (C9): pivot === 'custom' carries an
+  // explicit world-coordinate pivot as px / py expression strings (µm).
+  // Default missing fields to '0' and coerce stray numerics so the
+  // expanders / exporters / rename walker can assume strings.
+  migratedComponents = migratedComponents.map(c => {
+    if (!Array.isArray(c.transforms) || c.transforms.length === 0) return c;
+    let changed = false;
+    const transforms = c.transforms.map(t => {
+      if (!t || t.kind !== 'rotate') return t;
+      const next = { ...t };
+      let tChanged = false;
+      for (const f of ['px', 'py']) {
+        if (next[f] != null && typeof next[f] !== 'string') { next[f] = String(next[f]); tChanged = true; }
+        if (next.pivot === 'custom' && next[f] == null) { next[f] = '0'; tChanged = true; }
+      }
+      if (tChanged) changed = true;
+      return tChanged ? next : t;
+    });
+    return changed ? { ...c, transforms } : c;
+  });
   // Via components (D4): plan-view circles spanning two stack layers in
   // Z. Normalize defaults so downstream consumers can assume:
   //   r          — expression string (default '2')

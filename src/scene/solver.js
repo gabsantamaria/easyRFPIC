@@ -308,6 +308,28 @@ export function solveLayout(components, snaps, paramValues) {
   };
   const placed = new Set();
   const dependents = new Set(snaps.map(s => s.to.compId));
+  // ── C8: optional parametric position on UNSNAPPED roots ──────────────
+  // A component may carry cxExpr / cyExpr (expression strings, µm). When
+  // it's a ROOT (no incoming snap), the expressions overwrite cx/cy on
+  // EVERY solve — so editing the referenced param moves the part, and a
+  // numeric drag gets overwritten on the next solve (intended UX, same
+  // as snap-bound components). Snap-bound components ignore them (the
+  // snap wins); booleans derive cx/cy from operands and never apply them.
+  // Non-finite evaluations leave the stored numeric cx/cy in place and
+  // surface a solve-diagnostics issue.
+  const applyPosExprs = (c) => {
+    if (!c || c.kind === 'boolean') return;
+    for (const [field, target] of [['cxExpr', 'cx'], ['cyExpr', 'cy']]) {
+      const expr = c[field];
+      if (expr == null || String(expr).trim() === '') continue;
+      const v = evalExpr(expr, workingPV);
+      if (Number.isFinite(v)) {
+        c[target] = v;
+      } else {
+        diag.issues.push({ kind: 'nan-pos-expr', message: `Component ${c.id}: ${field} "${expr}" evaluated non-finite — kept numeric ${target}` });
+      }
+    }
+  };
   // First pass: place components with no incoming snap. Booleans count as
   // placed only AFTER all their operands are placed (because their bbox
   // depends on operand positions). We iterate to fixed-point.
@@ -320,6 +342,7 @@ export function solveLayout(components, snaps, paramValues) {
   for (const c of components) {
     if (!dependents.has(c.id) && isResolvable(c)) {
       placed.add(c.id);
+      applyPosExprs(byId[c.id]);
       recordPlaced(byId[c.id]);
     }
   }

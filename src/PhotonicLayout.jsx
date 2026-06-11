@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { Plus, Trash2, RotateCcw, RotateCw, Download, Upload, Lock, Unlock, FlipHorizontal, FlipVertical, Layers, Settings2, Box, Square, Link2, Link2Off, Grid3x3, AlertTriangle, Maximize2, Save, FileText, FilePlus, Copy, FolderTree, BookOpen, Package, Boxes, Pencil, Ruler, Eye, EyeOff, ArrowDown, ArrowUp, Move, Repeat, Combine, Minus, X as XIcon, Circle, Hexagon, Radio, HelpCircle } from 'lucide-react';
+import { Plus, Trash2, RotateCcw, RotateCw, Download, Upload, Lock, Unlock, FlipHorizontal, FlipVertical, Layers, Settings2, Box, Square, Link2, Link2Off, Grid3x3, AlertTriangle, Maximize2, Save, FileText, FilePlus, Copy, FolderTree, BookOpen, Package, Boxes, Pencil, Ruler, Eye, EyeOff, ArrowDown, ArrowUp, Move, Repeat, Combine, Minus, X as XIcon, Circle, Hexagon, Radio, HelpCircle, Search, ChevronDown, ChevronRight } from 'lucide-react';
 import { eulerBend180Centerline, buildRacetrackCenterline, offsetCenterlineToBand } from './geometry/racetrack.js';
 import { tokenizeIdents, tokenizeComponentExprs, resolveParams, evalExpr, RESERVED_IDENTS } from './scene/params.js';
 import { renameIdentInScene } from './scene/rename-ident.js';
@@ -88,6 +88,100 @@ import { generateTemplateModuleSource } from './templates/_codify.js';
 // Cursor-zoom, grid snap, vertex resize, parameter expressions
 // =========================================================================
 
+// ── Pure helpers (module scope, exported for tests) ─────────────────────
+
+// C4: expand a selection to the full boolean-cluster move set, matching
+// drag semantics (CLAUDE.md "Cluster drag"): a selected primitive that's
+// consumed by a boolean moves its WHOLE cluster (walk consumedBy up to
+// the topmost boolean, then recursively pull in every consumed operand).
+// Punch tools (consumedBy !== boolean.id) stay independent, exactly like
+// the canvas drag path. Returns a Set of component ids to translate.
+export function collectNudgeCluster(components, ids) {
+  const byId = Object.fromEntries(components.map(c => [c.id, c]));
+  const moveSet = new Set();
+  const visitedBooleans = new Set();
+  const addCluster = (id) => {
+    const c = byId[id];
+    if (!c) return;
+    if (c.kind === 'boolean') {
+      if (visitedBooleans.has(id)) return;
+      visitedBooleans.add(id);
+      moveSet.add(id);
+      for (const opid of (c.operandIds || [])) {
+        const op = byId[opid];
+        // Skip operands not actually consumed by this boolean (punch
+        // keeps its tools independent — they shouldn't co-move).
+        if (op && op.consumedBy === id) addCluster(opid);
+      }
+    } else {
+      moveSet.add(id);
+      // Walk consumedBy up to the topmost containing boolean and bring
+      // the whole cluster along (drag parity).
+      let cur = c, top = null;
+      while (cur && cur.consumedBy) {
+        const parent = byId[cur.consumedBy];
+        if (!parent) break;
+        top = parent;
+        cur = parent;
+      }
+      if (top) addCluster(top.id);
+    }
+  };
+  for (const id of ids) addCluster(id);
+  return moveSet;
+}
+
+// C6: snaps to clone when duplicating the id-set `ids` (old → new ids in
+// `idMap`). Three cases:
+//   - INTERNAL (both endpoints inside): clone with both endpoints remapped.
+//   - EXTERNAL INCOMING (from outside → to inside): clone with only the
+//     'to' side remapped — the copy hangs off the SAME external parent,
+//     which is safe (each copy is a distinct 'to' target).
+//   - EXTERNAL OUTGOING (from inside → to outside): SKIP. Cloning would
+//     create a second snap targeting the same external 'to' component —
+//     a duplicate-to violation — so these are correctly dropped.
+export function cloneSnapsForDuplicate(snaps, ids, idMap, makeSnapId) {
+  const out = [];
+  for (const s of snaps) {
+    const fromIn = ids.has(s.from.compId);
+    const toIn = ids.has(s.to.compId);
+    if (!toIn) continue; // outside-only or external-outgoing → drop
+    out.push({
+      ...s,
+      id: makeSnapId(),
+      from: fromIn ? { ...s.from, compId: idMap[s.from.compId] } : { ...s.from },
+      to: { ...s.to, compId: idMap[s.to.compId] },
+    });
+  }
+  return out;
+}
+
+// C7: PARAMS-panel prefix grouping. Params sharing the prefix before the
+// LAST underscore-delimited token (e.g. meander_h_1 → "meander_h") form a
+// collapsible section when the group has >= minGroup members. Returns
+// { sections: [{ prefix, names }], flat: [names] } — sections in order of
+// first appearance, flat (ungrouped) names in original order.
+export function groupParamPrefixes(names, minGroup = 4) {
+  const byPrefix = new Map();
+  for (const name of names) {
+    const i = name.lastIndexOf('_');
+    if (i <= 0) continue; // no underscore (or leading) → ungroupable
+    const prefix = name.slice(0, i);
+    if (!byPrefix.has(prefix)) byPrefix.set(prefix, []);
+    byPrefix.get(prefix).push(name);
+  }
+  const grouped = new Set();
+  const sections = [];
+  for (const [prefix, members] of byPrefix) {
+    if (members.length >= minGroup) {
+      sections.push({ prefix, names: members });
+      for (const n of members) grouped.add(n);
+    }
+  }
+  const flat = names.filter(n => !grouped.has(n));
+  return { sections, flat };
+}
+
 // =========================================================================
 // MAIN APP
 // =========================================================================
@@ -126,7 +220,25 @@ export default function App() {
   // distance) without putting a label on the canvas where it would obscure the
   // line and anchors. Canvas writes this; App renders it.
   const [interactionStatus, setInteractionStatus] = useState(null); // { kind, line: string }
+  // C10: anchor flash — clicking a from/to anchor label in the SNAPS panel
+  // or the inspector's Connections rows briefly highlights that anchor on
+  // the canvas. The nonce bump retriggers the halo even for the same
+  // compId/anchor pair (Canvas keys its timeout on flashAnchor.nonce).
+  const [flashAnchor, setFlashAnchor] = useState(null); // { compId, anchor, nonce }
+  const flashAnchorOnCanvas = useCallback((compId, anchor) => {
+    setFlashAnchor(prev => ({ compId, anchor, nonce: (prev?.nonce || 0) + 1 }));
+  }, []);
   const [activePanel, setActivePanel] = useState('params');
+  // C7: PARAMS panel search + collapsible prefix groups (UI-only state).
+  const [paramSearch, setParamSearch] = useState('');
+  const [collapsedParamGroups, setCollapsedParamGroups] = useState(() => new Set());
+  const toggleParamGroup = (prefix) => {
+    setCollapsedParamGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(prefix)) next.delete(prefix); else next.add(prefix);
+      return next;
+    });
+  };
   // Tracks which object rows in the SHAPES tree are currently expanded.
   // Each entry is a component id or group id. Expansion state is purely
   // a UI concern, so we keep it in App state (not in scene). Resets to
@@ -1250,14 +1362,84 @@ export default function App() {
     setViewport({ x: cx, y: cy, w: bw * pad, h: bh * pad });
   }, [scene, paramValues]);
 
-  // Keyboard shortcuts (F = fit, Delete/Backspace = delete selected, Cmd+Z = undo, Cmd+Shift+Z = redo)
+  // Shift+F (C4): zoom the viewport to the bbox of the SELECTED solved
+  // components, with 20% padding. Falls back to a no-op when nothing is
+  // selected (plain F = fit-all still works).
+  const zoomToSelection = useCallback(() => {
+    if (selectedIds.size === 0) return;
+    const solved = applyMirrors(solveLayout(scene.components, scene.snaps, paramValues), scene.mirrors);
+    const sel = solved.filter(c => selectedIds.has(c.id));
+    if (sel.length === 0) return;
+    const xs = sel.flatMap(c => [c.cx - evalExpr(c.w, paramValues) / 2, c.cx + evalExpr(c.w, paramValues) / 2]);
+    const ys = sel.flatMap(c => [c.cy - evalExpr(c.h, paramValues) / 2, c.cy + evalExpr(c.h, paramValues) / 2]);
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    if (!Number.isFinite(minX) || !Number.isFinite(minY)) return;
+    const pad = 1.2; // 20% padding
+    setViewport({
+      x: (minX + maxX) / 2,
+      y: (minY + maxY) / 2,
+      w: Math.max(maxX - minX, 1) * pad,
+      h: Math.max(maxY - minY, 1) * pad,
+    });
+  }, [scene, paramValues, selectedIds]);
+
+  // Arrow-key nudge (C4): translate the selection by (dx, dy) — the same
+  // numeric cx/cy update a drag-commit applies. Boolean clusters co-move
+  // (collectNudgeCluster mirrors the canvas cluster-drag expansion);
+  // snap-bound / cxExpr-bound components get re-solved back onto their
+  // constraint on the next solve, which matches drag semantics.
+  const nudgeSelected = useCallback((dx, dy) => {
+    if (selectedIds.size === 0) return;
+    updateScene(prev => {
+      const moveSet = collectNudgeCluster(prev.components, selectedIds);
+      if (moveSet.size === 0) return prev;
+      return {
+        ...prev,
+        components: prev.components.map(c => moveSet.has(c.id)
+          ? { ...c, cx: c.cx + dx, cy: c.cy + dy }
+          : c),
+      };
+    });
+  }, [selectedIds, updateScene]);
+
+  // Keyboard shortcuts (F = fit, ⇧F = zoom to selection, arrows = nudge,
+  // ⌘D = duplicate, ⌘A = select all, Esc = clear selection,
+  // Delete/Backspace = delete selected, Cmd+Z = undo, Cmd+Shift+Z = redo)
   useEffect(() => {
+    const ARROW_DIRS = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] };
     const handler = (e) => {
       const tag = e.target?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-      if (e.key === 'f' || e.key === 'F') {
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || e.target?.isContentEditable) return;
+      if ((e.key === 'f' || e.key === 'F') && !e.metaKey && !e.ctrlKey) {
         e.preventDefault();
-        fitToView();
+        if (e.shiftKey) zoomToSelection();
+        else fitToView();
+      } else if (ARROW_DIRS[e.key] && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        // Nudge selection by one grid step (Shift = 10x). World is y-up,
+        // so ArrowUp = +cy (Canvas flips to screen y-down at render).
+        if (selectedIds.size === 0) return;
+        e.preventDefault();
+        const step = gridSize * (e.shiftKey ? 10 : 1);
+        const [ux, uy] = ARROW_DIRS[e.key];
+        nudgeSelected(ux * step, uy * step);
+      } else if ((e.metaKey || e.ctrlKey) && (e.key === 'd' || e.key === 'D')) {
+        // preventDefault unconditionally — beats the browser bookmark dialog.
+        e.preventDefault();
+        if (selectedIds.size > 0) duplicateIdsRef.current?.(selectedIds);
+      } else if ((e.metaKey || e.ctrlKey) && (e.key === 'a' || e.key === 'A')) {
+        // Select all non-consumed components (consumed operands live
+        // inside their boolean cluster and aren't standalone objects).
+        e.preventDefault();
+        const all = scene.components.filter(c => !c.consumedBy).map(c => c.id);
+        if (all.length > 0) setSelection({ ids: new Set(all), primary: all[all.length - 1] });
+      } else if (e.key === 'Escape') {
+        // Clear selection — but only when no canvas tool is active (the
+        // ruler / add-shape / snap tools own Esc for cancel semantics;
+        // Canvas binds those handlers itself).
+        if (!addMode && !rulerMode && (!snapMode || snapMode === 'idle') && selectedIds.size > 0) {
+          setSelection({ ids: new Set(), primary: null });
+        }
       } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedIds.size > 0) {
         e.preventDefault();
         deleteCompRef.current?.(selectedIds);
@@ -1275,7 +1457,7 @@ export default function App() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [fitToView, selectedIds]);
+  }, [fitToView, zoomToSelection, nudgeSelected, selectedIds, gridSize, scene.components, setSelection, addMode, rulerMode, snapMode]);
 
   // Refs so handlers always see the latest functions
   const undoRef = useRef(null);
@@ -1286,6 +1468,8 @@ export default function App() {
 
   // ref so the keyboard handler always sees the latest deleteComp without re-binding
   const deleteCompRef = useRef(null);
+  // same pattern for duplicateIds (declared later in this function body) — ⌘D
+  const duplicateIdsRef = useRef(null);
 
   // Auto-parametrize a new shape: create <id>_w and <id>_h params
   const addComponent = (layerKind, conductorLayerId = null) => {
@@ -1923,9 +2107,6 @@ export default function App() {
     if (ids.size === 0) return;
     const comps = scene.components.filter(c => ids.has(c.id))
       .map(c => ({ ...c, cutouts: (c.cutouts || []).map(cu => ({ ...cu })) }));
-    const internalSnaps = scene.snaps
-      .filter(s => ids.has(s.from.compId) && ids.has(s.to.compId))
-      .map(s => ({ ...s }));
     const idMap = {};
     const existingIds = new Set(scene.components.map(c => c.id));
     for (const c of comps) {
@@ -1942,12 +2123,16 @@ export default function App() {
       cx: c.cx + offset,
       cy: c.cy - offset,
     }));
-    const newSnaps = internalSnaps.map(s => ({
-      ...s,
-      id: `snap_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-      from: { ...s.from, compId: idMap[s.from.compId] },
-      to: { ...s.to, compId: idMap[s.to.compId] },
-    }));
+    // C6: clone INTERNAL snaps (both endpoints inside the selection, both
+    // remapped) AND EXTERNAL INCOMING snaps (parent outside → child inside;
+    // only the 'to' side remaps, so the copy hangs off the same external
+    // parent). External OUTGOING snaps are dropped — cloning them would
+    // create a second snap targeting the same external 'to' component
+    // (duplicate-to violation). See cloneSnapsForDuplicate (module scope).
+    const newSnaps = cloneSnapsForDuplicate(
+      scene.snaps, ids, idMap,
+      () => `snap_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    );
     updateScene(prev => ({
       ...prev,
       components: [...prev.components, ...newComps],
@@ -1956,6 +2141,7 @@ export default function App() {
     const newSel = new Set(newComps.map(c => c.id));
     setSelection({ ids: newSel, primary: newComps[newComps.length - 1].id });
   };
+  duplicateIdsRef.current = duplicateIds;
 
   // Right-click context menu state (right-clicking a component opens it).
   // null when closed; otherwise { x, y, items }.
@@ -5218,6 +5404,31 @@ export default function App() {
           <div className="flex-1 overflow-y-auto p-3">
             {activePanel === 'params' && (
               <div className="space-y-0.5">
+                {/* C7a: search box — substring filter on name + description,
+                    case-insensitive. Filtering happens BEFORE grouping, so
+                    groups naturally dissolve to a flat list when fewer than
+                    4 members match. add/cleanup keep acting on the FULL
+                    param list regardless of the filter. */}
+                <div className="relative mb-1">
+                  <Search size={11} className="absolute left-1.5 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
+                  <input
+                    value={paramSearch}
+                    onChange={(e) => setParamSearch(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Escape') { setParamSearch(''); e.target.blur(); } }}
+                    placeholder="filter params (name or description)…"
+                    className="w-full bg-slate-900 border border-slate-700 rounded pl-6 pr-5 py-1 text-[11px] font-mono text-white outline-none focus:border-cyan-400 placeholder:text-slate-600"
+                    spellCheck={false}
+                  />
+                  {paramSearch && (
+                    <button
+                      onClick={() => setParamSearch('')}
+                      className="absolute right-1 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"
+                      title="clear filter"
+                    >
+                      <XIcon size={11} />
+                    </button>
+                  )}
+                </div>
                 <div className="flex gap-1 mb-1">
                   <button onClick={addParam} className="flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded text-xs border border-dashed border-slate-600 hover:border-slate-400 text-slate-300">
                     <Plus size={11} /> add
@@ -5231,35 +5442,80 @@ export default function App() {
                     <Trash2 size={11} /> cleanup{unusedParams.length > 0 ? ` (${unusedParams.length})` : ''}
                   </button>
                 </div>
-                {Object.entries(scene.params).map(([name, p]) => (
-                  <ParamRow
-                    key={name}
-                    name={name}
-                    p={p}
-                    value={paramValues[name]}
-                    error={paramErrors[name]}
-                    isUnused={unusedParams.includes(name)}
-                    isInvolved={paramsInvolvedInSelection.has(name)}
-                    autoFocus={newParamFocus === name}
-                    onAutoFocusDone={() => setNewParamFocus(null)}
-                    onRename={(o, n) => renameParam(o, n)}
-                    onUpdateExpr={(v) => updateParam(name, { expr: v })}
-                    onCommitExpr={(v) => {
-                      // Default newly-created idents to the CURRENT
-                      // evaluated value of THIS parameter, so renaming
-                      // `cap_d = 60` to `cap_d = big_cap_d` produces
-                      // `big_cap_d = 60` (keeps the layout intact).
-                      const prevEval = paramValues[name];
-                      const prevDefault = Number.isFinite(prevEval) ? String(prevEval) : '0';
-                      commitExpr(v, prevDefault, scene.params[name]?.unit || 'µm', `Auto-created (used by ${name})`, name);
-                    }}
-                    suggestions={paramNames.filter(n => n !== name)}
-                    onUpdateUnit={(v) => updateParam(name, { unit: v })}
-                    onUpdateDesc={(v) => updateParam(name, { desc: v })}
-                    onUpdateSweep={(sw) => updateParam(name, { sweep: sw })}
-                    onDelete={() => deleteParam(name)}
-                  />
-                ))}
+                {(() => {
+                  // One renderer shared by grouped and flat rows so the
+                  // sweep chips, error icons, and involved-highlight render
+                  // identically inside groups.
+                  const renderParamRow = (name, p) => (
+                    <ParamRow
+                      key={name}
+                      name={name}
+                      p={p}
+                      value={paramValues[name]}
+                      error={paramErrors[name]}
+                      isUnused={unusedParams.includes(name)}
+                      isInvolved={paramsInvolvedInSelection.has(name)}
+                      autoFocus={newParamFocus === name}
+                      onAutoFocusDone={() => setNewParamFocus(null)}
+                      onRename={(o, n) => renameParam(o, n)}
+                      onUpdateExpr={(v) => updateParam(name, { expr: v })}
+                      onCommitExpr={(v) => {
+                        // Default newly-created idents to the CURRENT
+                        // evaluated value of THIS parameter, so renaming
+                        // `cap_d = 60` to `cap_d = big_cap_d` produces
+                        // `big_cap_d = 60` (keeps the layout intact).
+                        const prevEval = paramValues[name];
+                        const prevDefault = Number.isFinite(prevEval) ? String(prevEval) : '0';
+                        commitExpr(v, prevDefault, scene.params[name]?.unit || 'µm', `Auto-created (used by ${name})`, name);
+                      }}
+                      suggestions={paramNames.filter(n => n !== name)}
+                      onUpdateUnit={(v) => updateParam(name, { unit: v })}
+                      onUpdateDesc={(v) => updateParam(name, { desc: v })}
+                      onUpdateSweep={(sw) => updateParam(name, { sweep: sw })}
+                      onDelete={() => deleteParam(name)}
+                    />
+                  );
+                  const q = paramSearch.trim().toLowerCase();
+                  const entries = Object.entries(scene.params).filter(([name, p]) =>
+                    !q || name.toLowerCase().includes(q) || (p.desc || '').toLowerCase().includes(q));
+                  const byName = Object.fromEntries(entries);
+                  // C7b: prefix grouping — params sharing the prefix before
+                  // the LAST underscore token form a collapsible section
+                  // when the group has >= 4 members; everything else lists
+                  // flat after the groups.
+                  const { sections, flat } = groupParamPrefixes(entries.map(([n]) => n), 4);
+                  return (
+                    <>
+                      {sections.map(({ prefix, names }) => {
+                        const collapsed = collapsedParamGroups.has(prefix);
+                        return (
+                          <div key={`pgrp_${prefix}`} className="rounded border border-slate-700/70" style={{ background: 'rgba(15,23,42,0.45)' }}>
+                            <button
+                              onClick={() => toggleParamGroup(prefix)}
+                              className="w-full flex items-center gap-1 px-1.5 py-1 text-left hover:bg-slate-800/60 rounded"
+                              title={collapsed ? `Expand ${prefix}_* (${names.length} params)` : `Collapse ${prefix}_*`}
+                            >
+                              {collapsed ? <ChevronRight size={11} className="text-slate-500 shrink-0" /> : <ChevronDown size={11} className="text-slate-500 shrink-0" />}
+                              <span className="text-[11px] font-mono font-bold text-cyan-300 truncate">{prefix}_*</span>
+                              <span className="text-[9px] text-slate-500 shrink-0">({names.length})</span>
+                            </button>
+                            {!collapsed && (
+                              <div className="space-y-0.5 px-1 pb-1">
+                                {names.map(n => renderParamRow(n, byName[n]))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                      {flat.map(n => renderParamRow(n, byName[n]))}
+                      {entries.length === 0 && (
+                        <p className="text-xs text-slate-500 italic px-1 mt-1">
+                          {q ? `No params match "${paramSearch.trim()}".` : 'No parameters yet — use add above.'}
+                        </p>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
             )}
 
@@ -5695,7 +5951,21 @@ export default function App() {
                 {scene.snaps.map(s => (
                   <div key={s.id} className="p-2 rounded text-xs border border-slate-700" style={{ background: '#1e293b' }}>
                     <div className="flex items-center gap-1 mb-1">
-                      <span className="font-mono text-[10px] text-cyan-300 truncate flex-1 min-w-0">{s.from.compId}.{s.from.anchor} → {s.to.compId}.{s.to.anchor}</span>
+                      {/* C10: clicking either endpoint label flashes that
+                          anchor on the canvas (cyan halo, ~1s). */}
+                      <span className="font-mono text-[10px] text-cyan-300 truncate flex-1 min-w-0">
+                        <button
+                          onClick={() => flashAnchorOnCanvas(s.from.compId, s.from.anchor)}
+                          className="hover:text-cyan-100 hover:underline"
+                          title="Flash this anchor on the canvas"
+                        >{s.from.compId}.{s.from.anchor}</button>
+                        {' → '}
+                        <button
+                          onClick={() => flashAnchorOnCanvas(s.to.compId, s.to.anchor)}
+                          className="hover:text-cyan-100 hover:underline"
+                          title="Flash this anchor on the canvas"
+                        >{s.to.compId}.{s.to.anchor}</button>
+                      </span>
                       {/* Live-validation marker: this snap id appears in the
                           sceneIssues feed (orphan ref, duplicate target,
                           cycle, NaN offset, …). Hover for the message(s). */}
@@ -6128,9 +6398,10 @@ export default function App() {
             commitDragAdd={commitDragAdd}
             onComponentContextMenu={openComponentContextMenu}
             onSvgElement={(el) => { canvasSvgRef.current = el; }}
+            flashAnchor={flashAnchor}
           />
           <div className="absolute top-2 left-2 px-2 py-1 rounded text-[10px] font-mono pointer-events-none" style={{ background: 'rgba(15,23,42,0.85)', color: '#e2e8f0' }}>
-            wheel = zoom · drag = pan/move · ⌥/Alt+drag = marquee · ⌘+click = toggle · ⌘+drag = no grid · F = fit · ⌘Z/⇧Z = undo/redo · ⌘C/V = copy/paste · ⌘S = save
+            wheel = zoom · drag = pan/move · ⌥/Alt+drag = marquee · ⌘+click = toggle · ⌘+drag = no grid · F = fit · ⇧F = zoom sel · arrows = nudge (⇧ = 10×) · ⌘D = dup · ⌘A = all · Esc = deselect · ⌘Z/⇧Z = undo/redo · ⌘C/V = copy/paste · ⌘S = save
           </div>
           <div className="absolute bottom-2 left-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] font-mono max-w-[60%]" style={{ color: '#475569' }}>
             <div className="flex items-center gap-1.5"><div className="w-3 h-3 rounded-sm" style={{ background: '#3ec27a' }} />wg</div>
@@ -6888,6 +7159,63 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* C8: parametric root position (cxExpr / cyExpr). Applied
+                    by the solver on UNSNAPPED roots only — when an incoming
+                    snap exists the snap wins, so the fields render disabled
+                    with a note. Auto-created position params default to the
+                    component's CURRENT numeric cx/cy so the part doesn't
+                    jump when an identifier is first typed. Booleans derive
+                    cx/cy from operands and never take position exprs. */}
+                {selected.kind !== 'boolean' && (() => {
+                  const posField = (key, label, curNumeric) => (
+                    <div>
+                      <label className="text-[10px] uppercase tracking-wider text-slate-500">{label}</label>
+                      <DeferredTextInput
+                        autoGrow
+                        value={selected[key] ?? ''}
+                        suggestions={paramNames}
+                        disabled={selectedHasIncoming}
+                        onCommit={(v) => {
+                          const trimmed = (v || '').trim();
+                          // Empty string clears the binding (undefined is
+                          // dropped by JSON serialization; the solver skips
+                          // null/empty exprs).
+                          updateComp(selected.id, { [key]: trimmed === '' ? undefined : v });
+                          if (trimmed !== '') {
+                            const prevDefault = Number.isFinite(curNumeric) ? String(+curNumeric.toFixed(3)) : '0';
+                            commitExpr(v, prevDefault, 'µm', `Auto-created (${selected.id}.${key})`);
+                          }
+                        }}
+                        className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-white outline-none focus:border-cyan-400 whitespace-pre-wrap break-words leading-tight disabled:opacity-50"
+                        spellCheck={false}
+                        placeholder="(none)"
+                      />
+                      <p className="text-[9px] text-slate-500 mt-0.5 font-mono">= {(() => {
+                        const expr = selected[key];
+                        if (expr == null || String(expr).trim() === '') return '—';
+                        const v = evalExpr(expr, paramValues);
+                        return Number.isFinite(v) ? v.toFixed(3) : 'NaN';
+                      })()}</p>
+                    </div>
+                  );
+                  const hasPosExpr = ['cxExpr', 'cyExpr'].some(k => typeof selected[k] === 'string' && selected[k].trim() !== '');
+                  return (
+                    <div>
+                      <div className="grid grid-cols-2 gap-2">
+                        {posField('cxExpr', 'x position (expr)', selected.cx)}
+                        {posField('cyExpr', 'y position (expr)', selected.cy)}
+                      </div>
+                      {selectedHasIncoming ? (
+                        <p className="text-[9px] text-slate-500 mt-0.5 italic">position from snap</p>
+                      ) : hasPosExpr ? (
+                        <p className="text-[9px] text-amber-400 mt-0.5 leading-snug">
+                          expr-positioned — canvas drags snap back to the expression on the next solve
+                        </p>
+                      ) : null}
+                    </div>
+                  );
+                })()}
+
                 <TransformChainEditor
                   component={selected}
                   onUpdateComp={(patch) => updateComp(selected.id, patch)}
@@ -7014,6 +7342,7 @@ export default function App() {
                               onPromoteAxis={(axis) => promoteSnapAxis(s.id, axis)}
                               onDeleteSnap={() => deleteSnap(s.id)}
                               commitExpr={commitExpr}
+                              onFlashAnchor={flashAnchorOnCanvas}
                             />
                           ))}
                         </div>
@@ -7034,6 +7363,7 @@ export default function App() {
                               onPromoteAxis={(axis) => promoteSnapAxis(s.id, axis)}
                               onDeleteSnap={() => deleteSnap(s.id)}
                               commitExpr={commitExpr}
+                              onFlashAnchor={flashAnchorOnCanvas}
                             />
                           ))}
                         </div>

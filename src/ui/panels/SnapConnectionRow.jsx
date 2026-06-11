@@ -98,15 +98,27 @@ export function SnapAxisField({ axis, exprValue, params, paramValues, onUpdateSn
   );
 }
 
-export function SnapConnectionRow({ snap, direction, params, paramValues, onSelectOther, onUpdateSnap, onUpdateParam, onPromoteAxis, onDeleteSnap, commitExpr }) {
+export function SnapConnectionRow({ snap, direction, params, paramValues, onSelectOther, onUpdateSnap, onUpdateParam, onPromoteAxis, onDeleteSnap, commitExpr, onFlashAnchor }) {
   const otherId = direction === 'incoming' ? snap.from.compId : snap.to.compId;
   const arrow = direction === 'incoming' ? '←' : '→';
+  // C10: clicking an anchor label flashes that anchor on the canvas.
+  // Optional — when the parent doesn't wire onFlashAnchor the labels
+  // render as the old plain text.
+  const anchorLabel = (compId, anchor) => onFlashAnchor ? (
+    <button
+      onClick={() => onFlashAnchor(compId, anchor)}
+      className="hover:text-cyan-300 hover:underline"
+      title="Flash this anchor on the canvas"
+    >{anchor}</button>
+  ) : anchor;
   return (
     <div className="border border-slate-800 rounded mt-1 mb-1.5 p-1.5" style={{ background: 'rgba(15,23,42,0.5)' }}>
       <div className="flex items-center gap-1 text-[10px] mb-1">
         <span className="text-cyan-400">{arrow}</span>
         <button onClick={() => onSelectOther(otherId)} className="font-mono text-cyan-300 hover:text-cyan-100 truncate">{otherId}</button>
-        <span className="text-slate-500 truncate">.{snap.from.anchor}→{snap.to.anchor}</span>
+        <span className="text-slate-500 truncate">
+          .{anchorLabel(snap.from.compId, snap.from.anchor)}→{anchorLabel(snap.to.compId, snap.to.anchor)}
+        </span>
         <button onClick={onDeleteSnap} className="ml-auto text-slate-600 hover:text-red-400" title="break snap"><Link2Off size={10} /></button>
       </div>
       <div className="space-y-0.5">

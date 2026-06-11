@@ -8,8 +8,10 @@
 //
 // Supported transforms:
 //   { kind: 'displace',  enabled, dx, dy }                         — shifts cx/cy
-//   { kind: 'rotate',    enabled, angle, pivot }                   — adds rotation about pivot
-//                          pivot can be a fixed-anchor name ('C', 'N', ...) or 'origin'
+//   { kind: 'rotate',    enabled, angle, pivot, px?, py? }         — adds rotation about pivot
+//                          pivot can be a fixed-anchor name ('C', 'N', ...), 'origin',
+//                          'group', or 'custom' (explicit world point: px / py
+//                          expression strings, µm)
 //   { kind: 'repeat',    enabled, n, dx, dy, includeOriginal }     — emits N additional copies
 //                          along the (dx, dy) vector. If includeOriginal is false,
 //                          the base instance is dropped (the chain produces only the copies).
@@ -185,6 +187,27 @@ export function expandTransforms(components, paramValues) {
             cy: inst.cx * sa + inst.cy * ca,
             rotation: inst.rotation + angle,
           }));
+        } else if (pivot === 'custom') {
+          // C9: explicit (px, py) world-coordinate pivot — expression-
+          // valued, so the pivot can be parametric. Same math as the
+          // named-anchor branch but with the explicit point; applies
+          // per-instance with a shared world pivot (a repeated cluster
+          // rotates as a rigid body about the one point).
+          const px = evalExpr(t.px ?? '0', paramValues);
+          const py = evalExpr(t.py ?? '0', paramValues);
+          if (!Number.isFinite(px) || !Number.isFinite(py)) continue;
+          const rad = angle * Math.PI / 180;
+          const ca = Math.cos(rad), sa = Math.sin(rad);
+          stream = stream.map(inst => {
+            const dxp = inst.cx - px;
+            const dyp = inst.cy - py;
+            return {
+              ...inst,
+              cx: px + dxp * ca - dyp * sa,
+              cy: py + dxp * sa + dyp * ca,
+              rotation: inst.rotation + angle,
+            };
+          });
         } else {
           // Local-anchor pivot: just adds to rotation about the rect's own
           // anchor point. For non-center pivots we also need to shift cx/cy
