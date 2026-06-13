@@ -52,14 +52,22 @@ export async function requestGeometry({ apiKey, model, userText, images = [], sy
 
   let response;
   try {
-    response = await client.messages.create({
+    // Stream (not .create) and give a generous output budget: with adaptive
+    // thinking ON, reasoning tokens count against max_tokens, so a complex
+    // request can exhaust a small budget BEFORE the emit_geometry tool call
+    // is produced — yielding a response with only a (truncated) thinking
+    // block, no tool_use, no text. Streaming also avoids the SDK HTTP
+    // timeout at high max_tokens. 32k leaves ample room for thinking + a
+    // sizeable geometry fragment; Opus/Sonnet/Haiku all allow >= 64k output.
+    const stream = client.messages.stream({
       model,
-      max_tokens: 16000,
+      max_tokens: 32000,
       ...(supportsAdaptiveThinking(model) ? { thinking: { type: 'adaptive' } } : {}),
       system,
       tools: [GEOMETRY_TOOL],
       messages: [{ role: 'user', content }],
     });
+    response = await stream.finalMessage();
   } catch (err) {
     if (err instanceof Anthropic.AuthenticationError) {
       throw new Error('Invalid API key — check the key in the assistant settings (it should start with sk-ant-).', { cause: err });
@@ -88,9 +96,27 @@ export async function requestGeometry({ apiKey, model, userText, images = [], sy
   if (toolUse && toolUse.input && Array.isArray(toolUse.input.components)) {
     return { fragment: toolUse.input, message };
   }
+
+  // No usable fragment. Turn stop_reason into an actionable explanation
+  // instead of a dead-end "no geometry" message — the most common cause is
+  // the model running out of output budget mid-reasoning on a complex
+  // request, which is otherwise invisible to the user.
+  const stop = response.stop_reason;
+  if (stop === 'max_tokens') {
+    return {
+      fragment: null,
+      message: toolUse
+        ? 'Claude started emitting geometry but hit the output token limit before finishing it. Try a simpler / more specific request, or switch to Sonnet or Haiku (they reason less, leaving more budget for the geometry).'
+        : 'Claude ran out of output budget while reasoning about this request and never produced geometry. Try a simpler or more specific description, or switch to Sonnet or Haiku in the model dropdown.',
+    };
+  }
+  if (stop === 'refusal') {
+    return { fragment: null, message: message || 'Claude declined to generate this geometry. Rephrase the request.' };
+  }
   return {
     fragment: null,
-    message: message || 'Claude returned no geometry and no explanation — try rephrasing the request.',
+    message: message
+      || `Claude returned no geometry and no explanation (stop reason: ${stop || 'unknown'}) — try rephrasing the request.`,
   };
 }
 
