@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { execSync } from 'child_process';
 import { writeFileSync, mkdirSync } from 'fs';
 import racetrack from '../src/templates/racetrack.js';
+import racetrackDiameter from '../src/templates/racetrack-diameter.js';
 import ringResonator from '../src/templates/ring-resonator.js';
 import meanderElectrode from '../src/templates/meander-electrode.js';
 import cpwGsg from '../src/templates/cpw-gsg.js';
@@ -15,6 +16,7 @@ import { makeBlankScene } from '../src/scene/schema.js';
 import { resolveParams, evalExpr } from '../src/scene/params.js';
 import { solveLayout, resolveBooleanBboxes } from '../src/scene/solver.js';
 import { expandTransforms } from '../src/scene/transforms.js';
+import { buildRacetrackCenterline } from '../src/geometry/racetrack.js';
 
 const ctx = { viewport: { x: 0, y: 0 }, paramValues: {} };
 
@@ -53,6 +55,78 @@ describe('racetrack template', () => {
     let scene = makeBlankScene();
     scene = racetrack.insert(scene, ctx);
     scene = racetrack.insert(scene, ctx);
+    const ids = scene.components.map((c) => c.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+});
+
+describe('racetrack-by-diameter template', () => {
+  it('is registered and drops a racetrack with a diameter param (no bare R param)', () => {
+    expect(BUILTIN_TEMPLATES.map((t) => t.id)).toContain('builtin_racetrack_diameter');
+    const prev = makeBlankScene();
+    const next = racetrackDiameter.insert(prev, ctx);
+    const added = next.components[next.components.length - 1];
+    expect(added.kind).toBe('racetrack');
+    expect(added.layer).toBe('waveguide');
+    const newParamNames = Object.keys(next.params).filter((k) => !prev.params[k]);
+    const baseId = added.id;
+    // Diameter is the knob; R is a DERIVED expression, not a standalone param.
+    expect(newParamNames).toEqual(expect.arrayContaining([
+      `${baseId}_D`, `${baseId}_L_straight`, `${baseId}_p`,
+    ]));
+    expect(newParamNames).not.toContain(`${baseId}_R`);
+    expect(added.R).toContain(`${baseId}_D`); // R derived from D
+  });
+
+  it('derives R = D/2 at the default (pure-arc) so the arm separation equals D', () => {
+    const prev = makeBlankScene();
+    const next = racetrackDiameter.insert(prev, ctx);
+    const c = next.components[next.components.length - 1];
+    const { values } = resolveParams(next.params);
+    const [inst] = expandTransforms([c], values);
+    // Default D=200, p=0 → R=100.
+    expect(inst.p).toBe(0);
+    expect(inst.R).toBeCloseTo(100, 9);
+    // The rendered centerline arm separation equals D at p=0 (D=2R is
+    // analytically exact; the ~nm residual is the bend's quadrature error).
+    const cl = buildRacetrackCenterline(inst.R, inst.L_straight, inst.p);
+    const ys = cl.map(([, y]) => y);
+    const sep = Math.max(...ys) - Math.min(...ys);
+    expect(Math.abs(sep - 200)).toBeLessThan(0.05);
+  });
+
+  it('keeps the rendered separation within ~1% of D for Euler bends (p=1)', () => {
+    const prev = makeBlankScene();
+    let next = racetrackDiameter.insert(prev, ctx);
+    const c = next.components[next.components.length - 1];
+    const baseId = c.id;
+    next = { ...next, params: { ...next.params, [`${baseId}_p`]: { expr: '1', unit: '', desc: '' } } };
+    const { values } = resolveParams(next.params);
+    const [inst] = expandTransforms([c], values);
+    const cl = buildRacetrackCenterline(inst.R, inst.L_straight, inst.p);
+    const ys = cl.map(([, y]) => y);
+    const sep = Math.max(...ys) - Math.min(...ys);
+    expect(Math.abs(sep - 200) / 200).toBeLessThan(0.02);
+  });
+
+  it('HFSS export keeps D / L_straight / p as set_var knobs and parses', () => {
+    const prev = makeBlankScene();
+    const next = racetrackDiameter.insert(prev, ctx);
+    const baseId = next.components[next.components.length - 1].id;
+    const { values } = resolveParams(next.params);
+    const code = generateHfssNative(next, values);
+    for (const p of [`${baseId}_D`, `${baseId}_L_straight`, `${baseId}_p`]) {
+      expect(code).toContain(`set_var("${p}"`);
+    }
+    mkdirSync('tests/out', { recursive: true });
+    writeFileSync('tests/out/_racetrack_diameter.py', code);
+    expect(() => execSync('python3 -c "import ast; ast.parse(open(\'tests/out/_racetrack_diameter.py\').read())"')).not.toThrow();
+  });
+
+  it('avoids id collisions on repeated insert', () => {
+    let scene = makeBlankScene();
+    scene = racetrackDiameter.insert(scene, ctx);
+    scene = racetrackDiameter.insert(scene, ctx);
     const ids = scene.components.map((c) => c.id);
     expect(new Set(ids).size).toBe(ids.length);
   });

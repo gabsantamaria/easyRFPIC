@@ -10,6 +10,7 @@
 // generates step 1 for you, but it still asks you to perform step 2
 // manually so unfamiliar code doesn't ship by accident.
 import racetrack from './racetrack.js';
+import racetrackDiameter from './racetrack-diameter.js';
 import ringResonator from './ring-resonator.js';
 import meanderElectrode from './meander-electrode.js';
 import meanderElectrodeHorizontal from './meander-electrode-horizontal.js';
@@ -19,6 +20,7 @@ import idcComb from './idc-comb.js';
 
 export const BUILTIN_TEMPLATES = [
   racetrack,
+  racetrackDiameter,
   ringResonator,
   meanderElectrode,
   meanderElectrodeHorizontal,
