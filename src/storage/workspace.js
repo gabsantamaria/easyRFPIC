@@ -54,11 +54,87 @@ export async function loadDesign(workspace, name) {
   } catch { return null; }
 }
 
+// Detect a storage-quota error across browsers. Chrome/Safari throw a
+// DOMException named "QuotaExceededError" (code 22); Firefox throws
+// "NS_ERROR_DOM_QUOTA_REACHED" (code 1014). Match on name/message/code so
+// the caller can give quota-specific guidance.
+function isQuotaError(e) {
+  if (!e) return false;
+  const name = e.name || '';
+  const msg = e.message || '';
+  return /quota/i.test(name) || /quota|exceeded the/i.test(msg) || e.code === 22 || e.code === 1014;
+}
+
+// Save a design's payload under its name. Returns a STRUCTURED result so
+// callers can report WHY a save failed instead of a bare boolean that
+// swallows the real error:
+//   success → { ok: true, bytes }
+//   failure → { ok: false, phase: 'serialize' | 'write', error, name,
+//               message, bytes?, breakdown?, isQuota }
+// `breakdown` (write failures) reports the serialized size of each payload
+// part — history / future / versions usually dominate a bloated design and
+// explain a quota failure. Pair with describeSaveFailure() for the message.
 export async function saveDesign(workspace, name, payload) {
+  let json;
   try {
-    await window.storage.set(designPrefix(workspace) + name, JSON.stringify(payload));
-    return true;
-  } catch { return false; }
+    json = JSON.stringify(payload);
+  } catch (e) {
+    return { ok: false, phase: 'serialize', error: e, name: e?.name || 'Error', message: e?.message || String(e) };
+  }
+  try {
+    await window.storage.set(designPrefix(workspace) + name, json);
+    return { ok: true, bytes: json.length };
+  } catch (e) {
+    const breakdown = {};
+    try {
+      if (payload && typeof payload === 'object') {
+        if (payload.scene !== undefined) breakdown.sceneBytes = JSON.stringify(payload.scene).length;
+        if (Array.isArray(payload.history)) { breakdown.historyBytes = JSON.stringify(payload.history).length; breakdown.historyCount = payload.history.length; }
+        if (Array.isArray(payload.future)) { breakdown.futureBytes = JSON.stringify(payload.future).length; breakdown.futureCount = payload.future.length; }
+        if (Array.isArray(payload.versions)) { breakdown.versionsBytes = JSON.stringify(payload.versions).length; breakdown.versionCount = payload.versions.length; }
+      }
+    } catch { /* size breakdown is best-effort */ }
+    return {
+      ok: false, phase: 'write', error: e,
+      name: e?.name || 'Error', message: e?.message || String(e),
+      bytes: json.length, breakdown, isQuota: isQuotaError(e),
+    };
+  }
+}
+
+// Build a human-readable, actionable message from a FAILED saveDesign
+// result (the object returned when ok === false). Returns '' for a
+// successful or missing result.
+export function describeSaveFailure(result) {
+  if (!result || result.ok) return '';
+  const mb = (n) => `${(n / (1024 * 1024)).toFixed(2)} MB`;
+  if (result.phase === 'serialize') {
+    return `Could not serialize the design before saving.\n${result.name}: ${result.message}\n\n`
+      + "This usually means the scene contains a value that can't be saved as JSON "
+      + '(a circular reference or a non-plain object). Undo the last change and try again.';
+  }
+  const lines = [`${result.name || 'Error'}: ${result.message}`];
+  if (typeof result.bytes === 'number') lines.push(`Payload size: ~${mb(result.bytes)}.`);
+  const b = result.breakdown || {};
+  if (typeof b.sceneBytes === 'number') {
+    const parts = [`scene ${mb(b.sceneBytes)}`];
+    if (typeof b.historyBytes === 'number') parts.push(`undo history ${mb(b.historyBytes)} (${b.historyCount} steps)`);
+    if (typeof b.futureBytes === 'number') parts.push(`redo ${mb(b.futureBytes)} (${b.futureCount} steps)`);
+    if (typeof b.versionsBytes === 'number') parts.push(`snapshots ${mb(b.versionsBytes)} (${b.versionCount})`);
+    lines.push(`Breakdown: ${parts.join(', ')}.`);
+  }
+  if (result.isQuota) {
+    lines.push('');
+    lines.push("Cause: the browser's local-storage quota is full. It is ~5 MB per site and is SHARED "
+      + 'across every design, snapshot, the library, and the archive in this browser — so one large '
+      + 'design (or many snapshots) can fill it.');
+    lines.push('');
+    lines.push('Fixes:');
+    lines.push('  • Link this workspace to a file on disk (the workspace button in the header) — that path has no size limit.');
+    lines.push('  • Delete snapshots you no longer need (each snapshot stores a full copy of the scene).');
+    lines.push('  • Delete or export old designs to free space.');
+  }
+  return lines.join('\n');
 }
 
 export async function deleteDesignStored(workspace, name) {

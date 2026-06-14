@@ -18,7 +18,7 @@ import { defaultStack, normalizeScene, makeDefaultScene, makeBlankScene, paramsF
 import {
   BASE_DESIGN_PREFIX, BASE_LIB_PREFIX, BASE_ARCHIVE_PREFIX, WORKSPACE_KEY,
   designPrefix, libPrefix, archivePrefix, activeDesignKey,
-  listSavedDesigns, loadDesign, saveDesign, deleteDesignStored,
+  listSavedDesigns, loadDesign, saveDesign, deleteDesignStored, describeSaveFailure,
   setActiveDesignName, getActiveDesignName,
   getStoredWorkspace, setStoredWorkspace, discoverWorkspaces,
 } from './storage/workspace.js';
@@ -756,15 +756,16 @@ export default function App() {
   // until the user takes a first snapshot.
   const handleSave = useCallback(async () => {
     setSaveStatus('saving');
-    const ok = await saveDesign(workspace, designName, { scene, history, future, updatedAt: Date.now(), versions, currentVersionId });
-    if (ok) {
+    const res = await saveDesign(workspace, designName, { scene, history, future, updatedAt: Date.now(), versions, currentVersionId });
+    if (res.ok) {
       await setActiveDesignName(workspace, designName);
       await refreshSavedList();
       setSaveStatus('saved');
       mirrorWorkspaceToFileIfLinked();
     } else {
       setSaveStatus('unsaved');
-      await alertDialog('Save failed.', 'Error');
+      console.error('Design save failed:', res);
+      await alertDialog(describeSaveFailure(res), 'Save failed');
     }
   }, [workspace, designName, scene, history, future, versions, currentVersionId, refreshSavedList, alertDialog, mirrorWorkspaceToFileIfLinked]);
 
@@ -789,8 +790,8 @@ export default function App() {
     // Taking a snapshot ties the working state to the newly-created
     // version — that's the version the user is now "on", and a
     // subsequent re-open should land back on it.
-    const ok = await saveDesign(workspace, designName, { scene, history, future, updatedAt: Date.now(), versions: nextVersions, currentVersionId: newVersion.id });
-    if (ok) {
+    const res = await saveDesign(workspace, designName, { scene, history, future, updatedAt: Date.now(), versions: nextVersions, currentVersionId: newVersion.id });
+    if (res.ok) {
       setVersions(nextVersions);
       setCurrentVersionId(newVersion.id);
       await setActiveDesignName(workspace, designName);
@@ -799,7 +800,8 @@ export default function App() {
       mirrorWorkspaceToFileIfLinked();
     } else {
       setSaveStatus('unsaved');
-      await alertDialog('Snapshot failed.', 'Error');
+      console.error('Snapshot save failed:', res);
+      await alertDialog(describeSaveFailure(res), 'Snapshot failed');
     }
   }, [workspace, designName, scene, history, future, versions, promptDialog, refreshSavedList, alertDialog, mirrorWorkspaceToFileIfLinked]);
 
@@ -815,8 +817,8 @@ export default function App() {
     // Save As starts a new design name; carry the existing versions
     // forward (and the current-version pointer) so the user doesn't
     // lose context they explicitly kept.
-    const ok = await saveDesign(workspace, trimmed, { scene, history, future, updatedAt: Date.now(), versions, currentVersionId });
-    if (ok) {
+    const res = await saveDesign(workspace, trimmed, { scene, history, future, updatedAt: Date.now(), versions, currentVersionId });
+    if (res.ok) {
       setDesignName(trimmed);
       await setActiveDesignName(workspace, trimmed);
       await refreshSavedList();
@@ -824,7 +826,8 @@ export default function App() {
       mirrorWorkspaceToFileIfLinked();
     } else {
       setSaveStatus('unsaved');
-      await alertDialog('Save As failed.', 'Error');
+      console.error('Save As failed:', res);
+      await alertDialog(describeSaveFailure(res), 'Save As failed');
     }
   }, [workspace, designName, scene, history, future, versions, currentVersionId, savedList, refreshSavedList, promptDialog, confirmDialog, alertDialog, mirrorWorkspaceToFileIfLinked]);
 
@@ -871,9 +874,10 @@ export default function App() {
           nameToSave = proposed.trim();
         }
         const payload = { scene, history, future, savedAt: Date.now(), versions, currentVersionId };
-        const ok = await saveDesign(workspace, nameToSave, payload);
-        if (!ok) {
-          await alertDialog('Failed to save current design. Aborting.', 'Save error');
+        const res = await saveDesign(workspace, nameToSave, payload);
+        if (!res.ok) {
+          console.error('Save-before-new failed:', res);
+          await alertDialog('Failed to save current design. Aborting.\n\n' + describeSaveFailure(res), 'Save error');
           return;
         }
       } else if (ans !== 'no' && ans !== 'n') {
@@ -986,7 +990,10 @@ export default function App() {
     const nextCurrent = d.currentVersionId === versionId
       ? resolveCurrentVersionId(null, nextVersions)
       : d.currentVersionId;
-    await saveDesign(workspace, name, { ...d, versions: nextVersions, currentVersionId: nextCurrent });
+    {
+      const r = await saveDesign(workspace, name, { ...d, versions: nextVersions, currentVersionId: nextCurrent });
+      if (!r.ok) console.error('Delete-version save failed:', describeSaveFailure(r), r);
+    }
     if (name === designName) {
       setVersions(nextVersions);
       if (d.currentVersionId === versionId) setCurrentVersionId(nextCurrent);
@@ -1018,7 +1025,10 @@ export default function App() {
     const nextVersions = (d.versions || []).map(v =>
       v.id === versionId ? { ...v, description: trimmed } : v
     );
-    await saveDesign(workspace, name, { ...d, versions: nextVersions });
+    {
+      const r = await saveDesign(workspace, name, { ...d, versions: nextVersions });
+      if (!r.ok) console.error('Edit-description save failed:', describeSaveFailure(r), r);
+    }
     if (name === designName) setVersions(nextVersions);
     setVersionsByDesign(prev => {
       const next = { ...prev };
@@ -1077,7 +1087,15 @@ export default function App() {
     if (savedList.includes(trimmed)) { await alertDialog('A design with that name already exists.', 'Rename failed'); return; }
     const d = await loadDesign(workspace, oldName);
     if (!d) return;
-    await saveDesign(workspace, trimmed, d);
+    // Write the new name FIRST, and only delete the old one if that write
+    // succeeded — otherwise a failed save (e.g. quota) would delete the
+    // original and lose the design.
+    const res = await saveDesign(workspace, trimmed, d);
+    if (!res.ok) {
+      console.error('Rename save failed:', res);
+      await alertDialog('Could not rename — saving under the new name failed; the original is untouched.\n\n' + describeSaveFailure(res), 'Rename failed');
+      return;
+    }
     await deleteDesignStored(workspace, oldName);
     if (designName === oldName) {
       setDesignName(trimmed);
@@ -1333,8 +1351,8 @@ export default function App() {
       // Preserve versions[] and currentVersionId through autosave
       // too — otherwise the first autosave after a snapshot would
       // silently drop history / the current-version pointer.
-      const ok = await saveDesign(workspace, designName, { scene, history, future, updatedAt: Date.now(), versions, currentVersionId });
-      if (ok) {
+      const res = await saveDesign(workspace, designName, { scene, history, future, updatedAt: Date.now(), versions, currentVersionId });
+      if (res.ok) {
         setSaveStatus('saved');
         setLastAutoSavedAt(Date.now());
         // Mirror the workspace bundle to the linked file (if any) — autosave
@@ -1342,6 +1360,10 @@ export default function App() {
         mirrorWorkspaceToFileIfLinked();
       } else {
         setSaveStatus('unsaved');
+        // Autosave runs without a modal (it would spam every 2s); log the
+        // full diagnosis so a recurring failure is visible in the console.
+        // The red status dot signals it; a manual Cmd+S surfaces the modal.
+        console.error('Autosave failed:', describeSaveFailure(res), res);
       }
     }, 2000);
     return () => {
