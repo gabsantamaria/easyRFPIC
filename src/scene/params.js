@@ -33,6 +33,50 @@ export function tokenizeIdents(expr) {
   return matches;
 }
 
+// Order parameter NAMES so each appears AFTER every other parameter its
+// expression references (dependencies first). resolveParams tolerates any
+// stored order via fixpoint iteration, but exporters that DEFINE variables
+// sequentially (HFSS `set_var`, pyAEDT `hfss[...] = ...`) evaluate each
+// expression at creation time — a forward reference (defining `a = b + 1`
+// before `b`) fails with "b is not a defined variable". Those exporters
+// must emit in this order.
+//
+// Kahn's algorithm: zero-indegree params first, ties broken by declaration
+// order for stable output. A dependency CYCLE can't be ordered; the cyclic
+// members are appended in declaration order (HFSS still rejects a true
+// cycle, which the in-app solver also flags — but that's a genuine user
+// error, not an ordering bug). Same logic gdsfactory uses for its derived
+// params; centralized here so all three exporters agree.
+export function topoSortParams(params) {
+  const names = Object.keys(params || {});
+  const nameSet = new Set(names);
+  const deps = {};
+  for (const name of names) {
+    const exprStr = String(params[name]?.expr ?? params[name]?.value ?? '0');
+    const d = new Set();
+    for (const id of tokenizeIdents(exprStr)) {
+      if (id === name || RESERVED_IDENTS.has(id)) continue;
+      if (nameSet.has(id)) d.add(id);
+    }
+    deps[name] = Array.from(d);
+  }
+  const order = [];
+  const remaining = new Set(names);
+  const inDeg = {};
+  for (const n of names) inDeg[n] = deps[n].filter((x) => remaining.has(x)).length;
+  while (remaining.size > 0) {
+    const next = names.find((n) => remaining.has(n) && inDeg[n] === 0);
+    if (!next) {
+      for (const n of names) if (remaining.has(n)) { order.push(n); remaining.delete(n); }
+      break;
+    }
+    order.push(next);
+    remaining.delete(next);
+    for (const n of remaining) if (deps[n].includes(next)) inDeg[n] = Math.max(0, inDeg[n] - 1);
+  }
+  return order;
+}
+
 // Every parameter-referencing expression on a component, flattened to a
 // list of identifiers. Centralizes the "what fields can hold an
 // expression" question so the param-highlight walker, the unused-param

@@ -7,8 +7,8 @@ import { writeFileSync, mkdirSync } from 'fs';
 import { generateGDS } from '../src/export/gds.js';
 import { generatePyAEDT } from '../src/export/pyaedt.js';
 import { generateHfssNative } from '../src/export/hfss-native.js';
-import { makeDefaultScene } from '../src/scene/schema.js';
-import { resolveParams } from '../src/scene/params.js';
+import { makeDefaultScene, makeBlankScene } from '../src/scene/schema.js';
+import { resolveParams, topoSortParams } from '../src/scene/params.js';
 
 const scene = makeDefaultScene();
 const { values } = resolveParams(scene.params);
@@ -38,6 +38,96 @@ describe('generatePyAEDT', () => {
       `python3 -c "import ast; ast.parse(open('tests/out/vitest_pyaedt.py').read())"`,
       { stdio: 'pipe' }
     )).not.toThrow();
+  });
+});
+
+describe('topoSortParams — dependency ordering', () => {
+  it('orders a referenced param before the param that references it', () => {
+    const params = {
+      a: { expr: 'b + 1' },   // forward reference: a needs b
+      b: { expr: '5' },
+    };
+    const order = topoSortParams(params);
+    expect(order.indexOf('b')).toBeLessThan(order.indexOf('a'));
+  });
+
+  it('handles a chain and keeps independents in declaration order', () => {
+    const params = {
+      x: { expr: '1' },
+      sep: { expr: 'd - 2*w' }, // needs d and w
+      w: { expr: '1' },
+      d: { expr: '60' },
+      y: { expr: '2' },
+    };
+    const order = topoSortParams(params);
+    expect(order.indexOf('d')).toBeLessThan(order.indexOf('sep'));
+    expect(order.indexOf('w')).toBeLessThan(order.indexOf('sep'));
+    // every name present exactly once
+    expect(new Set(order).size).toBe(5);
+  });
+
+  it('does not loop on a cycle (emits remaining in declaration order)', () => {
+    const order = topoSortParams({ a: { expr: 'b' }, b: { expr: 'a' } });
+    expect(order.sort()).toEqual(['a', 'b']);
+  });
+
+  it('ignores math builtins and unknown identifiers as dependencies', () => {
+    const order = topoSortParams({ r: { expr: 'sin(theta) + 1' } });
+    expect(order).toEqual(['r']); // theta not a param, sin is reserved → no deps
+  });
+});
+
+describe('forward-referencing params emit in dependency order (KI_lumped regression)', () => {
+  // Repro of the user's bug: a param defined EARLY in the object that
+  // references a param defined LATER. HFSS set_var / pyAEDT assignment
+  // evaluate each expression at creation time, so the early one must be
+  // emitted AFTER the one it references — otherwise HFSS reports
+  // "<name> is not a defined variable name in this context".
+  function forwardRefScene() {
+    const s = makeBlankScene();
+    // Insertion order mirrors the bug: cap_sep_y (references loop_D) BEFORE loop_D.
+    s.params = {
+      ...s.params,
+      cap_sep_y: { expr: 'loop_D - 2*cap_w - cap_g', unit: 'um', desc: '' },
+      cap_w: { expr: '1', unit: 'um', desc: '' },
+      cap_g: { expr: 'w_slab + 0.6', unit: 'um', desc: '' },
+      loop_D: { expr: '59.6', unit: 'um', desc: '' },
+    };
+    s.components.push({
+      id: 'cap', kind: 'rect', layer: 'electrode', cx: 0, cy: 0,
+      w: 'cap_w', h: 'cap_sep_y', cutouts: [], transforms: [],
+    });
+    return s;
+  }
+  const indexOfDef = (code, re, name) => {
+    const lines = code.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const m = lines[i].match(re);
+      if (m && m[1] === name) return i;
+    }
+    return -1;
+  };
+
+  it('HFSS set_var defines loop_D before cap_sep_y', () => {
+    const s = forwardRefScene();
+    const { values: v } = resolveParams(s.params);
+    const code = generateHfssNative(s, v);
+    const re = /set_var\("([A-Za-z_][A-Za-z0-9_]*)"/;
+    const dep = indexOfDef(code, re, 'loop_D');
+    const user = indexOfDef(code, re, 'cap_sep_y');
+    expect(dep).toBeGreaterThan(-1);
+    expect(user).toBeGreaterThan(-1);
+    expect(dep).toBeLessThan(user);
+    // w_slab (referenced by cap_g) before cap_g too
+    expect(indexOfDef(code, re, 'w_slab')).toBeLessThan(indexOfDef(code, re, 'cap_g'));
+  });
+
+  it('pyAEDT assigns loop_D before cap_sep_y', () => {
+    const s = forwardRefScene();
+    const { values: v } = resolveParams(s.params);
+    const code = generatePyAEDT(s, v);
+    const re = /hfss\["([A-Za-z_][A-Za-z0-9_]*)"\]\s*=/;
+    expect(indexOfDef(code, re, 'loop_D')).toBeLessThan(indexOfDef(code, re, 'cap_sep_y'));
   });
 });
 

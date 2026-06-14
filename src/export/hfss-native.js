@@ -12,7 +12,7 @@
 // parameters, so a parameter sweep in HFSS actually moves the geometry.
 //
 // Extracted from PhotonicLayout.jsx as Stage 2.3 of the planned refactor.
-import { evalExpr } from '../scene/params.js';
+import { evalExpr, topoSortParams } from '../scene/params.js';
 import { parseAnchor, anchorLocal } from '../scene/anchors.js';
 import { solveLayout, applyMirrors } from '../scene/solver.js';
 import { expandTransforms } from '../scene/transforms.js';
@@ -1063,8 +1063,12 @@ def set_var(name, value):
         pass
 
 `;
-  for (const [name, p] of Object.entries(params)) {
-    code += `set_var("${ascii(name)}", "${formatVarValue(p)}")\n`;
+  // Emit in dependency order: HFSS evaluates each variable's expression
+  // when it's created, so a param that references another (e.g.
+  // ai2_cap_sep_y = racetrack_d_D - …) MUST be defined after the one it
+  // references, regardless of the params object's key order.
+  for (const name of topoSortParams(params)) {
+    code += `set_var("${ascii(name)}", "${formatVarValue(params[name])}")\n`;
   }
 
   // Substrate / chip dimension variables, so the user can retune the

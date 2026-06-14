@@ -8,7 +8,7 @@
 // feature history mirrors the SHAPES tree.
 //
 // Extracted from PhotonicLayout.jsx as Stage 2.2 of the planned refactor.
-import { evalExpr } from '../scene/params.js';
+import { evalExpr, topoSortParams } from '../scene/params.js';
 import { anchorLocal } from '../scene/anchors.js';
 import { solveLayout, applyMirrors } from '../scene/solver.js';
 import { shapeInstanceToRing } from '../geometry/rings.js';
@@ -120,7 +120,11 @@ hfss = Hfss(
 
 # ===== Parameters =====
 `;
-  for (const [name, p] of Object.entries(params)) {
+  // Dependency order: pyAEDT validates each variable expression on
+  // assignment, so a param referencing another must be assigned after it
+  // (same constraint as HFSS-native set_var). See topoSortParams.
+  for (const name of topoSortParams(params)) {
+    const p = params[name];
     const unit = unitFor(p.unit);
     const expr = ascii(String(p.expr ?? ''));
     const desc = ascii(String(p.desc ?? ''));
