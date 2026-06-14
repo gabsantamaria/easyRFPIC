@@ -3575,6 +3575,10 @@ except Exception as e:
   // boolean component so operands without their own transforms map to
   // a single-element list.
   const finalPartIdsByCompId = new Map();
+  // Base (pre-transform) part names per component — used to expand the
+  // cladding-subtract tool list from base names to every instance (base +
+  // transform clones), so the cladding wraps around the repeat clones too.
+  const basePartIdsByCompId = new Map();
   // Rib-waveguide rects split into two parts (slab + rib) — EXCEPT
   // rounded-corner rects (D3), which emit as ONE covered polyline named
   // `id` (no rib profile). Keep both partIds computations on this rule.
@@ -3587,6 +3591,7 @@ except Exception as e:
       ? [`${id}_wg_slab`, `${id}_wg_rib`]
       : [id];
     finalPartIdsByCompId.set(c.id, partIds);
+    basePartIdsByCompId.set(c.id, partIds);
   }
   for (const c of solved) {
     if (c.kind === 'boolean') continue; // booleans handled below
@@ -3933,10 +3938,32 @@ except Exception as e:
       // zero-thickness conductor sheets — they have no volume to subtract
       // and HFSS would either no-op or carve a thin slit through the
       // cladding, neither of which is what we want for a 2-D PEC trace.
-      const toolNames = [
-        ...emittedWgNames,
-        ...emittedElecNames.filter(n => !zeroThicknessSheets.includes(n)),
-      ];
+      //
+      // CRITICAL: emittedWgNames / emittedElecNames hold only BASE part
+      // names. A component with a `repeat` (or mirror) transform also has
+      // CLONE parts (<base>_1, _2, …) that must be carved out too —
+      // otherwise the cladding only wraps the base instances and every
+      // clone stays buried inside solid cladding. Expand each base name to
+      // all of its component's surviving parts via finalPartIdsByCompId.
+      const allPartsForBase = new Map();
+      for (const c of solved) {
+        if (c.kind === 'boolean') continue;
+        const baseParts = basePartIdsByCompId.get(c.id) || [];
+        const allParts = finalPartIdsByCompId.get(c.id) || baseParts;
+        for (const b of baseParts) allPartsForBase.set(b, allParts);
+      }
+      const expandClones = (name) => allPartsForBase.get(name) || [name];
+      const toolSet = new Set();
+      for (const name of emittedWgNames) {
+        for (const p of expandClones(name)) toolSet.add(p);
+      }
+      for (const name of emittedElecNames) {
+        if (zeroThicknessSheets.includes(name)) continue;
+        for (const p of expandClones(name)) {
+          if (!zeroThicknessSheets.includes(p)) toolSet.add(p);
+        }
+      }
+      const toolNames = [...toolSet];
       if (toolNames.length > 0) {
         const toolList = toolNames.join(',');
         code += `oEditor.Subtract(

@@ -210,6 +210,39 @@ describe('CreatePolyline segment indices stay in range (racetrack HFSS-reject re
   });
 });
 
+describe('cladding subtract wraps repeat clones, not just base parts (KI_lumped wg2 regression)', () => {
+  // The cladding Subtract tool list was built from base part names only, so
+  // repeat-/mirror-cloned electrodes and waveguides stayed buried inside
+  // solid cladding (the right-half / extra rows looked "missing" in HFSS).
+  // The tool list must include each component's transform clones too.
+  it('includes <id>_1 electrode clones and <id>_wg_{slab,rib}_1 waveguide clones', () => {
+    const s = makeBlankScene();
+    s.components.push(
+      {
+        id: 'el', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: '20', h: '5', cutouts: [],
+        transforms: [{ kind: 'repeat', enabled: true, n: '1', dx: '50', dy: '0', includeOriginal: true }],
+      },
+      {
+        id: 'wgr', kind: 'rect', layer: 'waveguide', cx: 0, cy: 30, w: '100', h: 'w_wg', cutouts: [],
+        transforms: [{ kind: 'repeat', enabled: true, n: '1', dx: '50', dy: '0', includeOriginal: true }],
+      },
+    );
+    const { values: v } = resolveParams(s.params);
+    const code = generateHfssNative(s, v);
+    const m = code.match(/Blank Parts:=", "l_clad", "Tool Parts:=", "([^"]+)"/);
+    expect(m).toBeTruthy();
+    const tools = m[1].split(',');
+    // electrode: base + its repeat clone
+    expect(tools).toContain('el');
+    expect(tools).toContain('el_1');
+    // waveguide rib: base slab+rib AND their clones
+    expect(tools).toContain('wgr_wg_slab');
+    expect(tools).toContain('wgr_wg_rib');
+    expect(tools).toContain('wgr_wg_slab_1');
+    expect(tools).toContain('wgr_wg_rib_1');
+  });
+});
+
 describe('generateHfssNative', () => {
   const code = generateHfssNative(scene, values);
   it('is a non-trivial Python source using ScriptEnv', () => {
