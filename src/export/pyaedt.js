@@ -118,6 +118,13 @@ hfss = Hfss(
     version="2024.2",
 )
 
+# Everything below is in microns. Dimensioned variables carry an explicit
+# "um", but parameter expressions may contain bare numeric literals (e.g.
+# "w_slab+0.6", where 0.6 means 0.6 um). HFSS reads an additive bare literal
+# in the model unit (default mm) unless we set it to um first — otherwise
+# 0.6 becomes 0.6 mm and cascades into wildly wrong dimensions.
+hfss.modeler.model_units = "um"
+
 # ===== Parameters =====
 `;
   // Dependency order: pyAEDT validates each variable expression on

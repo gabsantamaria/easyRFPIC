@@ -41,6 +41,41 @@ describe('generatePyAEDT', () => {
   });
 });
 
+describe('model units forced to um (bare-literal expression regression)', () => {
+  // A param like ai2_cap_g = "w_slab+0.6" has a bare literal (0.6 = 0.6 um in
+  // app convention). HFSS/pyAEDT read additive bare literals in the model
+  // unit (default mm) — so the exporters must set the model unit to um up
+  // front, or 0.6 becomes 0.6 mm and dimensions blow up (negative/huge).
+  function bareLiteralScene() {
+    const s = makeBlankScene();
+    s.params = {
+      ...s.params,
+      gap: { expr: 'w_slab+0.6', unit: 'um', desc: '' }, // bare additive 0.6
+      sep_y: { expr: '60 - 2*w_wg - gap', unit: 'um', desc: '' },
+    };
+    s.components.push({
+      id: 'bar', kind: 'rect', layer: 'electrode', cx: 0, cy: 0,
+      w: '40', h: 'sep_y', cutouts: [], transforms: [],
+    });
+    return s;
+  }
+
+  it('HFSS-native sets model units to um BEFORE any variable/geometry', () => {
+    const code = generateHfssNative(bareLiteralScene(), resolveParams(bareLiteralScene().params).values);
+    expect(code).toMatch(/SetModelUnits\([\s\S]*?"Units:=",\s*"um"/);
+    expect(code.indexOf('SetModelUnits')).toBeGreaterThan(-1);
+    expect(code.indexOf('SetModelUnits')).toBeLessThan(code.indexOf('set_var("'));
+    // the bare-literal expr is still emitted verbatim (now interpreted as um)
+    expect(code).toContain('w_slab+0.6');
+  });
+
+  it('pyAEDT sets modeler.model_units to um before parameter assignment', () => {
+    const code = generatePyAEDT(bareLiteralScene(), resolveParams(bareLiteralScene().params).values);
+    expect(code).toContain('hfss.modeler.model_units = "um"');
+    expect(code.indexOf('model_units = "um"')).toBeLessThan(code.indexOf('hfss["'));
+  });
+});
+
 describe('topoSortParams — dependency ordering', () => {
   it('orders a referenced param before the param that references it', () => {
     const params = {

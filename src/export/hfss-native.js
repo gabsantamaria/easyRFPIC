@@ -1018,6 +1018,24 @@ oProject.InsertDesign("HFSS", "Layout", "DrivenModal", "")
 oDesign = oProject.SetActiveDesign("Layout")
 oEditor = oDesign.SetActiveEditor("3D Modeler")`}
 
+# Force the model length unit to micron. EVERYTHING this script emits is in
+# um: dimensioned variables carry an explicit "um" suffix, but parameter
+# expressions may also contain BARE numeric literals (e.g. ai2_cap_g =
+# "w_slab+0.6", where the 0.6 means 0.6 um). HFSS interprets an additive
+# bare literal in the project's DEFAULT unit — often mm — so without this
+# the 0.6 would become 0.6 mm = 600 um and cascade into wildly wrong
+# (and sometimes negative) dimensions. Pure multipliers like "2*ai2_cap_w"
+# stay unitless and are unaffected. Rescale:=False so append-mode geometry
+# already in um isn't physically resized.
+try:
+    oEditor.SetModelUnits(
+        ["NAME:Units Parameter", "Units:=", "um", "Rescale:=", False])
+except Exception as e:
+    try:
+        oDesktop.AddMessage("", "", 1, "SetModelUnits(um) failed: " + str(e))
+    except:
+        pass
+
 # ===== Parameters =====
 # Robust variable create-or-update.
 # We try multiple strategies because the working method varies across HFSS versions
