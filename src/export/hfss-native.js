@@ -25,6 +25,32 @@ import {
   tessellateArcFrom, catmullRomTessellate,
 } from '../geometry/polyline.js';
 
+// Clean a tessellated perimeter ring for HFSS CreatePolyline. HFSS rejects
+// polylines containing zero/near-zero-length Line segments ("invalid
+// parameters to CreatePolyline operation"). Tessellated loops — especially
+// the racetrack, whose centerline is sampled as an implicitly-closed curve
+// — come back with the LAST sample landing a fraction of a nm from the
+// first, and may carry other coincident samples at sharp junctions. We:
+//   1. collapse consecutive points closer than `eps`, and
+//   2. drop any trailing point(s) coincident (within `eps`) with the first
+//      (the implicit-closure near-duplicate),
+// leaving N DISTINCT vertices. The caller then emits N points + (N-1) Line
+// segments + IsPolylineClosed=True, so the implicit closing edge P(N-1)->P0
+// is a real, non-degenerate edge.
+//
+// eps = 1e-3 µm (1 nm): far below any meaningful RF/photonic feature size
+// (µm-scale) yet comfortably above the sub-nm numerical closure gap.
+export function dedupeRingForHfss(pts, eps = 1e-3) {
+  if (!Array.isArray(pts) || pts.length === 0) return pts;
+  const near = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]) < eps;
+  const out = [];
+  for (const p of pts) {
+    if (out.length === 0 || !near(p, out[out.length - 1])) out.push(p);
+  }
+  while (out.length > 2 && near(out[0], out[out.length - 1])) out.pop();
+  return out;
+}
+
 // ----------------------------------------------------------------------
 // PARAMETRIC POSITION EXPRESSIONS (for HFSS export)
 // ----------------------------------------------------------------------
@@ -2316,19 +2342,21 @@ except Exception as e:
       // PolylinePoint records. X/Y stay numeric (the shape's perimeter
       // is tessellated at export time — see the racetrack note); Z uses
       // the parametric layer-stack expression so vertical sweeps work.
-      // HFSS closed polyline: emit the perimeter's N distinct vertices PLUS
-      // a closing repeat of the first point (N+1 points), with one Line
-      // segment per edge (N segments; segment i spans points i and i+1, so
-      // the last connects vertex N-1 back to the repeated point N). Emitting
-      // N segments over only N points (no closing repeat) makes the last
-      // segment reference a nonexistent index N — HFSS then rejects the whole
-      // CreatePolyline ("invalid parameters to CreatePolyline operation").
-      // Matches the closing convention the rib / rounded-rect paths use.
-      const ringClosed = ring.length > 0 ? [...ring, ring[0]] : ring;
-      const ptRecords = ringClosed.map(([px, py]) =>
+      //
+      // Canonical HFSS closed polyline: N DISTINCT points + (N-1) Line
+      // segments; IsPolylineClosed=True makes HFSS add the final
+      // P(N-1)->P0 edge implicitly. We must NOT emit a closing-repeat
+      // point or an Nth segment — and crucially we must DROP near-
+      // coincident vertices first: a tessellated racetrack loop comes
+      // back implicitly closed (its last sample lands ~0.2 nm from the
+      // first), so without dedup the closing edge — or an appended
+      // duplicate — is a sub-nm zero-length segment that HFSS rejects
+      // with "invalid parameters to CreatePolyline operation".
+      const ringHfss = dedupeRingForHfss(ring);
+      const ptRecords = ringHfss.map(([px, py]) =>
         `["NAME:PLPoint", "X:=", "${px.toFixed(4)}um", "Y:=", "${py.toFixed(4)}um", "Z:=", "${zBottomExpr}"]`
       ).join(', ');
-      const segRecords = ring.map((_, i) =>
+      const segRecords = ringHfss.slice(1).map((_, i) =>
         `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", ${i}, "NoOfPoints:=", 2]`
       ).join(', ');
       // For ports (zSize=0) the closed polyline IS the final geometry —
@@ -2396,12 +2424,13 @@ except Exception as e:
           baseInst.cy + lx * sa2 + ly * ca2,
         ]);
         const innerId = `${id}_hole`;
-        // Closing-repeat of the first point (see the outer-perimeter note).
-        const innerClosed = innerPts.length > 0 ? [...innerPts, innerPts[0]] : innerPts;
-        const innerPtRecords = innerClosed.map(([px, py]) =>
+        // Same canonical closed form as the outer perimeter: dedupe the
+        // near-coincident closure vertex, then N points + (N-1) segments.
+        const innerHfss = dedupeRingForHfss(innerPts);
+        const innerPtRecords = innerHfss.map(([px, py]) =>
           `["NAME:PLPoint", "X:=", "${px.toFixed(4)}um", "Y:=", "${py.toFixed(4)}um", "Z:=", "${zBottomExpr}"]`
         ).join(', ');
-        const innerSegRecords = innerPts.map((_, i) =>
+        const innerSegRecords = innerHfss.slice(1).map((_, i) =>
           `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", ${i}, "NoOfPoints:=", 2]`
         ).join(', ');
         code += `# ${c.id}: subtract inner of racetrack to leave hollow band\n`;

@@ -132,11 +132,12 @@ describe('forward-referencing params emit in dependency order (KI_lumped regress
 });
 
 describe('CreatePolyline segment indices stay in range (racetrack HFSS-reject regression)', () => {
-  // HFSS rejects a CreatePolyline whose PLSegment references a point index
-  // that doesn't exist. A closed N-vertex polyline must therefore emit a
-  // closing-repeat point (N+1 points) for its N Line segments — the
-  // tessellated racetrack path used to emit N points + N segments, so the
-  // last segment referenced point N ("invalid parameters to CreatePolyline").
+  // HFSS rejects a CreatePolyline two ways: (1) a PLSegment that references a
+  // nonexistent point index, and (2) any zero/near-zero-length Line segment.
+  // The tessellated racetrack hit BOTH — its centerline is sampled as an
+  // implicitly-closed loop (last sample ~0.2 nm from the first), so a naive
+  // close produced a sub-nm segment. The export now dedupes near-coincident
+  // vertices and emits N distinct points + (N-1) segments + IsPolylineClosed.
   function maxSegRefViolations(code) {
     const calls = code.split('oEditor.CreatePolyline(').slice(1);
     const bad = [];
@@ -150,6 +151,23 @@ describe('CreatePolyline segment indices stay in range (racetrack HFSS-reject re
       if (maxRef >= numPts) bad.push({ call: i, numPts, maxRef });
     });
     return bad;
+  }
+
+  // Smallest edge length (consecutive points, plus the implicit closing edge
+  // for closed polylines) across every CreatePolyline. Must stay well above
+  // zero or HFSS rejects with "invalid parameters to CreatePolyline".
+  function minSegmentLength(code) {
+    const calls = code.split('oEditor.CreatePolyline(').slice(1);
+    let dmin = Infinity;
+    for (const call of calls) {
+      const block = call.slice(0, call.indexOf('["NAME:Attributes"'));
+      const closed = /"IsPolylineClosed:=",\s*True/.test(block);
+      const pts = [...block.matchAll(/"X:=",\s*"([-\d.]+)um",\s*"Y:=",\s*"([-\d.]+)um"/g)].map((m) => [Number(m[1]), Number(m[2])]);
+      if (pts.length < 2) continue;
+      for (let k = 1; k < pts.length; k++) dmin = Math.min(dmin, Math.hypot(pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1]));
+      if (closed) dmin = Math.min(dmin, Math.hypot(pts[pts.length - 1][0] - pts[0][0], pts[pts.length - 1][1] - pts[0][1]));
+    }
+    return dmin;
   }
 
   function racetrackScene() {
@@ -169,13 +187,15 @@ describe('CreatePolyline segment indices stay in range (racetrack HFSS-reject re
     return s;
   }
 
-  it('racetrack outer + inner polylines reference only existing points', () => {
+  it('racetrack outer + inner polylines reference only existing points, no near-zero segments', () => {
     const s = racetrackScene();
     const { values: v } = resolveParams(s.params);
     const code = generateHfssNative(s, v);
     expect(maxSegRefViolations(code)).toEqual([]);
-    // Closed polyline invariant: segments == points - 1 (the extra point is
-    // the closing repeat of the first vertex).
+    // The actual HFSS-reject cause: a sub-nm closing edge. Every edge
+    // (including the implicit close) must be a real, non-degenerate length.
+    expect(minSegmentLength(code)).toBeGreaterThan(1e-3);
+    // Canonical closed form: N distinct points, N-1 Line segments.
     const rtBlock = code.slice(code.indexOf('racetrack as polygonal sheet'));
     const call = rtBlock.slice(rtBlock.indexOf('oEditor.CreatePolyline('));
     const params = call.slice(0, call.indexOf('["NAME:Attributes"'));
