@@ -15,6 +15,7 @@ import { generateHfssNative } from './export/hfss-native.js';
 import { generateGdsfactory } from './export/gdsfactory.js';
 import { generateSvgFromElement, generatePdfFromElement } from './export/figure.js';
 import { defaultStack, normalizeScene, makeDefaultScene, makeBlankScene, paramsForStack, migrateStackCoplanarGroups } from './scene/schema.js';
+import { buildDesignExport, parseDesignImport, designExportFilename } from './scene/design-file.js';
 import {
   BASE_DESIGN_PREFIX, BASE_LIB_PREFIX, BASE_ARCHIVE_PREFIX, WORKSPACE_KEY,
   designPrefix, libPrefix, archivePrefix, activeDesignKey,
@@ -898,6 +899,70 @@ export default function App() {
     await setActiveDesignName(workspace, name.trim());
     setSaveStatus('unsaved');
   }, [workspace, saveStatus, designName, scene, history, future, versions, currentVersionId, setSelection, alertDialog, confirmDialog, promptDialog]);
+
+  // ----- Single-design export / import (geometry only) -----
+  // Export JUST the current canvas (the scene: params, components, snaps,
+  // mirrors, groups, stack, cells, sim setup) to a portable JSON file —
+  // deliberately WITHOUT undo history, redo, or the snapshot/version
+  // chain. This is the "hand someone the design" / "move it between
+  // browsers or machines" file, distinct from the full workspace bundle
+  // (which carries every design + library + versions).
+  const handleDownloadDesign = () => {
+    const now = new Date();
+    const payload = buildDesignExport(scene, designName, now.toISOString());
+    const filename = `${designExportFilename(designName, now.toISOString().slice(0, 10))}.json`;
+    const ok = downloadFile(filename, JSON.stringify(payload, null, 2), 'application/json;charset=utf-8');
+    if (!ok) alertDialog('Could not download the design file (the browser may be blocking downloads here).', 'Export error');
+  };
+
+  // Import a design from a JSON file, REPLACING the canvas. Only the scene
+  // is read — any history / versions in the file are ignored (the imported
+  // design starts a fresh working state with empty undo + no snapshots).
+  // Accepts: our export format ({ format, scene }), a full design payload
+  // (takes its .scene), or a bare scene object ({ components, ... }).
+  const handleImportDesignFile = async () => {
+    if (saveStatus === 'unsaved') {
+      const ok = await confirmDialog('Discard unsaved changes and import a design from a file?', 'Import design');
+      if (!ok) return;
+    }
+    // Hidden <input type=file> — works in every browser incl. Safari and
+    // sandboxed iframes where the File System Access picker is blocked.
+    const file = await new Promise((resolve) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'application/json,.json';
+      input.onchange = (e) => resolve(e.target.files?.[0] || null);
+      input.click();
+    });
+    if (!file) return;
+    let parsed;
+    try {
+      parsed = JSON.parse(await file.text());
+    } catch (e) {
+      await alertDialog('Could not read that file as JSON.\n\n' + e.message, 'Import failed');
+      return;
+    }
+    // Extract just the scene (ignores any history / versions in the file).
+    const result = parseDesignImport(parsed, file.name.replace(/\.json$/i, ''));
+    if (result.error) {
+      const msg = result.error === 'no-scene' || result.error === 'not-object'
+        ? 'That file does not contain a design (no scene with components was found).'
+        : 'The design in that file could not be loaded.\n\n' + (result.message || '');
+      await alertDialog(msg, 'Import failed');
+      return;
+    }
+    setScene(result.scene);
+    setDesignName(result.name);
+    setHistory([]);
+    setFuture([]);
+    setVersions([]);
+    setCurrentVersionId(null);
+    setSelection({ ids: new Set(), primary: null });
+    // Imported state isn't in workspace storage yet — leave it unsaved so
+    // the user explicitly Saves to keep it (and doesn't clobber a stored
+    // design of the same name via autosave).
+    setSaveStatus('unsaved');
+  };
 
   const handleLoad = useCallback(async (name) => {
     if (saveStatus === 'unsaved') {
@@ -5211,6 +5276,12 @@ export default function App() {
             </button>
             <button onClick={handleNewBlank} className="flex items-center gap-1 px-2 py-1 rounded text-xs border border-slate-600 hover:bg-slate-800" title="New blank design — starts from a completely empty scene (no components, no parameters; layer stack preserved). Prompts to save the current design first if unsaved.">
               <FilePlus size={11} /> blank
+            </button>
+            <button onClick={handleDownloadDesign} className="flex items-center gap-1 px-2 py-1 rounded text-xs border border-slate-600 hover:bg-slate-800" title="Export this design to a JSON file — the current canvas only (params, components, snaps, stack, cells). Snapshots and version history are NOT included.">
+              <Download size={11} /> export
+            </button>
+            <button onClick={handleImportDesignFile} className="flex items-center gap-1 px-2 py-1 rounded text-xs border border-slate-600 hover:bg-slate-800" title="Import a design from a JSON file — replaces the canvas. Only the geometry is loaded; any snapshots/version history in the file are ignored. Prompts before discarding unsaved changes.">
+              <Upload size={11} /> import
             </button>
           </div>
         </div>
