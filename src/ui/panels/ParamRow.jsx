@@ -14,9 +14,15 @@ import { RESERVED_IDENTS } from '../../scene/params.js';
 import { HoverTooltip } from '../HoverTooltip.jsx';
 import { ParamTuner } from './ParamTuner.jsx';
 import { DeferredTextInput } from '../DeferredTextInput.jsx';
+import { middleTruncate, charsForWidthPx } from '../text-truncate.js';
 
-export function ParamRow({ name, p, onRename, onUpdateExpr, onCommitExpr, onUpdateUnit, onUpdateDesc, onUpdateSweep, onDelete, value, error, isUnused, isInvolved, autoFocus, onAutoFocusDone, suggestions }) {
+// Fallback name-column width (px) when the panel doesn't supply one
+// (matches the old `w-20` = 5rem = 80px).
+const DEFAULT_NAME_WIDTH = 80;
+
+export function ParamRow({ name, p, onRename, onUpdateExpr, onCommitExpr, onUpdateUnit, onUpdateDesc, onUpdateSweep, onDelete, value, error, isUnused, isInvolved, autoFocus, onAutoFocusDone, suggestions, nameWidth, onStartNameResize }) {
   const [editingName, setEditingName] = useState(name);
+  const [nameFocused, setNameFocused] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const inputRef = useRef(null);
   useEffect(() => { setEditingName(name); }, [name]);
@@ -52,6 +58,14 @@ export function ParamRow({ name, p, onRename, onUpdateExpr, onCommitExpr, onUpda
   // case where the input is too narrow for long identifiers like
   // "cap_sep_outer_signal_finger") plus any description.
   const nameTooltip = p.desc ? `${name}\n${p.desc}` : name;
+
+  // Name column width (shared/draggable, lifted to the PARAMS panel) and
+  // the middle-truncated display for it. While the field is focused we show
+  // the full editable name; when blurred we show first…last so both the
+  // family prefix and the distinguishing tail stay visible in a narrow
+  // column. The hover tooltip always carries the full name.
+  const colWidth = Number.isFinite(nameWidth) ? nameWidth : DEFAULT_NAME_WIDTH;
+  const nameDisplay = nameFocused ? editingName : middleTruncate(name, charsForWidthPx(colWidth));
 
   // HFSS Optimetrics sweep metadata for this param (optional object:
   // { enabled, start, stop, step } — values in the param's own unit).
@@ -98,14 +112,27 @@ export function ParamRow({ name, p, onRename, onUpdateExpr, onCommitExpr, onUpda
         <HoverTooltip text={nameTooltip}>
           <input
             ref={inputRef}
-            value={editingName}
+            value={nameDisplay}
+            onFocus={() => { setNameFocused(true); setEditingName(name); }}
             onChange={(e) => setEditingName(e.target.value)}
-            onBlur={() => { if (editingName !== name) onRename(name, editingName); }}
-            onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
-            className="bg-transparent text-[11px] font-mono font-bold text-cyan-300 w-20 min-w-0 outline-none focus:text-cyan-100"
+            onBlur={() => { setNameFocused(false); if (editingName !== name) onRename(name, editingName); }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') e.target.blur();
+              else if (e.key === 'Escape') { setEditingName(name); e.target.blur(); }
+            }}
+            style={{ width: colWidth }}
+            className="bg-transparent text-[11px] font-mono font-bold text-cyan-300 shrink-0 outline-none focus:text-cyan-100"
             spellCheck={false}
           />
         </HoverTooltip>
+        {/* Draggable splitter: resizes the shared name column. All rows
+            read the same width, so dragging any handle resizes the whole
+            column and the aligned handles read as one vertical divider. */}
+        <div
+          onPointerDown={onStartNameResize}
+          className="shrink-0 self-stretch w-1 cursor-col-resize bg-slate-700/60 hover:bg-cyan-500/70"
+          title="Drag to resize the name column"
+        />
         {sweepEnabled && (
           <span
             className="shrink-0 px-1 rounded text-[8px] font-mono font-bold bg-cyan-900/60 text-cyan-300 border border-cyan-700/60 cursor-help"

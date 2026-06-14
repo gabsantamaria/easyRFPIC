@@ -237,6 +237,41 @@ export default function App() {
   const [activePanel, setActivePanel] = useState('params');
   // C7: PARAMS panel search + collapsible prefix groups (UI-only state).
   const [paramSearch, setParamSearch] = useState('');
+  // Resizable PARAMS name column. Shared by every ParamRow and persisted
+  // in localStorage (a tiny UI pref — kept out of design/workspace data).
+  // Clamped to [48, 400] px; defaults to the old fixed width (80px).
+  const PARAM_NAME_WIDTH_KEY = 'photonic_layout_param_name_width';
+  const [paramNameWidth, setParamNameWidth] = useState(() => {
+    try {
+      const v = Number(window.localStorage?.getItem(PARAM_NAME_WIDTH_KEY));
+      if (Number.isFinite(v) && v >= 48 && v <= 400) return v;
+    } catch { /* ignore */ }
+    return 80;
+  });
+  useEffect(() => {
+    try { window.localStorage?.setItem(PARAM_NAME_WIDTH_KEY, String(paramNameWidth)); } catch { /* ignore */ }
+  }, [paramNameWidth]);
+  // Pointer-drag the name-column splitter. Any row's handle drives the
+  // shared width, so the whole column resizes together.
+  const startParamNameResize = useCallback((e) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = paramNameWidth;
+    const onMove = (ev) => {
+      const w = Math.min(400, Math.max(48, startW + (ev.clientX - startX)));
+      setParamNameWidth(w);
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }, [paramNameWidth]);
   const [collapsedParamGroups, setCollapsedParamGroups] = useState(() => new Set());
   const toggleParamGroup = (prefix) => {
     setCollapsedParamGroups(prev => {
@@ -5756,6 +5791,8 @@ export default function App() {
                       onUpdateDesc={(v) => updateParam(name, { desc: v })}
                       onUpdateSweep={(sw) => updateParam(name, { sweep: sw })}
                       onDelete={() => deleteParam(name)}
+                      nameWidth={paramNameWidth}
+                      onStartNameResize={startParamNameResize}
                     />
                   );
                   const q = paramSearch.trim().toLowerCase();
