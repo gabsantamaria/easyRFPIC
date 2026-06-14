@@ -131,6 +131,65 @@ describe('forward-referencing params emit in dependency order (KI_lumped regress
   });
 });
 
+describe('CreatePolyline segment indices stay in range (racetrack HFSS-reject regression)', () => {
+  // HFSS rejects a CreatePolyline whose PLSegment references a point index
+  // that doesn't exist. A closed N-vertex polyline must therefore emit a
+  // closing-repeat point (N+1 points) for its N Line segments — the
+  // tessellated racetrack path used to emit N points + N segments, so the
+  // last segment referenced point N ("invalid parameters to CreatePolyline").
+  function maxSegRefViolations(code) {
+    const calls = code.split('oEditor.CreatePolyline(').slice(1);
+    const bad = [];
+    calls.forEach((call, i) => {
+      const block = call.slice(0, call.indexOf('["NAME:Attributes"'));
+      const numPts = (block.match(/"NAME:PLPoint"/g) || []).length;
+      let maxRef = -1;
+      for (const m of block.matchAll(/"NAME:PLSegment"[^\]]*?"StartIndex:=",\s*(\d+),\s*"NoOfPoints:=",\s*(\d+)/g)) {
+        maxRef = Math.max(maxRef, Number(m[1]) + Number(m[2]) - 1);
+      }
+      if (maxRef >= numPts) bad.push({ call: i, numPts, maxRef });
+    });
+    return bad;
+  }
+
+  function racetrackScene() {
+    const s = makeBlankScene();
+    s.params = {
+      ...s.params,
+      rt_R: { expr: '21.65', unit: 'um', desc: '' },
+      rt_L: { expr: '216.9', unit: 'um', desc: '' },
+    };
+    s.components.push({
+      id: 'rt', kind: 'racetrack', layer: 'waveguide', cx: 0, cy: 0,
+      R: 'rt_R', L_straight: 'rt_L', p: '1', wgWidth: 'w_wg',
+      // Non-zero AABB so the exporter's zero-dimension guard doesn't skip it
+      // (the real template derives these; the shape itself uses R/L/p/wgWidth).
+      w: 'rt_L + 2*rt_R + w_wg', h: '2*rt_R + w_wg', cutouts: [], transforms: [],
+    });
+    return s;
+  }
+
+  it('racetrack outer + inner polylines reference only existing points', () => {
+    const s = racetrackScene();
+    const { values: v } = resolveParams(s.params);
+    const code = generateHfssNative(s, v);
+    expect(maxSegRefViolations(code)).toEqual([]);
+    // Closed polyline invariant: segments == points - 1 (the extra point is
+    // the closing repeat of the first vertex).
+    const rtBlock = code.slice(code.indexOf('racetrack as polygonal sheet'));
+    const call = rtBlock.slice(rtBlock.indexOf('oEditor.CreatePolyline('));
+    const params = call.slice(0, call.indexOf('["NAME:Attributes"'));
+    const pts = (params.match(/"NAME:PLPoint"/g) || []).length;
+    const segs = (params.match(/"NAME:PLSegment"/g) || []).length;
+    expect(pts).toBeGreaterThan(3);
+    expect(segs).toBe(pts - 1);
+  });
+
+  it('the default scene has no out-of-range polyline segments either', () => {
+    expect(maxSegRefViolations(generateHfssNative(scene, values))).toEqual([]);
+  });
+});
+
 describe('generateHfssNative', () => {
   const code = generateHfssNative(scene, values);
   it('is a non-trivial Python source using ScriptEnv', () => {

@@ -2316,7 +2316,16 @@ except Exception as e:
       // PolylinePoint records. X/Y stay numeric (the shape's perimeter
       // is tessellated at export time — see the racetrack note); Z uses
       // the parametric layer-stack expression so vertical sweeps work.
-      const ptRecords = ring.map(([px, py]) =>
+      // HFSS closed polyline: emit the perimeter's N distinct vertices PLUS
+      // a closing repeat of the first point (N+1 points), with one Line
+      // segment per edge (N segments; segment i spans points i and i+1, so
+      // the last connects vertex N-1 back to the repeated point N). Emitting
+      // N segments over only N points (no closing repeat) makes the last
+      // segment reference a nonexistent index N — HFSS then rejects the whole
+      // CreatePolyline ("invalid parameters to CreatePolyline operation").
+      // Matches the closing convention the rib / rounded-rect paths use.
+      const ringClosed = ring.length > 0 ? [...ring, ring[0]] : ring;
+      const ptRecords = ringClosed.map(([px, py]) =>
         `["NAME:PLPoint", "X:=", "${px.toFixed(4)}um", "Y:=", "${py.toFixed(4)}um", "Z:=", "${zBottomExpr}"]`
       ).join(', ');
       const segRecords = ring.map((_, i) =>
@@ -2387,7 +2396,9 @@ except Exception as e:
           baseInst.cy + lx * sa2 + ly * ca2,
         ]);
         const innerId = `${id}_hole`;
-        const innerPtRecords = innerPts.map(([px, py]) =>
+        // Closing-repeat of the first point (see the outer-perimeter note).
+        const innerClosed = innerPts.length > 0 ? [...innerPts, innerPts[0]] : innerPts;
+        const innerPtRecords = innerClosed.map(([px, py]) =>
           `["NAME:PLPoint", "X:=", "${px.toFixed(4)}um", "Y:=", "${py.toFixed(4)}um", "Z:=", "${zBottomExpr}"]`
         ).join(', ');
         const innerSegRecords = innerPts.map((_, i) =>
