@@ -245,6 +245,74 @@ describe('CreatePolyline segment indices stay in range (racetrack HFSS-reject re
   });
 });
 
+describe('no degenerate-close polylines (Parasolid cant_extract_geom regression)', () => {
+  // A CreatePolyline whose LAST point duplicates the FIRST while
+  // IsPolylineClosed=True makes HFSS add a redundant ZERO-length closing
+  // edge — Parasolid rejects it ("PK_CURVE_make_wire_body_2 ...
+  // cant_extract_geom" / "invalid parameters to CreatePolyline"). This is
+  // the bug that killed the straight-waveguide rib (wg2_wg_rib). Detect any
+  // closed polyline whose first PLPoint equals its last.
+  function degenerateCloses(code) {
+    const calls = code.split('oEditor.CreatePolyline(').slice(1);
+    const bad = [];
+    calls.forEach((call) => {
+      const block = call.slice(0, call.indexOf('["NAME:Attributes"'));
+      if (!block.includes('PLPoint')) return;
+      const closed = /"IsPolylineClosed:=",\s*True/.test(block);
+      const pts = [...block.matchAll(/"X:=",\s*"([^"]+)",\s*"Y:=",\s*"([^"]+)",\s*"Z:=",\s*"([^"]+)"/g)].map((m) => m.slice(1).join('|'));
+      if (closed && pts.length > 1 && pts[0] === pts[pts.length - 1]) {
+        bad.push((call.match(/Name:=",\s*"([^"]+)"/) || [])[1] || '?');
+      }
+    });
+    return bad;
+  }
+
+  function straightWgScene() {
+    const s = makeBlankScene();
+    s.components.push({
+      id: 'wg', kind: 'rect', layer: 'waveguide', cx: 0, cy: 0,
+      w: '300', h: 'w_wg', cutouts: [], transforms: [],
+    });
+    return s;
+  }
+
+  it('straight-waveguide rib emits a clean closed cross-section', () => {
+    const s = straightWgScene();
+    const code = generateHfssNative(s, resolveParams(s.params).values);
+    expect(degenerateCloses(code)).toEqual([]);
+    // The rib xsec is the canonical closed form: 4 distinct points, 3 segs.
+    const block = code.slice(code.indexOf('wg_rib_xsec'));
+    const call = block.slice(0, block.indexOf('["NAME:Attributes"'));
+    expect((call.match(/"NAME:PLPoint"/g) || []).length).toBe(4);
+    expect((call.match(/"NAME:PLSegment"/g) || []).length).toBe(3);
+  });
+
+  it('tapered polyline, rounded rect, and polyshape have no degenerate closes', () => {
+    // tapered polyline (per-segment quad sheets)
+    const taper = makeBlankScene();
+    taper.components.push({
+      id: 'tp', kind: 'polyline', layer: 'electrode', cx: 0, cy: 0, w: '0', h: '0', closed: false,
+      vertices: [{ kind: 'rel', dx: '0', dy: '0', width: '4' }, { kind: 'rel', dx: '60', dy: '0', width: '12' }],
+      cutouts: [], transforms: [],
+    });
+    expect(degenerateCloses(generateHfssNative(taper, resolveParams(taper.params).values))).toEqual([]);
+
+    // rounded rect (arc-closed contour)
+    const rr = makeBlankScene();
+    rr.components.push({ id: 'rr', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: '40', h: '30', cornerRadius: '5', cutouts: [], transforms: [] });
+    expect(degenerateCloses(generateHfssNative(rr, resolveParams(rr.params).values))).toEqual([]);
+
+    // polyshape (covered closed polygon)
+    const ps = makeBlankScene();
+    ps.components.push({
+      id: 'ps', kind: 'polyshape', layer: 'electrode', cx: 0, cy: 0, w: '0', h: '0', closed: true,
+      vertices: [{ kind: 'rel', dx: '0', dy: '0' }, { kind: 'rel', dx: '20', dy: '0' }, { kind: 'rel', dx: '0', dy: '15' }, { kind: 'rel', dx: '-20', dy: '0' }],
+      cutouts: [], transforms: [],
+    });
+    expect(degenerateCloses(generateHfssNative(ps, resolveParams(ps.params).values))).toEqual([]);
+  });
+});
+
 describe('cladding subtract wraps repeat clones, not just base parts (KI_lumped wg2 regression)', () => {
   // The cladding Subtract tool list was built from base part names only, so
   // repeat-/mirror-cloned electrodes and waveguides stayed buried inside

@@ -1812,10 +1812,14 @@ except Exception as e:
             // covered closed polyline fills either orientation.
             const name = sheetNames.length === 0 ? id : `${id}_tseg${sheetNames.length}`;
             sheetNames.push(name);
-            const pts = [...corners4, corners4[0]].map(p =>
+            // Canonical closed polyline: 4 DISTINCT corners + 3 Line segments;
+            // IsPolylineClosed=True below adds the final edge (P3->P0). A 5th
+            // closing-repeat point + IsPolylineClosed=True would make HFSS add
+            // a redundant ZERO-length edge that Parasolid rejects.
+            const pts = corners4.map(p =>
               `["NAME:PLPoint", "X:=", "${p.x}", "Y:=", "${p.y}", "Z:=", "${zBottomExpr}"]`
             ).join(',\n          ');
-            const segs = [0, 1, 2, 3].map(k =>
+            const segs = [0, 1, 2].map(k =>
               `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", ${k}, "NoOfPoints:=", 2]`
             ).join(',\n          ');
             code += `# ${label}\n`;
@@ -2078,15 +2082,15 @@ except Exception as e:
             prevPtIdx = idx;
             vi++;
           }
-          // Closing edge (polyshape always; polyline when c.closed):
-          // a straight Line back to the FIRST point of the drawn path
-          // (which is the base anchor when vertex 0 is an arc). Matches
-          // the canvas tessellation's straight ring closure.
-          if (polyClosed) {
-            const firstPt = ptRecords[0];
-            ptRecords.push(firstPt);
-            segRecords.push(lineSegRec(prevPtIdx));
-          }
+          // Closing edge (polyshape always; polyline when c.closed): rely on
+          // IsPolylineClosed=True below so HFSS adds the final straight edge
+          // back to the FIRST point (the base anchor when vertex 0 is an
+          // arc), matching the canvas's straight ring closure. We must NOT
+          // ALSO append an explicit closing-repeat point + segment — a
+          // duplicated first point plus IsPolylineClosed=True makes HFSS add
+          // a redundant ZERO-length edge that Parasolid rejects ("invalid
+          // parameters to CreatePolyline operation"). The distinct drawn
+          // vertices + IsPolylineClosed=True are the canonical closed form.
         }
         const ptList = ptRecords.join(',\n          ');
         const segList = segRecords.join(',\n          ');
@@ -2639,12 +2643,19 @@ except Exception as e:
       code += `# ${c.id}: rounded rect (cornerRadius = ${ascii(crInfo.expr)}) as covered closed polyline\n`;
       code += `# 4 Line edges + 4 AngularArc 90deg corners, all coordinates parametric.\n`;
       code += `# NOTE: cornerRadius is not clamped in HFSS; keep r <= min(w,h)/2\n`;
+      // The loop is closed EXPLICITLY: the last point (index 12) repeats the
+      // first and the final SE corner arc ends on it, so the segments already
+      // form a closed contour. IsPolylineClosed MUST therefore be False — the
+      // closing edge here is an ARC, so we cannot let HFSS auto-close (it only
+      // adds a straight edge), and combining the explicit closure with
+      // IsPolylineClosed=True would add a redundant ZERO-length edge that
+      // Parasolid rejects. IsPolylineCovered=True still fills the contour.
       code += `try:
     _delete_geom_if_exists("${id}")
     oEditor.CreatePolyline(
         ["NAME:PolylineParameters",
          "IsPolylineCovered:=", True,
-         "IsPolylineClosed:=", True,
+         "IsPolylineClosed:=", False,
          ["NAME:PolylinePoints",
           ${ptListRR}],
          ["NAME:PolylineSegments",
@@ -2847,9 +2858,17 @@ except Exception as e:
         `["NAME:PLPoint", "X:=", "${p.x}", "Y:=", "${p.y}", "Z:=", "${p.z}"]`
       ).join(',\n          ');
 
-      // Polyline segments: 4 segments (4 points + closure). HFSS expects N+1 PLPoints
-      // for a closed N-segment polyline (the last point repeats the first).
-      const closingPt = `["NAME:PLPoint", "X:=", "${ptExprs[0].x}", "Y:=", "${ptExprs[0].y}", "Z:=", "${ptExprs[0].z}"]`;
+      // Canonical HFSS closed polyline: N DISTINCT points + (N-1) Line
+      // segments + IsPolylineClosed=True. HFSS adds the final edge
+      // (last->first, here the left sidewall) implicitly, then covers and
+      // sweeps it. Do NOT also append a closing-repeat of the first point:
+      // a duplicated first point together with IsPolylineClosed=True makes
+      // HFSS add a redundant ZERO-length edge, which Parasolid rejects
+      // ("PK_CURVE_make_wire_body_2 ... cant_extract_geom" / "invalid
+      // parameters to CreatePolyline operation").
+      const ribSegList = ptExprs.slice(1).map((_, i) =>
+        `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", ${i}, "NoOfPoints:=", 2]`
+      ).join(',\n          ');
 
       code += `try:
     _delete_geom_if_exists("${wgName}_rib_xsec")
@@ -2859,13 +2878,9 @@ except Exception as e:
          "IsPolylineCovered:=", True,
          "IsPolylineClosed:=", True,
          ["NAME:PolylinePoints",
-          ${ptList},
-          ${closingPt}],
+          ${ptList}],
          ["NAME:PolylineSegments",
-          ["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", 0, "NoOfPoints:=", 2],
-          ["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", 1, "NoOfPoints:=", 2],
-          ["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", 2, "NoOfPoints:=", 2],
-          ["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", 3, "NoOfPoints:=", 2]],
+          ${ribSegList}],
          ["NAME:PolylineXSection",
           "XSectionType:=", "None",
           "XSectionOrient:=", "Auto",
