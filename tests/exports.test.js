@@ -69,10 +69,24 @@ describe('model units forced to um (bare-literal expression regression)', () => 
     expect(code).toContain('w_slab+0.6');
   });
 
-  it('pyAEDT sets modeler.model_units to um before parameter assignment', () => {
+  // Regression: SetModelUnits MUST use Rescale=True. Rescale=False relabels the
+  // (default mm) design to um without rescaling the Parasolid size box, which
+  // shrinks the working volume ~1000x; a lambda/4 open-region air box (tens of
+  // mm at RF) then lands "outside the size box" and geometry (e.g. swept rib
+  // bodies) aborts, cascading to "<part> is not found". See the wg2_wg_rib bug.
+  it('HFSS-native SetModelUnits uses Rescale=True (preserve the size box)', () => {
+    const code = generateHfssNative(bareLiteralScene(), resolveParams(bareLiteralScene().params).values);
+    expect(code).toMatch(/SetModelUnits\([\s\S]*?"Units:=",\s*"um",\s*"Rescale:=",\s*True/);
+    expect(code).not.toMatch(/SetModelUnits\([\s\S]*?"Rescale:=",\s*False/);
+  });
+
+  it('pyAEDT sets model units to um (Rescale=True) before parameter assignment', () => {
     const code = generatePyAEDT(bareLiteralScene(), resolveParams(bareLiteralScene().params).values);
-    expect(code).toContain('hfss.modeler.model_units = "um"');
-    expect(code.indexOf('model_units = "um"')).toBeLessThan(code.indexOf('hfss["'));
+    // Direct COM call with Rescale=True, NOT the model_units setter (which
+    // forces Rescale=False and would shrink the size box — see regression above).
+    expect(code).toMatch(/SetModelUnits\([\s\S]*?"Units:=",\s*"um",\s*"Rescale:=",\s*True/);
+    expect(code).not.toContain('hfss.modeler.model_units = "um"');
+    expect(code.indexOf('SetModelUnits')).toBeLessThan(code.indexOf('hfss["'));
   });
 });
 

@@ -1025,11 +1025,23 @@ oEditor = oDesign.SetActiveEditor("3D Modeler")`}
 # bare literal in the project's DEFAULT unit — often mm — so without this
 # the 0.6 would become 0.6 mm = 600 um and cascade into wildly wrong
 # (and sometimes negative) dimensions. Pure multipliers like "2*ai2_cap_w"
-# stay unitless and are unaffected. Rescale:=False so append-mode geometry
-# already in um isn't physically resized.
+# stay unitless and are unaffected.
+#
+# Rescale:=True (NOT False). AEDT's Parasolid working volume ("size box")
+# scales with the model unit: relabeling the default-unit (usually mm) design
+# to um with Rescale=False keeps the box's NUMBERS but shrinks it physically
+# ~1000x (e.g. ~+/-1 mm), so a lambda/4 open-region air box (tens of mm at
+# RF) lands OUTSIDE it -> Parasolid "the transformation would result in body
+# lying outside the size box", which aborts geometry (e.g. swept rib bodies)
+# and cascades to "<part> is not found". Rescale=True relabels to um while
+# PRESERVING physical extents (and the size box). It is safe in every mode:
+# on a fresh project there is no geometry to resize (only the box is kept
+# physical); in append mode a um design is unchanged (um->um is a no-op) and
+# an mm design is converted preserving physical size, matching the um
+# geometry this script then creates.
 try:
     oEditor.SetModelUnits(
-        ["NAME:Units Parameter", "Units:=", "um", "Rescale:=", False])
+        ["NAME:Units Parameter", "Units:=", "um", "Rescale:=", True])
 except Exception as e:
     try:
         oDesktop.AddMessage("", "", 1, "SetModelUnits(um) failed: " + str(e))

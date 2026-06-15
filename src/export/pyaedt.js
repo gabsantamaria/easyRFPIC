@@ -123,7 +123,16 @@ hfss = Hfss(
 # "w_slab+0.6", where 0.6 means 0.6 um). HFSS reads an additive bare literal
 # in the model unit (default mm) unless we set it to um first — otherwise
 # 0.6 becomes 0.6 mm and cascades into wildly wrong dimensions.
-hfss.modeler.model_units = "um"
+#
+# Use Rescale=True, NOT the modeler.model_units property setter (which forces
+# Rescale=False). AEDT's Parasolid working volume ("size box") scales with
+# the model unit: relabeling a default-mm design to um WITHOUT rescaling keeps
+# the box numbers but shrinks it ~1000x physically, so a lambda/4 open-region
+# air box (tens of mm at RF) lands outside it -> "body lying outside the size
+# box" and geometry aborts. Rescale=True relabels to um while preserving
+# physical extents (and the box); it is a no-op on an already-um design.
+hfss.modeler.oeditor.SetModelUnits(
+    ["NAME:Units Parameter", "Units:=", "um", "Rescale:=", True])
 
 # ===== Parameters =====
 `;
