@@ -4877,6 +4877,8 @@ export default function App() {
               <h1 className="font-bold tracking-tight text-sm" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
                 <span className="text-slate-100">MPL</span>{' '}
                 <span className="text-emerald-400">easy</span><span className="text-amber-500">RF</span><span className="text-cyan-300">PIC</span>
+                {/* Build version (git release tag, injected by vite.config). */}
+                <span className="text-[9px] font-normal text-slate-500 ml-1.5 align-top" title={`easyRFPIC version ${__APP_VERSION__}`}>v{__APP_VERSION__}</span>
               </h1>
               <p className="text-[10px] text-slate-400">parametric photonic-RF IC layout · pyAEDT &amp; native HFSS export</p>
             </div>

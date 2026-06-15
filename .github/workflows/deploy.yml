@@ -57,6 +57,10 @@ jobs:
       - name: Build
         env:
           VITE_BASE_PATH: /${{ github.event.repository.name }}/
+          # Release tag (e.g. v0.1.19) → header version. On workflow_dispatch
+          # (no tag) this is the branch name; vite.config falls back to
+          # `git describe`, so a value is always resolved.
+          VITE_APP_VERSION: ${{ github.ref_name }}
         run: npm run build
 
       - uses: actions/upload-pages-artifact@v3

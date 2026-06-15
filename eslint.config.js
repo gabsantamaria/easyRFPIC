@@ -14,8 +14,17 @@ export default defineConfig([
       reactRefresh.configs.vite,
     ],
     languageOptions: {
-      globals: globals.browser,
+      globals: {
+        ...globals.browser,
+        // Injected at build time by vite.config.js (define).
+        __APP_VERSION__: 'readonly',
+      },
       parserOptions: { ecmaFeatures: { jsx: true } },
     },
+  },
+  {
+    // Build / tooling config files run under Node, not the browser.
+    files: ['vite.config.js', 'eslint.config.js', '*.config.js'],
+    languageOptions: { globals: globals.node },
   },
 ])
