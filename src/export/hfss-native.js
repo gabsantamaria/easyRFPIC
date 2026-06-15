@@ -1812,14 +1812,15 @@ except Exception as e:
             // covered closed polyline fills either orientation.
             const name = sheetNames.length === 0 ? id : `${id}_tseg${sheetNames.length}`;
             sheetNames.push(name);
-            // Canonical closed polyline: 4 DISTINCT corners + 3 Line segments;
-            // IsPolylineClosed=True below adds the final edge (P3->P0). A 5th
-            // closing-repeat point + IsPolylineClosed=True would make HFSS add
-            // a redundant ZERO-length edge that Parasolid rejects.
-            const pts = corners4.map(p =>
+            // Explicit closure (IsPolylineClosed=False below): 4 corners + a
+            // repeat of the first + one Line segment per edge incl. the
+            // closing edge. We avoid IsPolylineClosed=True — HFSS's auto-close
+            // is unreliable for covered polylines and fails with
+            // "cant_extract_geom".
+            const pts = [...corners4, corners4[0]].map(p =>
               `["NAME:PLPoint", "X:=", "${p.x}", "Y:=", "${p.y}", "Z:=", "${zBottomExpr}"]`
             ).join(',\n          ');
-            const segs = [0, 1, 2].map(k =>
+            const segs = [0, 1, 2, 3].map(k =>
               `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", ${k}, "NoOfPoints:=", 2]`
             ).join(',\n          ');
             code += `# ${label}\n`;
@@ -1828,7 +1829,7 @@ except Exception as e:
     oEditor.CreatePolyline(
         ["NAME:PolylineParameters",
          "IsPolylineCovered:=", True,
-         "IsPolylineClosed:=", True,
+         "IsPolylineClosed:=", False,
          ["NAME:PolylinePoints",
           ${pts}],
          ["NAME:PolylineSegments",
@@ -2082,15 +2083,20 @@ except Exception as e:
             prevPtIdx = idx;
             vi++;
           }
-          // Closing edge (polyshape always; polyline when c.closed): rely on
-          // IsPolylineClosed=True below so HFSS adds the final straight edge
-          // back to the FIRST point (the base anchor when vertex 0 is an
-          // arc), matching the canvas's straight ring closure. We must NOT
-          // ALSO append an explicit closing-repeat point + segment — a
-          // duplicated first point plus IsPolylineClosed=True makes HFSS add
-          // a redundant ZERO-length edge that Parasolid rejects ("invalid
-          // parameters to CreatePolyline operation"). The distinct drawn
-          // vertices + IsPolylineClosed=True are the canonical closed form.
+          // Closing edge (polyshape always; polyline when c.closed): close
+          // the contour EXPLICITLY with a straight Line back to the FIRST
+          // point (the base anchor when vertex 0 is an arc), matching the
+          // canvas's straight ring closure. We append a repeat of the first
+          // point + a closing Line segment and set IsPolylineClosed=False
+          // below. We deliberately do NOT use IsPolylineClosed=True: HFSS's
+          // auto-close is unreliable for covered/swept polylines (it fails
+          // with "PK_CURVE_make_wire_body_2 ... cant_extract_geom"), and
+          // combining it with an explicit closing point would add a redundant
+          // ZERO-length edge.
+          if (polyClosed) {
+            ptRecords.push(ptRecords[0]);
+            segRecords.push(lineSegRec(prevPtIdx));
+          }
         }
         const ptList = ptRecords.join(',\n          ');
         const segList = segRecords.join(',\n          ');
@@ -2137,7 +2143,7 @@ except Exception as e:
     oEditor.CreatePolyline(
         ["NAME:PolylineParameters",
          "IsPolylineCovered:=", True,
-         "IsPolylineClosed:=", ${polyClosed ? 'True' : 'False'},
+         "IsPolylineClosed:=", False,
          ["NAME:PolylinePoints",
           ${ptList}],
          ["NAME:PolylineSegments",
@@ -2365,20 +2371,20 @@ except Exception as e:
       // is tessellated at export time — see the racetrack note); Z uses
       // the parametric layer-stack expression so vertical sweeps work.
       //
-      // Canonical HFSS closed polyline: N DISTINCT points + (N-1) Line
-      // segments; IsPolylineClosed=True makes HFSS add the final
-      // P(N-1)->P0 edge implicitly. We must NOT emit a closing-repeat
-      // point or an Nth segment — and crucially we must DROP near-
-      // coincident vertices first: a tessellated racetrack loop comes
-      // back implicitly closed (its last sample lands ~0.2 nm from the
-      // first), so without dedup the closing edge — or an appended
-      // duplicate — is a sub-nm zero-length segment that HFSS rejects
-      // with "invalid parameters to CreatePolyline operation".
+      // EXPLICIT closure (IsPolylineClosed=False): we DROP near-coincident
+      // vertices first (a tessellated racetrack loop comes back implicitly
+      // closed, its last sample ~0.2 nm from the first — without dedup the
+      // closing edge would be a sub-nm zero-length segment HFSS rejects),
+      // then APPEND a repeat of the first vertex and emit one Line segment
+      // per edge INCLUDING the closing edge (last -> repeated first). We do
+      // NOT use IsPolylineClosed=True: HFSS's auto-close is unreliable for
+      // covered+swept polylines and fails with "cant_extract_geom".
       const ringHfss = dedupeRingForHfss(ring);
-      const ptRecords = ringHfss.map(([px, py]) =>
+      const ringClosed = ringHfss.length > 0 ? [...ringHfss, ringHfss[0]] : ringHfss;
+      const ptRecords = ringClosed.map(([px, py]) =>
         `["NAME:PLPoint", "X:=", "${px.toFixed(4)}um", "Y:=", "${py.toFixed(4)}um", "Z:=", "${zBottomExpr}"]`
       ).join(', ');
-      const segRecords = ringHfss.slice(1).map((_, i) =>
+      const segRecords = ringHfss.map((_, i) =>
         `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", ${i}, "NoOfPoints:=", 2]`
       ).join(', ');
       // For ports (zSize=0) the closed polyline IS the final geometry —
@@ -2392,7 +2398,7 @@ except Exception as e:
     oEditor.CreatePolyline(
         ["NAME:PolylineParameters",
          "IsPolylineCovered:=", True,
-         "IsPolylineClosed:=", True,
+         "IsPolylineClosed:=", False,
          ["NAME:PolylinePoints", ${ptRecords}],
          ["NAME:PolylineSegments", ${segRecords}],
          ["NAME:PolylineXSection",
@@ -2446,13 +2452,15 @@ except Exception as e:
           baseInst.cy + lx * sa2 + ly * ca2,
         ]);
         const innerId = `${id}_hole`;
-        // Same canonical closed form as the outer perimeter: dedupe the
-        // near-coincident closure vertex, then N points + (N-1) segments.
+        // Same explicit-closure form as the outer perimeter: dedupe the
+        // near-coincident closure vertex, append a repeat of the first, emit
+        // one Line segment per edge (incl. the closing edge), closed=False.
         const innerHfss = dedupeRingForHfss(innerPts);
-        const innerPtRecords = innerHfss.map(([px, py]) =>
+        const innerClosed = innerHfss.length > 0 ? [...innerHfss, innerHfss[0]] : innerHfss;
+        const innerPtRecords = innerClosed.map(([px, py]) =>
           `["NAME:PLPoint", "X:=", "${px.toFixed(4)}um", "Y:=", "${py.toFixed(4)}um", "Z:=", "${zBottomExpr}"]`
         ).join(', ');
-        const innerSegRecords = innerHfss.slice(1).map((_, i) =>
+        const innerSegRecords = innerHfss.map((_, i) =>
           `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", ${i}, "NoOfPoints:=", 2]`
         ).join(', ');
         code += `# ${c.id}: subtract inner of racetrack to leave hollow band\n`;
@@ -2461,7 +2469,7 @@ except Exception as e:
     oEditor.CreatePolyline(
         ["NAME:PolylineParameters",
          "IsPolylineCovered:=", True,
-         "IsPolylineClosed:=", True,
+         "IsPolylineClosed:=", False,
          ["NAME:PolylinePoints", ${innerPtRecords}],
          ["NAME:PolylineSegments", ${innerSegRecords}],
          ["NAME:PolylineXSection",
@@ -2854,19 +2862,21 @@ except Exception as e:
       const sweepVyExpr = (axis === 'y') ? hExprUm : `(0)um`;
       const sweepVzExpr = `(0)um`;
 
-      const ptList = ptExprs.map(p =>
+      // Explicit closure (NOT IsPolylineClosed=True). The rib cross-section
+      // lives in the X=const (Y-Z) plane and is covered + swept. HFSS's
+      // auto-close (IsPolylineClosed=True) is unreliable for this case — it
+      // fails with "PK_CURVE_make_wire_body_2 ... cant_extract_geom" whether
+      // we feed it N points (auto-close adds a bad edge) or N+1 points (the
+      // auto-close edge is then redundant/zero-length). So we close the loop
+      // OURSELVES: append a repeat of the first point, emit one Line segment
+      // per edge INCLUDING the closing edge (last vertex -> repeated first),
+      // and set IsPolylineClosed=False. IsPolylineCovered=True still fills the
+      // geometrically-closed contour.
+      const ptExprsClosed = [...ptExprs, ptExprs[0]];
+      const ptList = ptExprsClosed.map(p =>
         `["NAME:PLPoint", "X:=", "${p.x}", "Y:=", "${p.y}", "Z:=", "${p.z}"]`
       ).join(',\n          ');
-
-      // Canonical HFSS closed polyline: N DISTINCT points + (N-1) Line
-      // segments + IsPolylineClosed=True. HFSS adds the final edge
-      // (last->first, here the left sidewall) implicitly, then covers and
-      // sweeps it. Do NOT also append a closing-repeat of the first point:
-      // a duplicated first point together with IsPolylineClosed=True makes
-      // HFSS add a redundant ZERO-length edge, which Parasolid rejects
-      // ("PK_CURVE_make_wire_body_2 ... cant_extract_geom" / "invalid
-      // parameters to CreatePolyline operation").
-      const ribSegList = ptExprs.slice(1).map((_, i) =>
+      const ribSegList = ptExprs.map((_, i) =>
         `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", ${i}, "NoOfPoints:=", 2]`
       ).join(',\n          ');
 
@@ -2876,7 +2886,7 @@ except Exception as e:
     oEditor.CreatePolyline(
         ["NAME:PolylineParameters",
          "IsPolylineCovered:=", True,
-         "IsPolylineClosed:=", True,
+         "IsPolylineClosed:=", False,
          ["NAME:PolylinePoints",
           ${ptList}],
          ["NAME:PolylineSegments",

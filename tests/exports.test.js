@@ -245,22 +245,24 @@ describe('CreatePolyline segment indices stay in range (racetrack HFSS-reject re
   });
 });
 
-describe('no degenerate-close polylines (Parasolid cant_extract_geom regression)', () => {
-  // A CreatePolyline whose LAST point duplicates the FIRST while
-  // IsPolylineClosed=True makes HFSS add a redundant ZERO-length closing
-  // edge — Parasolid rejects it ("PK_CURVE_make_wire_body_2 ...
-  // cant_extract_geom" / "invalid parameters to CreatePolyline"). This is
-  // the bug that killed the straight-waveguide rib (wg2_wg_rib). Detect any
-  // closed polyline whose first PLPoint equals its last.
-  function degenerateCloses(code) {
+describe('closed polylines use explicit closure, not IsPolylineClosed=True (Parasolid regression)', () => {
+  // HFSS's auto-close (IsPolylineClosed=True) is unreliable for covered /
+  // swept polylines — it fails with "PK_CURVE_make_wire_body_2 ...
+  // cant_extract_geom" / "invalid parameters to CreatePolyline" (this killed
+  // the straight-waveguide rib wg2_wg_rib). Every covered closed polyline
+  // must instead close EXPLICITLY: append a repeat of the first point, emit
+  // a Line segment per edge incl. the closing one, and set
+  // IsPolylineClosed=False. Invariants checked: (a) no polyline sets
+  // IsPolylineClosed=True while its first PLPoint equals its last (the
+  // redundant zero-length close); (b) no polyline relies on auto-close —
+  // i.e. none uses IsPolylineClosed=True at all in the geometry paths.
+  function badClosedPolylines(code) {
     const calls = code.split('oEditor.CreatePolyline(').slice(1);
     const bad = [];
     calls.forEach((call) => {
       const block = call.slice(0, call.indexOf('["NAME:Attributes"'));
       if (!block.includes('PLPoint')) return;
-      const closed = /"IsPolylineClosed:=",\s*True/.test(block);
-      const pts = [...block.matchAll(/"X:=",\s*"([^"]+)",\s*"Y:=",\s*"([^"]+)",\s*"Z:=",\s*"([^"]+)"/g)].map((m) => m.slice(1).join('|'));
-      if (closed && pts.length > 1 && pts[0] === pts[pts.length - 1]) {
+      if (/"IsPolylineClosed:=",\s*True/.test(block)) {
         bad.push((call.match(/Name:=",\s*"([^"]+)"/) || [])[1] || '?');
       }
     });
@@ -276,18 +278,22 @@ describe('no degenerate-close polylines (Parasolid cant_extract_geom regression)
     return s;
   }
 
-  it('straight-waveguide rib emits a clean closed cross-section', () => {
+  it('straight-waveguide rib closes explicitly (5 points, 4 segments, closed=False)', () => {
     const s = straightWgScene();
     const code = generateHfssNative(s, resolveParams(s.params).values);
-    expect(degenerateCloses(code)).toEqual([]);
-    // The rib xsec is the canonical closed form: 4 distinct points, 3 segs.
+    expect(badClosedPolylines(code)).toEqual([]);
     const block = code.slice(code.indexOf('wg_rib_xsec'));
     const call = block.slice(0, block.indexOf('["NAME:Attributes"'));
-    expect((call.match(/"NAME:PLPoint"/g) || []).length).toBe(4);
-    expect((call.match(/"NAME:PLSegment"/g) || []).length).toBe(3);
+    // 4 distinct corners + a closing repeat of the first = 5 points, 4 segs.
+    expect((call.match(/"NAME:PLPoint"/g) || []).length).toBe(5);
+    expect((call.match(/"NAME:PLSegment"/g) || []).length).toBe(4);
+    expect(call).toMatch(/"IsPolylineClosed:=",\s*False/);
+    // First and last points coincide (explicit closure).
+    const pts = [...call.matchAll(/"X:=",\s*"([^"]+)",\s*"Y:=",\s*"([^"]+)",\s*"Z:=",\s*"([^"]+)"/g)].map((m) => m.slice(1).join('|'));
+    expect(pts[0]).toBe(pts[pts.length - 1]);
   });
 
-  it('tapered polyline, rounded rect, and polyshape have no degenerate closes', () => {
+  it('tapered polyline, rounded rect, and polyshape close explicitly (no auto-close)', () => {
     // tapered polyline (per-segment quad sheets)
     const taper = makeBlankScene();
     taper.components.push({
@@ -295,12 +301,12 @@ describe('no degenerate-close polylines (Parasolid cant_extract_geom regression)
       vertices: [{ kind: 'rel', dx: '0', dy: '0', width: '4' }, { kind: 'rel', dx: '60', dy: '0', width: '12' }],
       cutouts: [], transforms: [],
     });
-    expect(degenerateCloses(generateHfssNative(taper, resolveParams(taper.params).values))).toEqual([]);
+    expect(badClosedPolylines(generateHfssNative(taper, resolveParams(taper.params).values))).toEqual([]);
 
     // rounded rect (arc-closed contour)
     const rr = makeBlankScene();
     rr.components.push({ id: 'rr', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: '40', h: '30', cornerRadius: '5', cutouts: [], transforms: [] });
-    expect(degenerateCloses(generateHfssNative(rr, resolveParams(rr.params).values))).toEqual([]);
+    expect(badClosedPolylines(generateHfssNative(rr, resolveParams(rr.params).values))).toEqual([]);
 
     // polyshape (covered closed polygon)
     const ps = makeBlankScene();
@@ -309,7 +315,7 @@ describe('no degenerate-close polylines (Parasolid cant_extract_geom regression)
       vertices: [{ kind: 'rel', dx: '0', dy: '0' }, { kind: 'rel', dx: '20', dy: '0' }, { kind: 'rel', dx: '0', dy: '15' }, { kind: 'rel', dx: '-20', dy: '0' }],
       cutouts: [], transforms: [],
     });
-    expect(degenerateCloses(generateHfssNative(ps, resolveParams(ps.params).values))).toEqual([]);
+    expect(badClosedPolylines(generateHfssNative(ps, resolveParams(ps.params).values))).toEqual([]);
   });
 });
 
@@ -992,7 +998,10 @@ describe('curved paths + tapers — exporters', () => {
     const { values: pv } = resolveParams(s.params);
     const out = generateHfssNative(s, pv);
     expect(out).toContain('"SegmentType:=", "AngularArc"');
-    expect(out).toContain('"IsPolylineClosed:=", True');
+    // Closed contour is built with EXPLICIT closure (closing-repeat point +
+    // full segment list), NOT HFSS auto-close — IsPolylineClosed=False. HFSS's
+    // auto-close is unreliable for covered/swept polylines (cant_extract_geom).
+    expect(out).toContain('"IsPolylineClosed:=", False');
     pyParses2(out, 'vitest_hfss_polyshape_arc');
   });
 
