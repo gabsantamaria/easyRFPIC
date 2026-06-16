@@ -303,6 +303,17 @@ export default function App() {
   // every parameter-bound width/height/snap-offset. Variable name is the
   // primary label; numeric value is appended only if there's room.
   const [showDimensions, setShowDimensions] = useState(false);
+  // Editable on-canvas dimensions for the primary-selected rectangle (W below,
+  // H to the right) with inline name/value fields. Optional + persisted across
+  // reloads (separate from the read-only global `showDimensions` overlay).
+  const [editDims, setEditDims] = useState(() => {
+    try { return window.localStorage?.getItem('photonic_layout_edit_dims') === '1'; } catch { return false; }
+  });
+  const toggleEditDims = () => setEditDims(v => {
+    const n = !v;
+    try { window.localStorage?.setItem('photonic_layout_edit_dims', n ? '1' : '0'); } catch { /* ignore */ }
+    return n;
+  });
   // Help / tutorial overlay. Opened from the "?" button in the header.
   const [showHelp, setShowHelp] = useState(false);
   // AI geometry assistant dialog (✨ header button): natural-language /
@@ -5299,6 +5310,13 @@ export default function App() {
             >
               <Ruler size={11} /> dimensions
             </button>
+            <button
+              onClick={toggleEditDims}
+              className={`flex items-center gap-1 px-2 py-1 rounded text-xs ${editDims ? 'bg-cyan-600 text-white' : 'border border-slate-600 hover:bg-slate-800'}`}
+              title="Edit dimensions on canvas: select (or create) a rectangle to show its width & height as arrows with inline-editable variable names / values."
+            >
+              <Pencil size={11} /> edit dims
+            </button>
           </div>
           <div className="flex items-center gap-1.5">
             <button onClick={undo} disabled={history.length === 0} className="flex items-center gap-1 px-2 py-1 rounded text-xs border border-slate-600 hover:bg-slate-800 disabled:opacity-30" title="Undo (Cmd/Ctrl+Z)">
@@ -6795,6 +6813,9 @@ export default function App() {
             alertDialog={alertDialog}
             setInteractionStatus={setInteractionStatus}
             showDimensions={showDimensions}
+            editDims={editDims}
+            commitExpr={commitExpr}
+            renameParam={renameParam}
             addMode={addMode}
             setAddMode={setAddMode}
             commitDragAdd={commitDragAdd}

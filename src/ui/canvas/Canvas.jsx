@@ -725,10 +725,49 @@ export function buildBoolOverridesForInstance(b, bInst, bBaseCx, bBaseCy, compBy
   return overrides;
 }
 
+// Constant-size inline input used inside the editable-dimensions overlay.
+// Rendered in an SVG <foreignObject>, so all CSS lengths are passed in
+// SCREEN PIXELS (via the canvas `screen()` helper) to stay a fixed visible
+// size at every zoom. Uncontrolled (remounts via `key` when `initial`
+// changes) so a re-solve after commit refreshes it without fighting focus.
+function CanvasDimInput({ initial, fontPx, widthPx, color, title, onCommit }) {
+  return (
+    <input
+      defaultValue={initial}
+      title={title}
+      spellCheck={false}
+      onMouseDown={(e) => e.stopPropagation()}
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') e.currentTarget.blur();
+        else if (e.key === 'Escape') { e.currentTarget.value = initial; e.currentTarget.blur(); }
+      }}
+      onBlur={(e) => { const v = e.currentTarget.value.trim(); if (v && v !== initial) onCommit(v); }}
+      style={{
+        width: `${widthPx}px`,
+        fontSize: `${fontPx}px`,
+        lineHeight: 1.1,
+        fontFamily: 'monospace',
+        padding: `${fontPx * 0.18}px ${fontPx * 0.35}px`,
+        background: 'rgba(15,23,42,0.96)',
+        color,
+        border: `1px solid ${color}`,
+        borderRadius: `${fontPx * 0.28}px`,
+        outline: 'none',
+        boxSizing: 'border-box',
+        pointerEvents: 'auto',
+        textAlign: 'center',
+      }}
+    />
+  );
+}
+
 // =========================================================================
 // CANVAS
 // =========================================================================
-export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelection, viewport, setViewport, snapMode, setSnapMode, gridSize, gridSnapEnabled, showGrid = true, paramValues, addParam, updateParamExpr, rulerMode, setRulerMode, rulerMeasurements, setRulerMeasurements, rulerInProgress, setRulerInProgress, rulerSnapPoint, setRulerSnapPoint, alertDialog, setInteractionStatus, showDimensions, addMode, setAddMode, commitDragAdd, onComponentContextMenu, onSvgElement, flashAnchor = null }) {
+export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelection, viewport, setViewport, snapMode, setSnapMode, gridSize, gridSnapEnabled, showGrid = true, paramValues, addParam, updateParamExpr, rulerMode, setRulerMode, rulerMeasurements, setRulerMeasurements, rulerInProgress, setRulerInProgress, rulerSnapPoint, setRulerSnapPoint, alertDialog, setInteractionStatus, showDimensions, editDims = false, commitExpr = null, renameParam = null, addMode, setAddMode, commitDragAdd, onComponentContextMenu, onSvgElement, flashAnchor = null }) {
   // Drop a single committed ruler measurement by id.
   const deleteRuler = (id) => setRulerMeasurements((prev) => prev.filter((m) => m.id !== id));
   const svgRef = useRef(null);
@@ -4463,6 +4502,121 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                 </g>
               );
             })}
+          </g>
+        );
+      })()}
+
+      {/* ── Editable dimensions for the primary-selected rectangle ──
+          Optional (toggled by the "edit dims" button; also shows right
+          after creating a rect, which is auto-selected). Draws the rect's
+          width (below) and height (right) as cyan dimension arrows, each
+          with INLINE EDITABLE fields rendered as constant-size HTML inputs
+          inside a <foreignObject>:
+            • a lone parameter-bound dim (e.g. w = "wg_L") shows two fields —
+              the NAME (renames the param scene-wide) and its VALUE (edits the
+              param's expression);
+            • a literal or multi-term dim (e.g. "300" or "2*wg_L") shows one
+              field that edits the component's w/h directly, auto-creating any
+              new params referenced.
+          Distinct cyan accent vs the violet read-only `showDimensions`. */}
+      {editDims && !rulerMode && (() => {
+        const cSel = solved.find(cc => cc.id === selectedId);
+        if (!cSel || cSel.kind !== 'rect') return null;
+        const dd = dimsByCompId[cSel.id];
+        if (!dd || !Number.isFinite(dd.w) || !Number.isFinite(dd.h) || dd.w <= 0 || dd.h <= 0) return null;
+        const params = scene.params || {};
+        const LONE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+        // Constant on-screen sizing (screen() => world units that render to ~px).
+        const offsetDist = screen(34);
+        const extOverhang = screen(6);
+        const arrowLen = screen(13);
+        const arrowSpread = screen(4.5);
+        const dimStroke = screen(1.0);
+        const extStroke = screen(0.6);
+        const fontPx = screen(11);
+        const fieldH = screen(20);
+        const nameW = screen(60);
+        const valueW = screen(54);
+        const exprW = screen(98);
+        const gapW = screen(4);
+        const ACCENT = '#22d3ee'; // cyan — interactive
+        const AMBER = '#fbbf24';  // param reference (edits by reference)
+
+        const setCompDim = (key, expr) => {
+          const prevVal = key === 'w' ? dd.w : dd.h;
+          updateScene(prev => ({
+            ...prev,
+            components: prev.components.map(c => c.id === cSel.id ? { ...c, [key]: expr } : c),
+          }));
+          if (commitExpr) commitExpr(expr, Number.isFinite(prevVal) ? String(prevVal) : '1', 'µm', `Auto-created (${cSel.id}.${key})`);
+        };
+
+        const renderDim = (key, p1, p2, outwardN, value) => {
+          const ox = outwardN.x * offsetDist, oy = outwardN.y * offsetDist;
+          const dimP1 = { x: p1.x + ox, y: p1.y + oy };
+          const dimP2 = { x: p2.x + ox, y: p2.y + oy };
+          const lx = dimP2.x - dimP1.x, ly = dimP2.y - dimP1.y;
+          const len = Math.hypot(lx, ly) || 1;
+          const ux = lx / len, uy = ly / len;
+          const extScale = offsetDist + extOverhang;
+          const ext1 = { x: p1.x + outwardN.x * extScale, y: p1.y + outwardN.y * extScale };
+          const ext2 = { x: p2.x + outwardN.x * extScale, y: p2.y + outwardN.y * extScale };
+          const arrowAt = (tip, dirSign) => {
+            const px = -uy, py = ux;
+            const bx = tip.x - dirSign * ux * arrowLen, by = tip.y - dirSign * uy * arrowLen;
+            return `${bx + px * arrowSpread},${-(by + py * arrowSpread)} ${tip.x},${-tip.y} ${bx - px * arrowSpread},${-(by - py * arrowSpread)}`;
+          };
+          const midX = (dimP1.x + dimP2.x) / 2, midY = (dimP1.y + dimP2.y) / 2;
+          const expr = String(key === 'w' ? cSel.w : cSel.h);
+          const trimmed = expr.trim();
+          const isRef = LONE.test(trimmed) && !!params[trimmed];
+
+          let fw, fields;
+          if (isRef) {
+            const pExpr = String(params[trimmed].expr ?? '');
+            fw = nameW + valueW + gapW;
+            fields = (
+              <>
+                <CanvasDimInput
+                  key={`n-${trimmed}`} initial={trimmed} fontPx={fontPx} widthPx={nameW} color={AMBER}
+                  title="Variable name — rename scene-wide" onCommit={(v) => renameParam && renameParam(trimmed, v)} />
+                <CanvasDimInput
+                  key={`v-${trimmed}-${pExpr}`} initial={pExpr} fontPx={fontPx} widthPx={valueW} color={ACCENT}
+                  title={`Value of ${trimmed} (= ${Number.isFinite(value) ? value.toFixed(3) : '?'} µm)`}
+                  onCommit={(v) => { if (updateParamExpr) updateParamExpr(trimmed, v); if (commitExpr) commitExpr(v, '1', 'µm', `Auto-created (${trimmed})`, trimmed); }} />
+              </>
+            );
+          } else {
+            fw = exprW;
+            fields = (
+              <CanvasDimInput
+                key={`e-${expr}`} initial={expr} fontPx={fontPx} widthPx={exprW} color={ACCENT}
+                title={`${key} = ${Number.isFinite(value) ? value.toFixed(3) : '?'} µm — edit expression`}
+                onCommit={(v) => setCompDim(key, v)} />
+            );
+          }
+          return (
+            <g key={`editdim-${key}`}>
+              <line x1={p1.x} y1={-p1.y} x2={ext1.x} y2={-ext1.y} stroke={ACCENT} strokeWidth={extStroke} opacity={0.8} />
+              <line x1={p2.x} y1={-p2.y} x2={ext2.x} y2={-ext2.y} stroke={ACCENT} strokeWidth={extStroke} opacity={0.8} />
+              <line x1={dimP1.x} y1={-dimP1.y} x2={dimP2.x} y2={-dimP2.y} stroke={ACCENT} strokeWidth={dimStroke} opacity={0.95} />
+              <polyline points={arrowAt(dimP1, -1)} fill="none" stroke={ACCENT} strokeWidth={dimStroke} strokeLinecap="round" strokeLinejoin="round" />
+              <polyline points={arrowAt(dimP2, 1)} fill="none" stroke={ACCENT} strokeWidth={dimStroke} strokeLinecap="round" strokeLinejoin="round" />
+              <foreignObject x={midX - fw / 2} y={-midY - fieldH / 2} width={fw} height={fieldH} style={{ overflow: 'visible' }}>
+                <div xmlns="http://www.w3.org/1999/xhtml" style={{ display: 'flex', gap: `${gapW}px`, alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%', pointerEvents: 'none' }}>
+                  {fields}
+                </div>
+              </foreignObject>
+            </g>
+          );
+        };
+
+        const hw = dd.w / 2, hh = dd.h / 2;
+        return (
+          <g>
+            {renderDim('w', { x: cSel.cx - hw, y: cSel.cy - hh }, { x: cSel.cx + hw, y: cSel.cy - hh }, { x: 0, y: -1 }, dd.w)}
+            {renderDim('h', { x: cSel.cx + hw, y: cSel.cy - hh }, { x: cSel.cx + hw, y: cSel.cy + hh }, { x: 1, y: 0 }, dd.h)}
           </g>
         );
       })()}
