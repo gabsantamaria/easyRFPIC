@@ -725,31 +725,32 @@ export function buildBoolOverridesForInstance(b, bInst, bBaseCx, bBaseCy, compBy
   return overrides;
 }
 
-// Inline text input for the editable-dimensions overlay. The visible BOX
-// (fill + outline) is drawn as a sibling SVG <rect> by the caller — this input
-// is transparent and BORDERLESS and just fills its <foreignObject>. That is
-// deliberate: a CSS `border` inside a foreignObject is in SVG user units and
-// the browser floors it to ~1 user unit, which the viewBox then scales up on
-// zoom-in until it swallows the text. An SVG stroke with non-scaling-stroke
-// (on the caller's rect) stays a constant device-pixel width at every zoom.
-// Uncontrolled (remounts via `key` when `initial` changes) so a re-solve after
-// commit refreshes it without fighting focus.
-function CanvasDimInput({ initial, fontPx, color, title, onCommit, onFocus, onBlur }) {
+// Inline text <input> for the editable-dimensions overlay, mounted ONLY while a
+// field is being edited (the always-visible label is SVG <text> drawn by the
+// caller, which scales with the SVG box at every zoom — HTML text inside a
+// <foreignObject> does not, because its font-size, like a CSS border there, is
+// in SVG user units that the browser floors and the viewBox then scales up on
+// zoom-in until the text outgrows the box). Transparent + borderless: the box
+// fill/outline is the caller's SVG <rect>. autoFocus + select-all so a click on
+// the label drops straight into editing the whole value. onDone fires on blur
+// (after committing) so the caller can return to the SVG-text label.
+function CanvasDimInput({ initial, fontPx, color, title, onCommit, onDone }) {
   return (
     <input
+      autoFocus
       defaultValue={initial}
       title={title}
       spellCheck={false}
       onMouseDown={(e) => e.stopPropagation()}
       onClick={(e) => e.stopPropagation()}
       onDoubleClick={(e) => e.stopPropagation()}
-      onFocus={(e) => { e.currentTarget.select(); onFocus && onFocus(); }}
+      onFocus={(e) => e.currentTarget.select()}
       onKeyDown={(e) => {
         e.stopPropagation();
         if (e.key === 'Enter') e.currentTarget.blur();
         else if (e.key === 'Escape') { e.currentTarget.value = initial; e.currentTarget.blur(); }
       }}
-      onBlur={(e) => { const v = e.currentTarget.value.trim(); if (v && v !== initial) onCommit(v); if (onBlur) onBlur(); }}
+      onBlur={(e) => { const v = e.currentTarget.value.trim(); if (v && v !== initial) onCommit(v); if (onDone) onDone(); }}
       style={{
         width: '100%',
         height: '100%',
@@ -770,16 +771,20 @@ function CanvasDimInput({ initial, fontPx, color, title, onCommit, onFocus, onBl
 }
 
 // Editable-dimension overlay for ONE primary-selected rectangle: width (below)
-// and height (right) as cyan dimension arrows, each with inline-editable
+// and height (right) as cyan dimension arrows, each with click-to-edit
 // field(s). A lone parameter-bound dim (e.g. w = "wg_L") shows a NAME field
 // (renames the param scene-wide) + a VALUE field (edits the param expression);
 // a literal / multi-term dim shows one field editing the component's w/h.
-// Tracks which field is focused so THAT field — and its <foreignObject> — grows
-// to reveal long names/expressions (no clipping), then shrinks back on blur.
-// All sizes are screen-relative via the passed `screen()` so the overlay is
-// zoom-invariant. Mounted with key=comp id, so selecting another rect resets.
+//
+// Each field's label is SVG <text> inside an SVG <rect> box — BOTH scale with
+// the viewBox identically, so the text stays inside the box at every zoom
+// (HTML text in a <foreignObject> does not — its font-size floors in user
+// units and outgrows a constant-size box on zoom-in). Click a field to edit:
+// an HTML <input> is mounted over it and the box GROWS to reveal long
+// names/expressions; on blur it commits and reverts to the SVG-text label.
+// Mounted with key=comp id, so selecting another rect resets edit state.
 function EditableRectDims({ cSel, dd, params, screen, updateScene, commitExpr, renameParam, updateParamExpr }) {
-  const [focused, setFocused] = useState(null); // 'w-name' | 'w-value' | 'w-expr' | 'h-*' | null
+  const [editing, setEditing] = useState(null); // 'w-name' | 'w-value' | 'w-expr' | 'h-*' | null
 
   const LONE = /^[A-Za-z_][A-Za-z0-9_]*$/;
   const offsetDist = screen(34);
@@ -790,13 +795,20 @@ function EditableRectDims({ cSel, dd, params, screen, updateScene, commitExpr, r
   const extStroke = screen(0.6);
   const fontPx = screen(11);
   const fieldH = screen(20);
+  const charW = fontPx * 0.62;   // monospace glyph advance estimate (user units)
   const gapW = screen(4);
   const labelGap = screen(7);
-  const baseName = screen(58), grownName = screen(184);
-  const baseValue = screen(54), grownValue = screen(150);
-  const baseExpr = screen(98), grownExpr = screen(210);
+  const baseName = screen(76), grownName = screen(196);
+  const baseValue = screen(64), grownValue = screen(168);
+  const baseExpr = screen(112), grownExpr = screen(220);
   const ACCENT = '#22d3ee'; // cyan — interactive
   const AMBER = '#fbbf24';  // param reference (edits by reference)
+
+  // Truncate a label with an ellipsis so it never spills past its box width.
+  const fitLabel = (text, boxW) => {
+    const maxChars = Math.max(1, Math.floor((boxW - fontPx * 0.7) / charW));
+    return text.length > maxChars ? `${text.slice(0, Math.max(1, maxChars - 1))}…` : text;
+  };
 
   const setCompDim = (key, expr) => {
     const prevVal = key === 'w' ? dd.w : dd.h;
@@ -807,28 +819,48 @@ function EditableRectDims({ cSel, dd, params, screen, updateScene, commitExpr, r
     if (commitExpr) commitExpr(expr, Number.isFinite(prevVal) ? String(prevVal) : '1', 'µm', `Auto-created (${cSel.id}.${key})`);
   };
 
-  // One editable subfield = an SVG box (fill + non-scaling-stroke outline, so
-  // the outline is a constant device-pixel width at EVERY zoom) with a
-  // transparent <foreignObject> <input> on top. Caller lays them out left to
-  // right starting at boxX0.
-  const renderField = (sf, boxX, boxY) => (
-    <g key={sf.fid}>
-      <rect
-        x={boxX} y={boxY} width={sf.w} height={fieldH} rx={screen(3)}
-        fill="rgba(15,23,42,0.96)" stroke={sf.color}
-        strokeWidth={focused === sf.fid ? 1.7 : 1.2}
-        vectorEffect="non-scaling-stroke"
-      />
-      <foreignObject x={boxX} y={boxY} width={sf.w} height={fieldH} style={{ overflow: 'visible' }}>
-        <div xmlns="http://www.w3.org/1999/xhtml" style={{ width: '100%', height: '100%', pointerEvents: 'none' }}>
-          <CanvasDimInput
-            key={sf.initial} initial={sf.initial} fontPx={fontPx} color={sf.color} title={sf.title}
-            onFocus={() => setFocused(sf.fid)} onBlur={() => setFocused(f => (f === sf.fid ? null : f))}
-            onCommit={sf.onCommit} />
-        </div>
-      </foreignObject>
-    </g>
-  );
+  // One field = an SVG box (fill + non-scaling-stroke outline → constant
+  // device-pixel border at EVERY zoom). When NOT editing it shows an SVG
+  // <text> label (scales with the box); clicking it starts editing. When
+  // editing it shows a transparent HTML <input> for typing. Caller lays fields
+  // out left to right.
+  const renderField = (sf, boxX, boxY) => {
+    const isEditing = editing === sf.fid;
+    const start = () => setEditing(sf.fid);
+    return (
+      <g key={sf.fid}>
+        <rect
+          x={boxX} y={boxY} width={sf.w} height={fieldH} rx={screen(3)}
+          fill="rgba(15,23,42,0.96)" stroke={sf.color}
+          strokeWidth={isEditing ? 1.7 : 1.2}
+          vectorEffect="non-scaling-stroke"
+          style={{ cursor: 'text' }}
+          onMouseDown={(e) => { e.stopPropagation(); start(); }}
+        >
+          <title>{sf.title}</title>
+        </rect>
+        {isEditing ? (
+          <foreignObject x={boxX} y={boxY} width={sf.w} height={fieldH} style={{ overflow: 'visible' }}>
+            <div xmlns="http://www.w3.org/1999/xhtml" style={{ width: '100%', height: '100%', pointerEvents: 'none' }}>
+              <CanvasDimInput
+                initial={sf.initial} fontPx={fontPx} color={sf.color} title={sf.title}
+                onCommit={sf.onCommit} onDone={() => setEditing(f => (f === sf.fid ? null : f))} />
+            </div>
+          </foreignObject>
+        ) : (
+          <text
+            x={boxX + sf.w / 2} y={boxY + fieldH / 2}
+            fontSize={fontPx} fontFamily="monospace" fill={sf.color}
+            textAnchor="middle" dominantBaseline="central"
+            style={{ cursor: 'text', userSelect: 'none' }}
+            onMouseDown={(e) => { e.stopPropagation(); start(); }}
+          >
+            {fitLabel(sf.initial, sf.w)}
+          </text>
+        )}
+      </g>
+    );
+  };
 
   const renderDim = (key, p1, p2, outwardN, value) => {
     const ox = outwardN.x * offsetDist, oy = outwardN.y * offsetDist;
@@ -850,27 +882,27 @@ function EditableRectDims({ cSel, dd, params, screen, updateScene, commitExpr, r
     const trimmed = expr.trim();
     const isRef = LONE.test(trimmed) && !!params[trimmed];
 
-    // Build the subfields (each grows when focused).
+    // Build the subfields (the one being edited grows to reveal long text).
     let subfields;
     if (isRef) {
       const pExpr = String(params[trimmed].expr ?? '');
       const nameId = `${key}-name`, valId = `${key}-value`;
       subfields = [
         {
-          fid: nameId, w: focused === nameId ? grownName : baseName, color: AMBER, initial: trimmed,
-          title: 'Variable name — rename scene-wide',
+          fid: nameId, w: editing === nameId ? grownName : baseName, color: AMBER, initial: trimmed,
+          title: 'Variable name — click to rename scene-wide',
           onCommit: (v) => renameParam && renameParam(trimmed, v),
         },
         {
-          fid: valId, w: focused === valId ? grownValue : baseValue, color: ACCENT, initial: pExpr,
-          title: `Value of ${trimmed} (= ${Number.isFinite(value) ? value.toFixed(3) : '?'} µm)`,
+          fid: valId, w: editing === valId ? grownValue : baseValue, color: ACCENT, initial: pExpr,
+          title: `Value of ${trimmed} (= ${Number.isFinite(value) ? value.toFixed(3) : '?'} µm) — click to edit`,
           onCommit: (v) => { if (updateParamExpr) updateParamExpr(trimmed, v); if (commitExpr) commitExpr(v, '1', 'µm', `Auto-created (${trimmed})`, trimmed); },
         },
       ];
     } else {
       const exprId = `${key}-expr`;
       subfields = [{
-        fid: exprId, w: focused === exprId ? grownExpr : baseExpr, color: ACCENT, initial: expr,
+        fid: exprId, w: editing === exprId ? grownExpr : baseExpr, color: ACCENT, initial: expr,
         title: `${key} = ${Number.isFinite(value) ? value.toFixed(3) : '?'} µm — edit expression`,
         onCommit: (v) => setCompDim(key, v),
       }];
