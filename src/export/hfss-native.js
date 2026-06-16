@@ -34,9 +34,14 @@ import {
 //   1. collapse consecutive points closer than `eps`, and
 //   2. drop any trailing point(s) coincident (within `eps`) with the first
 //      (the implicit-closure near-duplicate),
-// leaving N DISTINCT vertices. The caller then emits N points + (N-1) Line
-// segments + IsPolylineClosed=True, so the implicit closing edge P(N-1)->P0
-// is a real, non-degenerate edge.
+// leaving N DISTINCT vertices. The caller then appends a repeat of the first
+// vertex (N+1 points) and emits one Line segment per edge INCLUDING the
+// closing edge (N segments) with IsPolylineClosed=True. The explicit closing
+// segment makes wire-body extraction robust (relying on HFSS auto-close
+// alone — N points, N-1 segments — fails with cant_extract_geom); closed=True
+// is what makes HFSS COVER the loop into a face so the sweep yields a SOLID
+// (with closed=False the IsPolylineCovered flag is ignored and the result is a
+// hollow surface). The closed=True auto-close edge is then zero-length/harmless.
 //
 // eps = 1e-3 µm (1 nm): far below any meaningful RF/photonic feature size
 // (µm-scale) yet comfortably above the sub-nm numerical closure gap.
@@ -1824,11 +1829,15 @@ except Exception as e:
             // covered closed polyline fills either orientation.
             const name = sheetNames.length === 0 ? id : `${id}_tseg${sheetNames.length}`;
             sheetNames.push(name);
-            // Explicit closure (IsPolylineClosed=False below): 4 corners + a
-            // repeat of the first + one Line segment per edge incl. the
-            // closing edge. We avoid IsPolylineClosed=True — HFSS's auto-close
-            // is unreliable for covered polylines and fails with
-            // "cant_extract_geom".
+            // Covered closed polyline -> swept to a SOLID. 4 corners + a repeat
+            // of the first (5 points) + one Line segment per edge incl. the
+            // closing edge (4 segments). IsPolylineClosed=True is REQUIRED:
+            // HFSS only honors IsPolylineCovered (fills the face) on a CLOSED
+            // polyline, so closed=False would leave it uncovered and the sweep
+            // would produce a hollow surface, not a volume. The explicit
+            // closing segment keeps wire extraction robust (auto-close alone
+            // fails with cant_extract_geom); the auto-close edge is then
+            // zero-length/harmless.
             const pts = [...corners4, corners4[0]].map(p =>
               `["NAME:PLPoint", "X:=", "${p.x}", "Y:=", "${p.y}", "Z:=", "${zBottomExpr}"]`
             ).join(',\n          ');
@@ -1841,7 +1850,7 @@ except Exception as e:
     oEditor.CreatePolyline(
         ["NAME:PolylineParameters",
          "IsPolylineCovered:=", True,
-         "IsPolylineClosed:=", False,
+         "IsPolylineClosed:=", True,
          ["NAME:PolylinePoints",
           ${pts}],
          ["NAME:PolylineSegments",
@@ -2099,12 +2108,14 @@ except Exception as e:
           // the contour EXPLICITLY with a straight Line back to the FIRST
           // point (the base anchor when vertex 0 is an arc), matching the
           // canvas's straight ring closure. We append a repeat of the first
-          // point + a closing Line segment and set IsPolylineClosed=False
-          // below. We deliberately do NOT use IsPolylineClosed=True: HFSS's
-          // auto-close is unreliable for covered/swept polylines (it fails
-          // with "PK_CURVE_make_wire_body_2 ... cant_extract_geom"), and
-          // combining it with an explicit closing point would add a redundant
-          // ZERO-length edge.
+          // point + a closing Line segment. IsPolylineClosed is then set to
+          // polyClosed below: when the contour is closed it MUST be True so
+          // HFSS COVERS the loop into a face (a covered polyshape -> filled
+          // sheet/solid; with closed=False the IsPolylineCovered flag is
+          // ignored and the result is a hollow surface). The explicit closing
+          // segment keeps wire extraction robust (relying on auto-close alone
+          // fails with cant_extract_geom); the auto-close edge is then
+          // zero-length/harmless.
           if (polyClosed) {
             ptRecords.push(ptRecords[0]);
             segRecords.push(lineSegRec(prevPtIdx));
@@ -2155,7 +2166,7 @@ except Exception as e:
     oEditor.CreatePolyline(
         ["NAME:PolylineParameters",
          "IsPolylineCovered:=", True,
-         "IsPolylineClosed:=", False,
+         "IsPolylineClosed:=", ${polyClosed ? 'True' : 'False'},
          ["NAME:PolylinePoints",
           ${ptList}],
          ["NAME:PolylineSegments",
@@ -2383,14 +2394,18 @@ except Exception as e:
       // is tessellated at export time — see the racetrack note); Z uses
       // the parametric layer-stack expression so vertical sweeps work.
       //
-      // EXPLICIT closure (IsPolylineClosed=False): we DROP near-coincident
+      // Covered closed loop -> swept to a SOLID. We DROP near-coincident
       // vertices first (a tessellated racetrack loop comes back implicitly
       // closed, its last sample ~0.2 nm from the first — without dedup the
       // closing edge would be a sub-nm zero-length segment HFSS rejects),
       // then APPEND a repeat of the first vertex and emit one Line segment
-      // per edge INCLUDING the closing edge (last -> repeated first). We do
-      // NOT use IsPolylineClosed=True: HFSS's auto-close is unreliable for
-      // covered+swept polylines and fails with "cant_extract_geom".
+      // per edge INCLUDING the closing edge (last -> repeated first).
+      // IsPolylineClosed=True is REQUIRED: HFSS only honors IsPolylineCovered
+      // (fills the face) on a CLOSED polyline, so closed=False would leave it
+      // uncovered and the sweep would yield a hollow surface, not a volume.
+      // The explicit closing segment keeps wire extraction robust (auto-close
+      // alone fails with cant_extract_geom); the auto-close edge is then
+      // zero-length/harmless.
       const ringHfss = dedupeRingForHfss(ring);
       const ringClosed = ringHfss.length > 0 ? [...ringHfss, ringHfss[0]] : ringHfss;
       const ptRecords = ringClosed.map(([px, py]) =>
@@ -2410,7 +2425,7 @@ except Exception as e:
     oEditor.CreatePolyline(
         ["NAME:PolylineParameters",
          "IsPolylineCovered:=", True,
-         "IsPolylineClosed:=", False,
+         "IsPolylineClosed:=", True,
          ["NAME:PolylinePoints", ${ptRecords}],
          ["NAME:PolylineSegments", ${segRecords}],
          ["NAME:PolylineXSection",
@@ -2466,7 +2481,8 @@ except Exception as e:
         const innerId = `${id}_hole`;
         // Same explicit-closure form as the outer perimeter: dedupe the
         // near-coincident closure vertex, append a repeat of the first, emit
-        // one Line segment per edge (incl. the closing edge), closed=False.
+        // one Line segment per edge (incl. the closing edge), closed=True (so
+        // HFSS covers the hole into a face that subtracts a SOLID).
         const innerHfss = dedupeRingForHfss(innerPts);
         const innerClosed = innerHfss.length > 0 ? [...innerHfss, innerHfss[0]] : innerHfss;
         const innerPtRecords = innerClosed.map(([px, py]) =>
@@ -2481,7 +2497,7 @@ except Exception as e:
     oEditor.CreatePolyline(
         ["NAME:PolylineParameters",
          "IsPolylineCovered:=", True,
-         "IsPolylineClosed:=", False,
+         "IsPolylineClosed:=", True,
          ["NAME:PolylinePoints", ${innerPtRecords}],
          ["NAME:PolylineSegments", ${innerSegRecords}],
          ["NAME:PolylineXSection",
@@ -2664,18 +2680,19 @@ except Exception as e:
       code += `# 4 Line edges + 4 AngularArc 90deg corners, all coordinates parametric.\n`;
       code += `# NOTE: cornerRadius is not clamped in HFSS; keep r <= min(w,h)/2\n`;
       // The loop is closed EXPLICITLY: the last point (index 12) repeats the
-      // first and the final SE corner arc ends on it, so the segments already
-      // form a closed contour. IsPolylineClosed MUST therefore be False — the
-      // closing edge here is an ARC, so we cannot let HFSS auto-close (it only
-      // adds a straight edge), and combining the explicit closure with
-      // IsPolylineClosed=True would add a redundant ZERO-length edge that
-      // Parasolid rejects. IsPolylineCovered=True still fills the contour.
+      // first and the final SE corner arc ends on it, so the explicit segments
+      // already form a closed contour (the closing edge is the ARC, not a
+      // straight chord). IsPolylineClosed=True is REQUIRED so HFSS COVERS the
+      // contour into a face -> a SOLID after sweep (closed=False leaves
+      // IsPolylineCovered ignored and yields a hollow surface). Because point
+      // 12 == point 0, HFSS's auto-close straight edge is zero-length/harmless
+      // and does NOT replace the arc closure.
       code += `try:
     _delete_geom_if_exists("${id}")
     oEditor.CreatePolyline(
         ["NAME:PolylineParameters",
          "IsPolylineCovered:=", True,
-         "IsPolylineClosed:=", False,
+         "IsPolylineClosed:=", True,
          ["NAME:PolylinePoints",
           ${ptListRR}],
          ["NAME:PolylineSegments",
@@ -2874,16 +2891,17 @@ except Exception as e:
       const sweepVyExpr = (axis === 'y') ? hExprUm : `(0)um`;
       const sweepVzExpr = `(0)um`;
 
-      // Explicit closure (NOT IsPolylineClosed=True). The rib cross-section
-      // lives in the X=const (Y-Z) plane and is covered + swept. HFSS's
-      // auto-close (IsPolylineClosed=True) is unreliable for this case — it
-      // fails with "PK_CURVE_make_wire_body_2 ... cant_extract_geom" whether
-      // we feed it N points (auto-close adds a bad edge) or N+1 points (the
-      // auto-close edge is then redundant/zero-length). So we close the loop
-      // OURSELVES: append a repeat of the first point, emit one Line segment
-      // per edge INCLUDING the closing edge (last vertex -> repeated first),
-      // and set IsPolylineClosed=False. IsPolylineCovered=True still fills the
-      // geometrically-closed contour.
+      // The rib cross-section lives in the X=const (Y-Z) plane and must be
+      // COVERED (filled into a face) so the SweepAlongVector produces a SOLID
+      // ridge, not a hollow surface. HFSS only honors IsPolylineCovered on a
+      // CLOSED polyline, so IsPolylineClosed=True is REQUIRED (closed=False
+      // emits the ridge as a swept surface — the bug this fixes). We ALSO
+      // close the loop explicitly: append a repeat of the first point and emit
+      // one Line segment per edge INCLUDING the closing edge (last vertex ->
+      // repeated first). The explicit closing segment is what makes wire-body
+      // extraction robust — relying on auto-close alone (N points, N-1
+      // segments) fails with "PK_CURVE_make_wire_body_2 ... cant_extract_geom".
+      // With both, the closed=True auto-close edge is zero-length/harmless.
       const ptExprsClosed = [...ptExprs, ptExprs[0]];
       const ptList = ptExprsClosed.map(p =>
         `["NAME:PLPoint", "X:=", "${p.x}", "Y:=", "${p.y}", "Z:=", "${p.z}"]`
@@ -2898,7 +2916,7 @@ except Exception as e:
     oEditor.CreatePolyline(
         ["NAME:PolylineParameters",
          "IsPolylineCovered:=", True,
-         "IsPolylineClosed:=", False,
+         "IsPolylineClosed:=", True,
          ["NAME:PolylinePoints",
           ${ptList}],
          ["NAME:PolylineSegments",

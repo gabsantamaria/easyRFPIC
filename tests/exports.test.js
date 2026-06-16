@@ -214,7 +214,14 @@ describe('CreatePolyline segment indices stay in range (racetrack HFSS-reject re
       const pts = [...block.matchAll(/"X:=",\s*"([-\d.]+)um",\s*"Y:=",\s*"([-\d.]+)um"/g)].map((m) => [Number(m[1]), Number(m[2])]);
       if (pts.length < 2) continue;
       for (let k = 1; k < pts.length; k++) dmin = Math.min(dmin, Math.hypot(pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1]));
-      if (closed) dmin = Math.min(dmin, Math.hypot(pts[pts.length - 1][0] - pts[0][0], pts[pts.length - 1][1] - pts[0][1]));
+      // The closing edge is now an EXPLICIT segment (last point repeats the
+      // first), so it's already measured in the loop above. With closed=True
+      // HFSS adds a redundant auto-close from last->first which, because they
+      // coincide, is zero-length and harmless — do NOT count it here.
+      if (closed) {
+        const dClose = Math.hypot(pts[pts.length - 1][0] - pts[0][0], pts[pts.length - 1][1] - pts[0][1]);
+        if (dClose > 1e-9) dmin = Math.min(dmin, dClose);
+      }
     }
     return dmin;
   }
@@ -244,7 +251,9 @@ describe('CreatePolyline segment indices stay in range (racetrack HFSS-reject re
     // The actual HFSS-reject cause: a sub-nm closing edge. Every edge
     // (including the implicit close) must be a real, non-degenerate length.
     expect(minSegmentLength(code)).toBeGreaterThan(1e-3);
-    // Canonical closed form: N distinct points, N-1 Line segments.
+    // Explicit-closure covered form: N distinct verts + a repeat of the first
+    // (pts), one Line segment per edge incl. the closing edge (pts-1 = N
+    // segments), and IsPolylineClosed=True so HFSS covers it into a face.
     const rtBlock = code.slice(code.indexOf('racetrack as polygonal sheet'));
     const call = rtBlock.slice(rtBlock.indexOf('oEditor.CreatePolyline('));
     const params = call.slice(0, call.indexOf('["NAME:Attributes"'));
@@ -252,6 +261,7 @@ describe('CreatePolyline segment indices stay in range (racetrack HFSS-reject re
     const segs = (params.match(/"NAME:PLSegment"/g) || []).length;
     expect(pts).toBeGreaterThan(3);
     expect(segs).toBe(pts - 1);
+    expect(params).toMatch(/"IsPolylineClosed:=",\s*True/);
   });
 
   it('the default scene has no out-of-range polyline segments either', () => {
@@ -259,26 +269,39 @@ describe('CreatePolyline segment indices stay in range (racetrack HFSS-reject re
   });
 });
 
-describe('closed polylines use explicit closure, not IsPolylineClosed=True (Parasolid regression)', () => {
-  // HFSS's auto-close (IsPolylineClosed=True) is unreliable for covered /
-  // swept polylines — it fails with "PK_CURVE_make_wire_body_2 ...
-  // cant_extract_geom" / "invalid parameters to CreatePolyline" (this killed
-  // the straight-waveguide rib wg2_wg_rib). Every covered closed polyline
-  // must instead close EXPLICITLY: append a repeat of the first point, emit
-  // a Line segment per edge incl. the closing one, and set
-  // IsPolylineClosed=False. Invariants checked: (a) no polyline sets
-  // IsPolylineClosed=True while its first PLPoint equals its last (the
-  // redundant zero-length close); (b) no polyline relies on auto-close —
-  // i.e. none uses IsPolylineClosed=True at all in the geometry paths.
-  function badClosedPolylines(code) {
+describe('covered polylines are CLOSED + explicitly closed (surface-not-solid + cant_extract_geom regression)', () => {
+  // Two failure modes this guards against, both hit on real designs:
+  //  (1) SURFACE-not-solid (ridge-waveguide bug): a covered FILL (XSectionType
+  //      None) emitted with IsPolylineClosed=False. HFSS only honors
+  //      IsPolylineCovered on a CLOSED polyline, so closed=False leaves it
+  //      uncovered and the SweepAlongVector yields a hollow surface, not a
+  //      volume.
+  //  (2) cant_extract_geom: a covered+swept polyline that relies on HFSS
+  //      auto-close (no explicit closing segment) fails wire-body extraction
+  //      (this killed the straight-waveguide rib wg2_wg_rib).
+  // Correct form: explicit closure (first PLPoint == last PLPoint, N+1 points,
+  // N segments) AND IsPolylineClosed=True. The auto-close edge is then a
+  // harmless zero-length edge. XSection-swept TRACES (Rectangle/Line) are NOT
+  // covered fills and may legitimately stay open, so they are excluded.
+  function surfaceNotSolid(code) {
     const calls = code.split('oEditor.CreatePolyline(').slice(1);
     const bad = [];
     calls.forEach((call) => {
       const block = call.slice(0, call.indexOf('["NAME:Attributes"'));
       if (!block.includes('PLPoint')) return;
-      if (/"IsPolylineClosed:=",\s*True/.test(block)) {
-        bad.push((call.match(/Name:=",\s*"([^"]+)"/) || [])[1] || '?');
-      }
+      const covered = /"IsPolylineCovered:=",\s*True/.test(block);
+      const isFill = /"XSectionType:=",\s*"None"/.test(block); // no XSection sweep
+      if (!covered || !isFill) return;
+      const closed = /"IsPolylineClosed:=",\s*True/.test(block);
+      const pts = [...block.matchAll(/"X:=",\s*"([^"]+)",\s*"Y:=",\s*"([^"]+)",\s*"Z:=",\s*"([^"]+)"/g)].map((m) => m.slice(1).join('|'));
+      const explicitlyClosed = pts.length >= 2 && pts[0] === pts[pts.length - 1];
+      const name = (call.match(/Name:=",\s*"([^"]+)"/) || [])[1] || '?';
+      // A covered fill that is geometrically closed (first==last) MUST set
+      // closed=True, or HFSS won't fill the face -> surface, not solid.
+      if (explicitlyClosed && !closed) bad.push(name + ':closed-contour-not-covered');
+      // A covered CLOSED fill MUST close explicitly (first==last), or auto-
+      // close-only fails wire extraction (cant_extract_geom).
+      if (closed && !explicitlyClosed) bad.push(name + ':no-explicit-closing-segment');
     });
     return bad;
   }
@@ -292,22 +315,23 @@ describe('closed polylines use explicit closure, not IsPolylineClosed=True (Para
     return s;
   }
 
-  it('straight-waveguide rib closes explicitly (5 points, 4 segments, closed=False)', () => {
+  it('straight-waveguide rib is a covered, closed, explicitly-closed SOLID (5 pts, 4 segs)', () => {
     const s = straightWgScene();
     const code = generateHfssNative(s, resolveParams(s.params).values);
-    expect(badClosedPolylines(code)).toEqual([]);
+    expect(surfaceNotSolid(code)).toEqual([]);
     const block = code.slice(code.indexOf('wg_rib_xsec'));
     const call = block.slice(0, block.indexOf('["NAME:Attributes"'));
     // 4 distinct corners + a closing repeat of the first = 5 points, 4 segs.
     expect((call.match(/"NAME:PLPoint"/g) || []).length).toBe(5);
     expect((call.match(/"NAME:PLSegment"/g) || []).length).toBe(4);
-    expect(call).toMatch(/"IsPolylineClosed:=",\s*False/);
+    expect(call).toMatch(/"IsPolylineCovered:=",\s*True/);
+    expect(call).toMatch(/"IsPolylineClosed:=",\s*True/); // REQUIRED to cover -> solid
     // First and last points coincide (explicit closure).
     const pts = [...call.matchAll(/"X:=",\s*"([^"]+)",\s*"Y:=",\s*"([^"]+)",\s*"Z:=",\s*"([^"]+)"/g)].map((m) => m.slice(1).join('|'));
     expect(pts[0]).toBe(pts[pts.length - 1]);
   });
 
-  it('tapered polyline, rounded rect, and polyshape close explicitly (no auto-close)', () => {
+  it('tapered polyline, rounded rect, and polyshape are covered closed solids (no surfaces)', () => {
     // tapered polyline (per-segment quad sheets)
     const taper = makeBlankScene();
     taper.components.push({
@@ -315,12 +339,12 @@ describe('closed polylines use explicit closure, not IsPolylineClosed=True (Para
       vertices: [{ kind: 'rel', dx: '0', dy: '0', width: '4' }, { kind: 'rel', dx: '60', dy: '0', width: '12' }],
       cutouts: [], transforms: [],
     });
-    expect(badClosedPolylines(generateHfssNative(taper, resolveParams(taper.params).values))).toEqual([]);
+    expect(surfaceNotSolid(generateHfssNative(taper, resolveParams(taper.params).values))).toEqual([]);
 
     // rounded rect (arc-closed contour)
     const rr = makeBlankScene();
     rr.components.push({ id: 'rr', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: '40', h: '30', cornerRadius: '5', cutouts: [], transforms: [] });
-    expect(badClosedPolylines(generateHfssNative(rr, resolveParams(rr.params).values))).toEqual([]);
+    expect(surfaceNotSolid(generateHfssNative(rr, resolveParams(rr.params).values))).toEqual([]);
 
     // polyshape (covered closed polygon)
     const ps = makeBlankScene();
@@ -329,7 +353,17 @@ describe('closed polylines use explicit closure, not IsPolylineClosed=True (Para
       vertices: [{ kind: 'rel', dx: '0', dy: '0' }, { kind: 'rel', dx: '20', dy: '0' }, { kind: 'rel', dx: '0', dy: '15' }, { kind: 'rel', dx: '-20', dy: '0' }],
       cutouts: [], transforms: [],
     });
-    expect(badClosedPolylines(generateHfssNative(ps, resolveParams(ps.params).values))).toEqual([]);
+    expect(surfaceNotSolid(generateHfssNative(ps, resolveParams(ps.params).values))).toEqual([]);
+
+    // racetrack (outer perimeter + inner hole, both covered closed fills)
+    const rt = makeBlankScene();
+    rt.params = { ...rt.params, rt_R: { expr: '21.65', unit: 'um', desc: '' }, rt_L: { expr: '216.9', unit: 'um', desc: '' } };
+    rt.components.push({
+      id: 'rt', kind: 'racetrack', layer: 'waveguide', cx: 0, cy: 0,
+      R: 'rt_R', L_straight: 'rt_L', p: '1', wgWidth: 'w_wg',
+      w: 'rt_L + 2*rt_R + w_wg', h: '2*rt_R + w_wg', cutouts: [], transforms: [],
+    });
+    expect(surfaceNotSolid(generateHfssNative(rt, resolveParams(rt.params).values))).toEqual([]);
   });
 });
 
@@ -1012,10 +1046,12 @@ describe('curved paths + tapers — exporters', () => {
     const { values: pv } = resolveParams(s.params);
     const out = generateHfssNative(s, pv);
     expect(out).toContain('"SegmentType:=", "AngularArc"');
-    // Closed contour is built with EXPLICIT closure (closing-repeat point +
-    // full segment list), NOT HFSS auto-close — IsPolylineClosed=False. HFSS's
-    // auto-close is unreliable for covered/swept polylines (cant_extract_geom).
-    expect(out).toContain('"IsPolylineClosed:=", False');
+    // Closed contour: EXPLICIT closure (closing-repeat point + full segment
+    // list) AND IsPolylineClosed=True so HFSS COVERS the polyshape into a face
+    // (closed=False would leave it uncovered -> a hollow surface, not a solid).
+    // The explicit closing segment keeps wire extraction robust; the auto-close
+    // edge is zero-length/harmless.
+    expect(out).toContain('"IsPolylineClosed:=", True');
     pyParses2(out, 'vitest_hfss_polyshape_arc');
   });
 
