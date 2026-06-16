@@ -753,7 +753,10 @@ function CanvasDimInput({ initial, fontPx, widthPx, color, title, onCommit }) {
         padding: `${fontPx * 0.18}px ${fontPx * 0.35}px`,
         background: 'rgba(15,23,42,0.96)',
         color,
-        border: `1px solid ${color}`,
+        // Border width is SCREEN-relative (fontPx is already screen-sized).
+        // A fixed "1px" here means 1 SVG user unit, which balloons when the
+        // user zooms in until it covers the text — keep it proportional.
+        border: `${Math.max(0.5, fontPx * 0.1)}px solid ${color}`,
         borderRadius: `${fontPx * 0.28}px`,
         outline: 'none',
         boxSizing: 'border-box',
@@ -4596,6 +4599,17 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                 onCommit={(v) => setCompDim(key, v)} />
             );
           }
+          // Place the editable field fully OUTSIDE the dimension line so it
+          // never covers the line or arrowheads (a fixed-screen-size field is
+          // easily wider/taller than a short or zoomed-in dim line). Push along
+          // the outward normal by the field's half-extent IN THAT DIRECTION —
+          // field height for a horizontal dim line, field width for a vertical
+          // one — plus a small gap. A thin leader stub keeps the association.
+          const halfOut = Math.abs(outwardN.y) > 0.5 ? fieldH / 2 : fw / 2;
+          const labelGap = screen(7);
+          const labelCx = midX + outwardN.x * (halfOut + labelGap);
+          const labelCy = midY + outwardN.y * (halfOut + labelGap);
+          const leadEnd = { x: midX + outwardN.x * labelGap, y: midY + outwardN.y * labelGap };
           return (
             <g key={`editdim-${key}`}>
               <line x1={p1.x} y1={-p1.y} x2={ext1.x} y2={-ext1.y} stroke={ACCENT} strokeWidth={extStroke} opacity={0.8} />
@@ -4603,7 +4617,8 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
               <line x1={dimP1.x} y1={-dimP1.y} x2={dimP2.x} y2={-dimP2.y} stroke={ACCENT} strokeWidth={dimStroke} opacity={0.95} />
               <polyline points={arrowAt(dimP1, -1)} fill="none" stroke={ACCENT} strokeWidth={dimStroke} strokeLinecap="round" strokeLinejoin="round" />
               <polyline points={arrowAt(dimP2, 1)} fill="none" stroke={ACCENT} strokeWidth={dimStroke} strokeLinecap="round" strokeLinejoin="round" />
-              <foreignObject x={midX - fw / 2} y={-midY - fieldH / 2} width={fw} height={fieldH} style={{ overflow: 'visible' }}>
+              <line x1={midX} y1={-midY} x2={leadEnd.x} y2={-leadEnd.y} stroke={ACCENT} strokeWidth={extStroke} opacity={0.55} />
+              <foreignObject x={labelCx - fw / 2} y={-labelCy - fieldH / 2} width={fw} height={fieldH} style={{ overflow: 'visible' }}>
                 <div xmlns="http://www.w3.org/1999/xhtml" style={{ display: 'flex', gap: `${gapW}px`, alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%', pointerEvents: 'none' }}>
                   {fields}
                 </div>
