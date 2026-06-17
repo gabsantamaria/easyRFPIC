@@ -742,6 +742,7 @@ function CanvasDimInput({ initial, fontPx, color, title, onCommit, onDone }) {
       title={title}
       spellCheck={false}
       onMouseDown={(e) => e.stopPropagation()}
+      onMouseUp={(e) => e.stopPropagation()}
       onClick={(e) => e.stopPropagation()}
       onDoubleClick={(e) => e.stopPropagation()}
       onFocus={(e) => e.currentTarget.select()}
@@ -826,16 +827,25 @@ function EditableRectDims({ cSel, dd, params, screen, updateScene, commitExpr, r
   // out left to right.
   const renderField = (sf, boxX, boxY) => {
     const isEditing = editing === sf.fid;
-    const start = () => setEditing(sf.fid);
+    // ALL pointer events on the field are isolated from the canvas: otherwise
+    // the trailing mouseup/click (the field sits OUTSIDE the rect) bubbles to
+    // the canvas, deselects the component, and unmounts this whole overlay the
+    // instant you release the mouse — so the field looks un-editable. mousedown
+    // enters edit mode (when not already editing).
     return (
-      <g key={sf.fid}>
+      <g
+        key={sf.fid}
+        onMouseDown={(e) => { e.stopPropagation(); if (!isEditing) setEditing(sf.fid); }}
+        onMouseUp={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => e.stopPropagation()}
+      >
         <rect
           x={boxX} y={boxY} width={sf.w} height={fieldH} rx={screen(3)}
           fill="rgba(15,23,42,0.96)" stroke={sf.color}
           strokeWidth={isEditing ? 1.7 : 1.2}
           vectorEffect="non-scaling-stroke"
           style={{ cursor: 'text' }}
-          onMouseDown={(e) => { e.stopPropagation(); start(); }}
         >
           <title>{sf.title}</title>
         </rect>
@@ -853,7 +863,6 @@ function EditableRectDims({ cSel, dd, params, screen, updateScene, commitExpr, r
             fontSize={fontPx} fontFamily="monospace" fill={sf.color}
             textAnchor="middle" dominantBaseline="central"
             style={{ cursor: 'text', userSelect: 'none' }}
-            onMouseDown={(e) => { e.stopPropagation(); start(); }}
           >
             {fitLabel(sf.initial, sf.w)}
           </text>
