@@ -885,10 +885,12 @@ function EditableDimsOverlay({ svgRef, viewport, cSel, dd, params, updateScene, 
 
 // Editable per-segment Δx/Δy overlay for the primary-selected polyline /
 // polyshape (open or closed). For every vertex PAIR whose later vertex is a
-// `rel` step, shows the step's Δx and Δy as editable fields at the segment
-// midpoint (offset to the side so they clear the segment line + vertex
-// handles). Editing a field rewrites that vertex's dx/dy expression (auto-
-// creating any referenced params) — the standard-CAD relative-coordinate edit.
+// `rel` step, draws the right-triangle decomposition of the segment — a
+// horizontal Δx dimension arrow (the run) and a vertical Δy dimension arrow
+// (the rise), the segment itself being the hypotenuse — with the step's Δx and
+// Δy shown as editable fields on their respective legs. Editing a field
+// rewrites that vertex's dx/dy expression (auto-creating any referenced
+// params) — the standard-CAD relative-coordinate edit.
 // Like EditableDimsOverlay these are REAL DOM inputs in a screen-space portal,
 // so they are always editable and a constant size at every zoom. `verts` is the
 // resolved world point per vertex spec (resolvePolylineVertices), computed by
@@ -927,38 +929,65 @@ function EditablePolyDims({ svgRef, viewport, cSel, verts, updateScene, commitEx
     }));
   };
 
-  const groups = [];
+  // Outward arrowhead "V" at tip `t` pointing along unit dir (ux, uy), in px.
+  const AH = 4.5;
+  const head = (t, ux, uy) => {
+    const pnx = -uy, pny = ux;
+    const bx = t.x - ux * AH * 1.7, by = t.y - uy * AH * 1.7;
+    return `${bx + pnx * AH},${by + pny * AH} ${t.x},${t.y} ${bx - pnx * AH},${by - pny * AH}`;
+  };
+  const field = (i, axis, expr, pos) => (
+    <div key={`g${axis}-${i}`} style={{ position: 'absolute', left: pos.x, top: pos.y, transform: 'translate(-50%,-50%)', display: 'flex', gap: '3px', alignItems: 'center', pointerEvents: 'auto', whiteSpace: 'nowrap' }}>
+      <span style={tagStyle}>{axis === 'x' ? 'Δx' : 'Δy'}</span>
+      <DimEditField initial={expr} color={ACCENT} baseW={54} growW={128}
+        title={`vertex ${i} step Δ${axis} — edit`}
+        onCommit={(val) => { updateVertex(i, { [axis === 'x' ? 'dx' : 'dy']: val }); if (commitExpr) commitExpr(val, '0', 'µm', `Auto-created (${cSel.id}.v${i}.d${axis})`); }} />
+    </div>
+  );
+
+  const arrows = []; // SVG dimension lines + arrowheads (screen px)
+  const groups = []; // HTML editable Δx / Δy field groups
   for (let i = 1; i < specs.length; i++) {
     const v = specs[i];
     if (!v || (v.kind && v.kind !== 'rel')) continue; // only rel steps carry dx/dy
     const a = verts[i - 1], b = verts[i];
     if (!a || !b || !a.every(Number.isFinite) || !b.every(Number.isFinite)) continue;
+    // Right-triangle decomposition of the segment: run A->C (Δx) then rise
+    // C->B (Δy); the segment A->B (drawn by the polyline) is the hypotenuse.
     const A = px(a[0], a[1]), B = px(b[0], b[1]);
-    const mid = { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 };
-    // Offset the field group to the side of the segment so it doesn't sit on
-    // the line / vertex handles.
-    let nx = -(B.y - A.y), ny = (B.x - A.x);
-    const nlen = Math.hypot(nx, ny) || 1;
-    nx /= nlen; ny /= nlen;
-    const OFF = 22;
-    const cx = mid.x + nx * OFF, cy = mid.y + ny * OFF;
+    const C = { x: B.x, y: A.y };
+    const sx = C.x >= A.x ? 1 : -1; // run direction (screen x)
+    const sy = B.y >= C.y ? 1 : -1; // rise direction (screen y-down)
     const dxExpr = String(v.dx ?? '0'), dyExpr = String(v.dy ?? '0');
-    groups.push(
-      <div key={`seg-${i}`} style={{ position: 'absolute', left: cx, top: cy, transform: 'translate(-50%,-50%)', display: 'flex', gap: '3px', alignItems: 'center', pointerEvents: 'auto', whiteSpace: 'nowrap' }}>
-        <span style={tagStyle}>Δx</span>
-        <DimEditField initial={dxExpr} color={ACCENT} baseW={54} growW={128}
-          title={`vertex ${i} step Δx — edit`}
-          onCommit={(val) => { updateVertex(i, { dx: val }); if (commitExpr) commitExpr(val, '0', 'µm', `Auto-created (${cSel.id}.v${i}.dx)`); }} />
-        <span style={tagStyle}>Δy</span>
-        <DimEditField initial={dyExpr} color={ACCENT} baseW={54} growW={128}
-          title={`vertex ${i} step Δy — edit`}
-          onCommit={(val) => { updateVertex(i, { dy: val }); if (commitExpr) commitExpr(val, '0', 'µm', `Auto-created (${cSel.id}.v${i}.dy)`); }} />
-      </div>,
-    );
+    if (Math.abs(C.x - A.x) > 7) {
+      arrows.push(
+        <g key={`ax-${i}`}>
+          <line x1={A.x} y1={A.y} x2={C.x} y2={C.y} stroke={ACCENT} strokeWidth={1.2} strokeDasharray="4,3" opacity={0.85} />
+          <polyline points={head(A, -sx, 0)} fill="none" stroke={ACCENT} strokeWidth={1.3} />
+          <polyline points={head(C, sx, 0)} fill="none" stroke={ACCENT} strokeWidth={1.3} />
+        </g>,
+      );
+    }
+    if (Math.abs(B.y - C.y) > 7) {
+      arrows.push(
+        <g key={`ay-${i}`}>
+          <line x1={C.x} y1={C.y} x2={B.x} y2={B.y} stroke={ACCENT} strokeWidth={1.2} strokeDasharray="4,3" opacity={0.85} />
+          <polyline points={head(C, 0, -sy)} fill="none" stroke={ACCENT} strokeWidth={1.3} />
+          <polyline points={head(B, 0, sy)} fill="none" stroke={ACCENT} strokeWidth={1.3} />
+        </g>,
+      );
+    }
+    // Δx field nudged off the horizontal leg (away from the triangle), Δy field
+    // off the vertical leg — so neither covers its arrow.
+    groups.push(field(i, 'x', dxExpr, { x: (A.x + C.x) / 2, y: A.y - sy * 12 }));
+    groups.push(field(i, 'y', dyExpr, { x: C.x + sx * 12, y: (C.y + B.y) / 2 }));
   }
   if (groups.length === 0) return null;
   return createPortal(
-    <div style={{ position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 30 }}>{groups}</div>,
+    <div style={{ position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 30 }}>
+      <svg style={{ position: 'fixed', inset: 0, width: '100vw', height: '100vh', pointerEvents: 'none', overflow: 'visible' }}>{arrows}</svg>
+      {groups}
+    </div>,
     document.body,
   );
 }
