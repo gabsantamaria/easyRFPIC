@@ -11,6 +11,7 @@
 // straight cut-and-import (Stage 4.10 of the planned refactor). All
 // callbacks and view state are passed in as explicit props by App.
 import React, { useState, useRef, useEffect, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { ANCHORS, parseAnchor, anchorLocal, anchorLocalRotated, anchorWorld, compRotationDeg, rotateLocal } from '../../scene/anchors.js';
 import { evalExpr } from '../../scene/params.js';
 import { solveLayout, applyMirrors, resolveBooleanBboxes } from '../../scene/solver.js';
@@ -725,232 +726,160 @@ export function buildBoolOverridesForInstance(b, bInst, bBaseCx, bBaseCy, compBy
   return overrides;
 }
 
-// Inline text <input> for the editable-dimensions overlay, mounted ONLY while a
-// field is being edited (the always-visible label is SVG <text> drawn by the
-// caller, which scales with the SVG box at every zoom — HTML text inside a
-// <foreignObject> does not, because its font-size, like a CSS border there, is
-// in SVG user units that the browser floors and the viewBox then scales up on
-// zoom-in until the text outgrows the box). Transparent + borderless: the box
-// fill/outline is the caller's SVG <rect>. autoFocus + select-all so a click on
-// the label drops straight into editing the whole value. onDone fires on blur
-// (after committing) so the caller can return to the SVG-text label.
-function CanvasDimInput({ initial, fontPx, color, title, onCommit, onDone }) {
+// A single always-visible, always-editable dimension field. This is a REAL DOM
+// <input> rendered in a screen-space overlay (portal to document.body), NOT
+// inside the SVG <foreignObject> — so its CSS px are real device pixels: the
+// 1px border and 11px font stay constant at every zoom (no SVG-user-unit
+// floor), and it is directly editable with no click-to-edit swap. Uncontrolled
+// (keyed by `initial`, so a re-solve after commit refreshes it); commits on
+// Enter/blur; grows on focus to reveal long names/expressions.
+function DimEditField({ initial, color, baseW, growW, title, onCommit }) {
+  const [focused, setFocused] = useState(false);
   return (
     <input
-      autoFocus
+      key={initial}
       defaultValue={initial}
       title={title}
       spellCheck={false}
+      onPointerDown={(e) => e.stopPropagation()}
       onMouseDown={(e) => e.stopPropagation()}
-      onMouseUp={(e) => e.stopPropagation()}
       onClick={(e) => e.stopPropagation()}
-      onDoubleClick={(e) => e.stopPropagation()}
-      onFocus={(e) => e.currentTarget.select()}
+      onFocus={(e) => { setFocused(true); e.currentTarget.select(); }}
       onKeyDown={(e) => {
         e.stopPropagation();
         if (e.key === 'Enter') e.currentTarget.blur();
         else if (e.key === 'Escape') { e.currentTarget.value = initial; e.currentTarget.blur(); }
       }}
-      onBlur={(e) => { const v = e.currentTarget.value.trim(); if (v && v !== initial) onCommit(v); if (onDone) onDone(); }}
+      onBlur={(e) => { setFocused(false); const v = e.currentTarget.value.trim(); if (v && v !== initial) onCommit(v); }}
       style={{
-        width: '100%',
-        height: '100%',
+        width: `${focused ? growW : baseW}px`,
+        transition: 'width 90ms ease-out',
         boxSizing: 'border-box',
-        fontSize: `${fontPx}px`,
-        lineHeight: 1.1,
+        fontSize: '11px',
+        lineHeight: 1.3,
         fontFamily: 'monospace',
-        padding: `0 ${fontPx * 0.3}px`,
-        background: 'transparent',
+        padding: '2px 5px',
+        background: 'rgba(15,23,42,0.97)',
         color,
-        border: 'none',
+        border: `1px solid ${color}`,
+        borderRadius: '4px',
         outline: 'none',
         textAlign: 'center',
         pointerEvents: 'auto',
+        boxShadow: '0 1px 3px rgba(0,0,0,0.4)',
       }}
     />
   );
 }
 
-// Editable-dimension overlay for ONE primary-selected rectangle: width (below)
-// and height (right) as cyan dimension arrows, each with click-to-edit
-// field(s). A lone parameter-bound dim (e.g. w = "wg_L") shows a NAME field
-// (renames the param scene-wide) + a VALUE field (edits the param expression);
-// a literal / multi-term dim shows one field editing the component's w/h.
-//
-// Each field's label is SVG <text> inside an SVG <rect> box — BOTH scale with
-// the viewBox identically, so the text stays inside the box at every zoom
-// (HTML text in a <foreignObject> does not — its font-size floors in user
-// units and outgrows a constant-size box on zoom-in). Click a field to edit:
-// an HTML <input> is mounted over it and the box GROWS to reveal long
-// names/expressions; on blur it commits and reverts to the SVG-text label.
-// Mounted with key=comp id, so selecting another rect resets edit state.
-function EditableRectDims({ cSel, dd, params, screen, updateScene, commitExpr, renameParam, updateParamExpr }) {
-  const [editing, setEditing] = useState(null); // 'w-name' | 'w-value' | 'w-expr' | 'h-*' | null
+// Editable-dimension overlay for ONE primary-selected rectangle, rendered as a
+// SCREEN-SPACE HTML layer (portal to document.body), NOT inside the SVG. Why:
+// real DOM <input>s are always editable (no click-to-edit swap, no foreignObject
+// focus quirks), and real CSS pixels stay a constant size at every zoom — a 1px
+// border and 11px font don't get floored to ~1 SVG user unit and scaled up on
+// zoom-in (the bug that made the in-SVG version's box/text balloon and the
+// fields feel un-editable). The width dimension sits below the rect, the height
+// to its right; each shows, for a parameter-bound dim, a NAME field (renames the
+// param scene-wide) + a VALUE field (edits the param expression), or for a
+// literal/multi-term dim a single field editing the component's w/h. Field
+// positions come from the rect's world bbox mapped through the SVG's
+// viewBox + preserveAspectRatio="xMidYMid meet" transform, recomputed on every
+// viewport change / window resize / scroll. Mounted with key=comp id.
+function EditableDimsOverlay({ svgRef, viewport, cSel, dd, params, updateScene, commitExpr, renameParam, updateParamExpr }) {
+  // Reposition on resize/scroll (viewport changes already re-render Canvas).
+  const [, bump] = useState(0);
+  useEffect(() => {
+    const on = () => bump((t) => t + 1);
+    window.addEventListener('resize', on);
+    window.addEventListener('scroll', on, true);
+    return () => { window.removeEventListener('resize', on); window.removeEventListener('scroll', on, true); };
+  }, []);
 
+  const svg = svgRef.current;
+  if (!svg) return null;
+  const r = svg.getBoundingClientRect();
+  const vbX = viewport.x - viewport.w / 2;
+  const vbY = -(viewport.y + viewport.h / 2);
+  const scale = Math.min(r.width / viewport.w, r.height / viewport.h);
+  if (!Number.isFinite(scale) || scale <= 0) return null;
+  const offX = (r.width - viewport.w * scale) / 2;
+  const offY = (r.height - viewport.h * scale) / 2;
+  // world (y-up) -> SVG user (wx,-wy) -> viewport-relative pixel (matches the
+  // browser's viewBox/meet transform exactly, so fields align with the SVG).
+  const px = (wx, wy) => ({ x: r.left + offX + (wx - vbX) * scale, y: r.top + offY + ((-wy) - vbY) * scale });
+
+  const P = params || {};
   const LONE = /^[A-Za-z_][A-Za-z0-9_]*$/;
-  const offsetDist = screen(34);
-  const extOverhang = screen(6);
-  const arrowLen = screen(13);
-  const arrowSpread = screen(4.5);
-  const dimStroke = screen(1.0);
-  const extStroke = screen(0.6);
-  const fontPx = screen(11);
-  const fieldH = screen(20);
-  const charW = fontPx * 0.62;   // monospace glyph advance estimate (user units)
-  const gapW = screen(4);
-  const labelGap = screen(7);
-  const baseName = screen(76), grownName = screen(196);
-  const baseValue = screen(64), grownValue = screen(168);
-  const baseExpr = screen(112), grownExpr = screen(220);
-  const ACCENT = '#22d3ee'; // cyan — interactive
-  const AMBER = '#fbbf24';  // param reference (edits by reference)
-
-  // Truncate a label with an ellipsis so it never spills past its box width.
-  const fitLabel = (text, boxW) => {
-    const maxChars = Math.max(1, Math.floor((boxW - fontPx * 0.7) / charW));
-    return text.length > maxChars ? `${text.slice(0, Math.max(1, maxChars - 1))}…` : text;
-  };
-
-  const setCompDim = (key, expr) => {
-    const prevVal = key === 'w' ? dd.w : dd.h;
-    updateScene(prev => ({
-      ...prev,
-      components: prev.components.map(c => c.id === cSel.id ? { ...c, [key]: expr } : c),
-    }));
-    if (commitExpr) commitExpr(expr, Number.isFinite(prevVal) ? String(prevVal) : '1', 'µm', `Auto-created (${cSel.id}.${key})`);
-  };
-
-  // One field = an SVG box (fill + non-scaling-stroke outline → constant
-  // device-pixel border at EVERY zoom). When NOT editing it shows an SVG
-  // <text> label (scales with the box); clicking it starts editing. When
-  // editing it shows a transparent HTML <input> for typing. Caller lays fields
-  // out left to right.
-  const renderField = (sf, boxX, boxY) => {
-    const isEditing = editing === sf.fid;
-    // ALL pointer events on the field are isolated from the canvas: otherwise
-    // the trailing mouseup/click (the field sits OUTSIDE the rect) bubbles to
-    // the canvas, deselects the component, and unmounts this whole overlay the
-    // instant you release the mouse — so the field looks un-editable. mousedown
-    // enters edit mode (when not already editing).
-    return (
-      <g
-        key={sf.fid}
-        onMouseDown={(e) => { e.stopPropagation(); if (!isEditing) setEditing(sf.fid); }}
-        onMouseUp={(e) => e.stopPropagation()}
-        onClick={(e) => e.stopPropagation()}
-        onDoubleClick={(e) => e.stopPropagation()}
-      >
-        <rect
-          x={boxX} y={boxY} width={sf.w} height={fieldH} rx={screen(3)}
-          fill="rgba(15,23,42,0.96)" stroke={sf.color}
-          strokeWidth={isEditing ? 1.7 : 1.2}
-          vectorEffect="non-scaling-stroke"
-          style={{ cursor: 'text' }}
-        >
-          <title>{sf.title}</title>
-        </rect>
-        {isEditing ? (
-          <foreignObject x={boxX} y={boxY} width={sf.w} height={fieldH} style={{ overflow: 'visible' }}>
-            <div xmlns="http://www.w3.org/1999/xhtml" style={{ width: '100%', height: '100%', pointerEvents: 'none' }}>
-              <CanvasDimInput
-                initial={sf.initial} fontPx={fontPx} color={sf.color} title={sf.title}
-                onCommit={sf.onCommit} onDone={() => setEditing(f => (f === sf.fid ? null : f))} />
-            </div>
-          </foreignObject>
-        ) : (
-          <text
-            x={boxX + sf.w / 2} y={boxY + fieldH / 2}
-            fontSize={fontPx} fontFamily="monospace" fill={sf.color}
-            textAnchor="middle" dominantBaseline="central"
-            style={{ cursor: 'text', userSelect: 'none' }}
-          >
-            {fitLabel(sf.initial, sf.w)}
-          </text>
-        )}
-      </g>
-    );
-  };
-
-  const renderDim = (key, p1, p2, outwardN, value) => {
-    const ox = outwardN.x * offsetDist, oy = outwardN.y * offsetDist;
-    const dimP1 = { x: p1.x + ox, y: p1.y + oy };
-    const dimP2 = { x: p2.x + ox, y: p2.y + oy };
-    const lx = dimP2.x - dimP1.x, ly = dimP2.y - dimP1.y;
-    const len = Math.hypot(lx, ly) || 1;
-    const ux = lx / len, uy = ly / len;
-    const extScale = offsetDist + extOverhang;
-    const ext1 = { x: p1.x + outwardN.x * extScale, y: p1.y + outwardN.y * extScale };
-    const ext2 = { x: p2.x + outwardN.x * extScale, y: p2.y + outwardN.y * extScale };
-    const arrowAt = (tip, dirSign) => {
-      const px = -uy, py = ux;
-      const bx = tip.x - dirSign * ux * arrowLen, by = tip.y - dirSign * uy * arrowLen;
-      return `${bx + px * arrowSpread},${-(by + py * arrowSpread)} ${tip.x},${-tip.y} ${bx - px * arrowSpread},${-(by - py * arrowSpread)}`;
-    };
-    const midX = (dimP1.x + dimP2.x) / 2, midY = (dimP1.y + dimP2.y) / 2;
-    const expr = String(key === 'w' ? cSel.w : cSel.h);
-    const trimmed = expr.trim();
-    const isRef = LONE.test(trimmed) && !!params[trimmed];
-
-    // Build the subfields (the one being edited grows to reveal long text).
-    let subfields;
-    if (isRef) {
-      const pExpr = String(params[trimmed].expr ?? '');
-      const nameId = `${key}-name`, valId = `${key}-value`;
-      subfields = [
-        {
-          fid: nameId, w: editing === nameId ? grownName : baseName, color: AMBER, initial: trimmed,
-          title: 'Variable name — click to rename scene-wide',
-          onCommit: (v) => renameParam && renameParam(trimmed, v),
-        },
-        {
-          fid: valId, w: editing === valId ? grownValue : baseValue, color: ACCENT, initial: pExpr,
-          title: `Value of ${trimmed} (= ${Number.isFinite(value) ? value.toFixed(3) : '?'} µm) — click to edit`,
-          onCommit: (v) => { if (updateParamExpr) updateParamExpr(trimmed, v); if (commitExpr) commitExpr(v, '1', 'µm', `Auto-created (${trimmed})`, trimmed); },
-        },
-      ];
-    } else {
-      const exprId = `${key}-expr`;
-      subfields = [{
-        fid: exprId, w: editing === exprId ? grownExpr : baseExpr, color: ACCENT, initial: expr,
-        title: `${key} = ${Number.isFinite(value) ? value.toFixed(3) : '?'} µm — edit expression`,
-        onCommit: (v) => setCompDim(key, v),
-      }];
-    }
-    const fw = subfields.reduce((a, sf) => a + sf.w, 0) + gapW * (subfields.length - 1);
-
-    // Field group sits fully OUTSIDE the dim line: pushed out by its half-extent
-    // in the outward direction + a gap. For a VERTICAL dim line (height) the
-    // outward extent is the group WIDTH (fw/2), so boxX0 = labelCx - fw/2
-    // reduces to midX + labelGap — the line-side edge stays anchored and the
-    // group grows AWAY from the line on focus. For a horizontal dim line (width)
-    // the outward extent is the field height and the group grows symmetrically
-    // (staying below the line). A thin leader stub keeps the association.
-    const halfOut = Math.abs(outwardN.y) > 0.5 ? fieldH / 2 : fw / 2;
-    const labelCx = midX + outwardN.x * (halfOut + labelGap);
-    const labelCy = midY + outwardN.y * (halfOut + labelGap);
-    const leadEnd = { x: midX + outwardN.x * labelGap, y: midY + outwardN.y * labelGap };
-    const boxY = -labelCy - fieldH / 2;
-    let cursor = labelCx - fw / 2;
-    const fieldEls = subfields.map((sf) => { const el = renderField(sf, cursor, boxY); cursor += sf.w + gapW; return el; });
-    return (
-      <g key={`editdim-${key}`}>
-        <line x1={p1.x} y1={-p1.y} x2={ext1.x} y2={-ext1.y} stroke={ACCENT} strokeWidth={extStroke} opacity={0.8} />
-        <line x1={p2.x} y1={-p2.y} x2={ext2.x} y2={-ext2.y} stroke={ACCENT} strokeWidth={extStroke} opacity={0.8} />
-        <line x1={dimP1.x} y1={-dimP1.y} x2={dimP2.x} y2={-dimP2.y} stroke={ACCENT} strokeWidth={dimStroke} opacity={0.95} />
-        <polyline points={arrowAt(dimP1, -1)} fill="none" stroke={ACCENT} strokeWidth={dimStroke} strokeLinecap="round" strokeLinejoin="round" />
-        <polyline points={arrowAt(dimP2, 1)} fill="none" stroke={ACCENT} strokeWidth={dimStroke} strokeLinecap="round" strokeLinejoin="round" />
-        <line x1={midX} y1={-midY} x2={leadEnd.x} y2={-leadEnd.y} stroke={ACCENT} strokeWidth={extStroke} opacity={0.55} />
-        {fieldEls}
-      </g>
-    );
-  };
+  const ACCENT = '#22d3ee', AMBER = '#fbbf24';
+  const GAP = 16; // px from the rect edge out to the dimension line
 
   const hw = dd.w / 2, hh = dd.h / 2;
-  return (
-    <g>
-      {renderDim('w', { x: cSel.cx - hw, y: cSel.cy - hh }, { x: cSel.cx + hw, y: cSel.cy - hh }, { x: 0, y: -1 }, dd.w)}
-      {renderDim('h', { x: cSel.cx + hw, y: cSel.cy - hh }, { x: cSel.cx + hw, y: cSel.cy + hh }, { x: 1, y: 0 }, dd.h)}
-    </g>
+  const leftX = px(cSel.cx - hw, 0).x;
+  const rightX = px(cSel.cx + hw, 0).x;
+  const topY = px(0, cSel.cy + hh).y;   // world top    -> smaller screen y
+  const botY = px(0, cSel.cy - hh).y;   // world bottom -> larger  screen y
+  const wLineY = botY + GAP;
+  const hLineX = rightX + GAP;
+
+  const setCompDim = (key, expr) => {
+    const pv = key === 'w' ? dd.w : dd.h;
+    updateScene((prev) => ({ ...prev, components: prev.components.map((c) => (c.id === cSel.id ? { ...c, [key]: expr } : c)) }));
+    if (commitExpr) commitExpr(expr, Number.isFinite(pv) ? String(pv) : '1', 'µm', `Auto-created (${cSel.id}.${key})`);
+  };
+
+  const fields = (key, value) => {
+    const expr = String(key === 'w' ? cSel.w : cSel.h);
+    const tr = expr.trim();
+    const isRef = LONE.test(tr) && !!P[tr];
+    if (isRef) {
+      const pe = String(P[tr].expr ?? '');
+      return (
+        <>
+          <DimEditField initial={tr} color={AMBER} baseW={74} growW={176}
+            title="Variable name — rename scene-wide"
+            onCommit={(v) => renameParam && renameParam(tr, v)} />
+          <span style={{ color: '#64748b', fontFamily: 'monospace', fontSize: '11px' }}>=</span>
+          <DimEditField initial={pe} color={ACCENT} baseW={64} growW={150}
+            title={`Value of ${tr} (= ${Number.isFinite(value) ? value.toFixed(3) : '?'} µm)`}
+            onCommit={(v) => { if (updateParamExpr) updateParamExpr(tr, v); if (commitExpr) commitExpr(v, '1', 'µm', `Auto-created (${tr})`, tr); }} />
+        </>
+      );
+    }
+    return (
+      <DimEditField initial={expr} color={ACCENT} baseW={96} growW={184}
+        title={`${key} = ${Number.isFinite(value) ? value.toFixed(3) : '?'} µm — edit expression`}
+        onCommit={(v) => setCompDim(key, v)} />
+    );
+  };
+
+  const tag = (t) => (<span style={{ fontSize: '10px', fontWeight: 700, fontFamily: 'monospace', color: '#94a3b8' }}>{t}</span>);
+  const group = { position: 'absolute', display: 'flex', alignItems: 'center', gap: '4px', pointerEvents: 'auto', whiteSpace: 'nowrap' };
+  const aw = 5; // arrowhead half-size (px)
+
+  return createPortal(
+    <div style={{ position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 30 }}>
+      <svg style={{ position: 'fixed', inset: 0, width: '100vw', height: '100vh', pointerEvents: 'none', overflow: 'visible' }}>
+        {/* width dimension (below the rect) */}
+        <line x1={leftX} y1={botY} x2={leftX} y2={wLineY + 4} stroke={ACCENT} strokeWidth={1} opacity={0.55} />
+        <line x1={rightX} y1={botY} x2={rightX} y2={wLineY + 4} stroke={ACCENT} strokeWidth={1} opacity={0.55} />
+        <line x1={leftX} y1={wLineY} x2={rightX} y2={wLineY} stroke={ACCENT} strokeWidth={1.3} />
+        <polyline points={`${leftX + aw},${wLineY - aw} ${leftX},${wLineY} ${leftX + aw},${wLineY + aw}`} fill="none" stroke={ACCENT} strokeWidth={1.3} />
+        <polyline points={`${rightX - aw},${wLineY - aw} ${rightX},${wLineY} ${rightX - aw},${wLineY + aw}`} fill="none" stroke={ACCENT} strokeWidth={1.3} />
+        {/* height dimension (right of the rect) */}
+        <line x1={rightX} y1={topY} x2={hLineX + 4} y2={topY} stroke={ACCENT} strokeWidth={1} opacity={0.55} />
+        <line x1={rightX} y1={botY} x2={hLineX + 4} y2={botY} stroke={ACCENT} strokeWidth={1} opacity={0.55} />
+        <line x1={hLineX} y1={topY} x2={hLineX} y2={botY} stroke={ACCENT} strokeWidth={1.3} />
+        <polyline points={`${hLineX - aw},${topY + aw} ${hLineX},${topY} ${hLineX + aw},${topY + aw}`} fill="none" stroke={ACCENT} strokeWidth={1.3} />
+        <polyline points={`${hLineX - aw},${botY - aw} ${hLineX},${botY} ${hLineX + aw},${botY - aw}`} fill="none" stroke={ACCENT} strokeWidth={1.3} />
+      </svg>
+      <div style={{ ...group, left: (leftX + rightX) / 2, top: wLineY + 9, transform: 'translateX(-50%)' }}>
+        {tag('W')}{fields('w', dd.w)}
+      </div>
+      <div style={{ ...group, left: hLineX + 9, top: (topY + botY) / 2, transform: 'translateY(-50%)' }}>
+        {tag('H')}{fields('h', dd.h)}
+      </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -4715,9 +4644,9 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         const dd = dimsByCompId[cSel.id];
         if (!dd || !Number.isFinite(dd.w) || !Number.isFinite(dd.h) || dd.w <= 0 || dd.h <= 0) return null;
         return (
-          <EditableRectDims
+          <EditableDimsOverlay
             key={`editdims-${cSel.id}`}
-            cSel={cSel} dd={dd} params={scene.params || {}} screen={screen}
+            svgRef={svgRef} viewport={viewport} cSel={cSel} dd={dd} params={scene.params || {}}
             updateScene={updateScene} commitExpr={commitExpr}
             renameParam={renameParam} updateParamExpr={updateParamExpr}
           />
