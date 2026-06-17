@@ -307,7 +307,8 @@ export default function App() {
   // H to the right) with inline name/value fields. Optional + persisted across
   // reloads (separate from the read-only global `showDimensions` overlay).
   const [editDims, setEditDims] = useState(() => {
-    try { return window.localStorage?.getItem('photonic_layout_edit_dims') === '1'; } catch { return false; }
+    // ON by default — only OFF if the user has explicitly turned it off before.
+    try { return window.localStorage?.getItem('photonic_layout_edit_dims') !== '0'; } catch { return true; }
   });
   const toggleEditDims = () => setEditDims(v => {
     const n = !v;

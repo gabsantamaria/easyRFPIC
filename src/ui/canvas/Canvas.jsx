@@ -883,6 +883,86 @@ function EditableDimsOverlay({ svgRef, viewport, cSel, dd, params, updateScene, 
   );
 }
 
+// Editable per-segment Δx/Δy overlay for the primary-selected polyline /
+// polyshape (open or closed). For every vertex PAIR whose later vertex is a
+// `rel` step, shows the step's Δx and Δy as editable fields at the segment
+// midpoint (offset to the side so they clear the segment line + vertex
+// handles). Editing a field rewrites that vertex's dx/dy expression (auto-
+// creating any referenced params) — the standard-CAD relative-coordinate edit.
+// Like EditableDimsOverlay these are REAL DOM inputs in a screen-space portal,
+// so they are always editable and a constant size at every zoom. `verts` is the
+// resolved world point per vertex spec (resolvePolylineVertices), computed by
+// the caller so this matches the on-canvas vertex handles exactly. Arc/snap
+// vertices have no dx/dy and are skipped. Mounted with key=comp id.
+function EditablePolyDims({ svgRef, viewport, cSel, verts, updateScene, commitExpr }) {
+  const [, bump] = useState(0);
+  useEffect(() => {
+    const on = () => bump((t) => t + 1);
+    window.addEventListener('resize', on);
+    window.addEventListener('scroll', on, true);
+    return () => { window.removeEventListener('resize', on); window.removeEventListener('scroll', on, true); };
+  }, []);
+
+  const svg = svgRef.current;
+  if (!svg) return null;
+  const r = svg.getBoundingClientRect();
+  const vbX = viewport.x - viewport.w / 2;
+  const vbY = -(viewport.y + viewport.h / 2);
+  const scale = Math.min(r.width / viewport.w, r.height / viewport.h);
+  if (!Number.isFinite(scale) || scale <= 0) return null;
+  const offX = (r.width - viewport.w * scale) / 2;
+  const offY = (r.height - viewport.h * scale) / 2;
+  const px = (wx, wy) => ({ x: r.left + offX + (wx - vbX) * scale, y: r.top + offY + ((-wy) - vbY) * scale });
+
+  const ACCENT = '#22d3ee';
+  const specs = cSel.vertices || [];
+  const tagStyle = { fontSize: '9px', fontWeight: 700, fontFamily: 'monospace', color: '#94a3b8' };
+
+  const updateVertex = (i, patch) => {
+    updateScene((prev) => ({
+      ...prev,
+      components: prev.components.map((c) => (c.id === cSel.id
+        ? { ...c, vertices: (c.vertices || []).map((vv, j) => (j === i ? { ...vv, ...patch } : vv)) }
+        : c)),
+    }));
+  };
+
+  const groups = [];
+  for (let i = 1; i < specs.length; i++) {
+    const v = specs[i];
+    if (!v || (v.kind && v.kind !== 'rel')) continue; // only rel steps carry dx/dy
+    const a = verts[i - 1], b = verts[i];
+    if (!a || !b || !a.every(Number.isFinite) || !b.every(Number.isFinite)) continue;
+    const A = px(a[0], a[1]), B = px(b[0], b[1]);
+    const mid = { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 };
+    // Offset the field group to the side of the segment so it doesn't sit on
+    // the line / vertex handles.
+    let nx = -(B.y - A.y), ny = (B.x - A.x);
+    const nlen = Math.hypot(nx, ny) || 1;
+    nx /= nlen; ny /= nlen;
+    const OFF = 22;
+    const cx = mid.x + nx * OFF, cy = mid.y + ny * OFF;
+    const dxExpr = String(v.dx ?? '0'), dyExpr = String(v.dy ?? '0');
+    groups.push(
+      <div key={`seg-${i}`} style={{ position: 'absolute', left: cx, top: cy, transform: 'translate(-50%,-50%)', display: 'flex', gap: '3px', alignItems: 'center', pointerEvents: 'auto', whiteSpace: 'nowrap' }}>
+        <span style={tagStyle}>Δx</span>
+        <DimEditField initial={dxExpr} color={ACCENT} baseW={54} growW={128}
+          title={`vertex ${i} step Δx — edit`}
+          onCommit={(val) => { updateVertex(i, { dx: val }); if (commitExpr) commitExpr(val, '0', 'µm', `Auto-created (${cSel.id}.v${i}.dx)`); }} />
+        <span style={tagStyle}>Δy</span>
+        <DimEditField initial={dyExpr} color={ACCENT} baseW={54} growW={128}
+          title={`vertex ${i} step Δy — edit`}
+          onCommit={(val) => { updateVertex(i, { dy: val }); if (commitExpr) commitExpr(val, '0', 'µm', `Auto-created (${cSel.id}.v${i}.dy)`); }} />
+      </div>,
+    );
+  }
+  if (groups.length === 0) return null;
+  return createPortal(
+    <div style={{ position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 30 }}>{groups}</div>,
+    document.body,
+  );
+}
+
 // =========================================================================
 // CANVAS
 // =========================================================================
@@ -4640,17 +4720,30 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           Distinct cyan accent vs the violet read-only `showDimensions`. */}
       {editDims && !rulerMode && (() => {
         const cSel = solved.find(cc => cc.id === selectedId);
-        if (!cSel || cSel.kind !== 'rect') return null;
-        const dd = dimsByCompId[cSel.id];
-        if (!dd || !Number.isFinite(dd.w) || !Number.isFinite(dd.h) || dd.w <= 0 || dd.h <= 0) return null;
-        return (
-          <EditableDimsOverlay
-            key={`editdims-${cSel.id}`}
-            svgRef={svgRef} viewport={viewport} cSel={cSel} dd={dd} params={scene.params || {}}
-            updateScene={updateScene} commitExpr={commitExpr}
-            renameParam={renameParam} updateParamExpr={updateParamExpr}
-          />
-        );
+        if (!cSel) return null;
+        if (cSel.kind === 'rect') {
+          const dd = dimsByCompId[cSel.id];
+          if (!dd || !Number.isFinite(dd.w) || !Number.isFinite(dd.h) || dd.w <= 0 || dd.h <= 0) return null;
+          return (
+            <EditableDimsOverlay
+              key={`editdims-${cSel.id}`}
+              svgRef={svgRef} viewport={viewport} cSel={cSel} dd={dd} params={scene.params || {}}
+              updateScene={updateScene} commitExpr={commitExpr}
+              renameParam={renameParam} updateParamExpr={updateParamExpr}
+            />
+          );
+        }
+        if (cSel.kind === 'polyline' || cSel.kind === 'polyshape') {
+          const verts = resolvePolylineVertices(cSel, sceneCompById, paramValues, transformInstances);
+          return (
+            <EditablePolyDims
+              key={`polydims-${cSel.id}`}
+              svgRef={svgRef} viewport={viewport} cSel={cSel} verts={verts}
+              updateScene={updateScene} commitExpr={commitExpr}
+            />
+          );
+        }
+        return null;
       })()}
 
       {/* Lumped-port integration lines. Persistent (drawn regardless
