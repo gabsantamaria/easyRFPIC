@@ -1258,12 +1258,28 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     const handler = (e) => {
       if (e.key === 'Escape') {
         if (rulerInProgress) setRulerInProgress(null);
-        else setRulerMode(false);
+        else { setRulerMode(false); if (rulerSnapPoint) setRulerSnapPoint(null); }
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [rulerMode, rulerInProgress]);
+  }, [rulerMode, rulerInProgress, rulerSnapPoint]);
+
+  // Snap-creation Escape: cancel an in-progress anchor pick, or exit the tool.
+  // (Mirrors the ruler/add effects — snapMode is mutually exclusive with them,
+  // so at most one of these effects is ever bound. snapPick/snapHover/snapCursor
+  // are Canvas-local; setSnapMode is the prop-drilled persistent-mode setter.)
+  useEffect(() => {
+    if (snapMode !== 'creating') return;
+    const handler = (e) => {
+      if (e.key === 'Escape') {
+        if (snapPick) { setSnapPick(null); setSnapHover(null); setSnapCursor(null); }
+        else setSnapMode('idle');
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [snapMode, snapPick]);
 
   // Add-mode Escape: cancel an in-progress drag, or exit the add tool entirely.
   useEffect(() => {
