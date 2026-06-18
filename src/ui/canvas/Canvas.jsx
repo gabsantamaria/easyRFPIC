@@ -12,6 +12,7 @@
 // callbacks and view state are passed in as explicit props by App.
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
+import { DeferredTextInput } from '../DeferredTextInput.jsx';
 import { ANCHORS, parseAnchor, anchorLocal, anchorLocalRotated, anchorWorld, compRotationDeg, rotateLocal } from '../../scene/anchors.js';
 import { evalExpr } from '../../scene/params.js';
 import { solveLayout, applyMirrors, resolveBooleanBboxes } from '../../scene/solver.js';
@@ -726,49 +727,47 @@ export function buildBoolOverridesForInstance(b, bInst, bBaseCx, bBaseCy, compBy
   return overrides;
 }
 
-// A single always-visible, always-editable dimension field. This is a REAL DOM
-// <input> rendered in a screen-space overlay (portal to document.body), NOT
-// inside the SVG <foreignObject> — so its CSS px are real device pixels: the
-// 1px border and 11px font stay constant at every zoom (no SVG-user-unit
-// floor), and it is directly editable with no click-to-edit swap. Uncontrolled
-// (keyed by `initial`, so a re-solve after commit refreshes it); commits on
-// Enter/blur; grows on focus to reveal long names/expressions.
-function DimEditField({ initial, color, baseW, growW, title, onCommit }) {
+// A single always-visible, always-editable dimension field. A REAL DOM input
+// rendered in a screen-space overlay (portal to document.body), NOT inside the
+// SVG <foreignObject> — so its CSS px are real device pixels: the 1px border
+// and 11px font stay constant at every zoom (no SVG-user-unit floor), directly
+// editable with no click-to-edit swap. Wraps DeferredTextInput for draft-then-
+// commit semantics (commit on Enter/blur, Esc reverts) AND identifier-prefix
+// AUTOCOMPLETE of existing parameter names (`suggestions`) — same popover as the
+// PARAMS panel. Grows on focus to reveal long names/expressions.
+function DimEditField({ initial, color, baseW, growW, title, onCommit, suggestions }) {
   const [focused, setFocused] = useState(false);
   return (
-    <input
-      key={initial}
-      defaultValue={initial}
-      title={title}
-      spellCheck={false}
-      onPointerDown={(e) => e.stopPropagation()}
-      onMouseDown={(e) => e.stopPropagation()}
-      onClick={(e) => e.stopPropagation()}
-      onFocus={(e) => { setFocused(true); e.currentTarget.select(); }}
-      onKeyDown={(e) => {
-        e.stopPropagation();
-        if (e.key === 'Enter') e.currentTarget.blur();
-        else if (e.key === 'Escape') { e.currentTarget.value = initial; e.currentTarget.blur(); }
-      }}
-      onBlur={(e) => { setFocused(false); const v = e.currentTarget.value.trim(); if (v && v !== initial) onCommit(v); }}
-      style={{
-        width: `${focused ? growW : baseW}px`,
-        transition: 'width 90ms ease-out',
-        boxSizing: 'border-box',
-        fontSize: '11px',
-        lineHeight: 1.3,
-        fontFamily: 'monospace',
-        padding: '2px 5px',
-        background: 'rgba(15,23,42,0.97)',
-        color,
-        border: `1px solid ${color}`,
-        borderRadius: '4px',
-        outline: 'none',
-        textAlign: 'center',
-        pointerEvents: 'auto',
-        boxShadow: '0 1px 3px rgba(0,0,0,0.4)',
-      }}
-    />
+    <div style={{ width: `${focused ? growW : baseW}px`, transition: 'width 90ms ease-out' }}>
+      <DeferredTextInput
+        value={initial}
+        onCommit={(v) => { const t = String(v).trim(); if (t && t !== initial) onCommit(t); }}
+        suggestions={suggestions}
+        title={title}
+        spellCheck={false}
+        onPointerDown={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
+        onFocus={(e) => { setFocused(true); try { e.currentTarget.select(); } catch { /* ignore */ } }}
+        onBlur={() => setFocused(false)}
+        style={{
+          width: '100%',
+          boxSizing: 'border-box',
+          fontSize: '11px',
+          lineHeight: 1.3,
+          fontFamily: 'monospace',
+          padding: '2px 5px',
+          background: 'rgba(15,23,42,0.97)',
+          color,
+          border: `1px solid ${color}`,
+          borderRadius: '4px',
+          outline: 'none',
+          textAlign: 'center',
+          pointerEvents: 'auto',
+          boxShadow: '0 1px 3px rgba(0,0,0,0.4)',
+        }}
+      />
+    </div>
   );
 }
 
@@ -827,6 +826,7 @@ function EditableDimsOverlay({ svgRef, viewport, cSel, dd, params, updateScene, 
     if (commitExpr) commitExpr(expr, Number.isFinite(pv) ? String(pv) : '1', 'µm', `Auto-created (${cSel.id}.${key})`);
   };
 
+  const paramNames = Object.keys(P);
   const fields = (key, value) => {
     const expr = String(key === 'w' ? cSel.w : cSel.h);
     const tr = expr.trim();
@@ -835,18 +835,26 @@ function EditableDimsOverlay({ svgRef, viewport, cSel, dd, params, updateScene, 
       const pe = String(P[tr].expr ?? '');
       return (
         <>
-          <DimEditField initial={tr} color={AMBER} baseW={74} growW={176}
-            title="Variable name — rename scene-wide"
-            onCommit={(v) => renameParam && renameParam(tr, v)} />
+          <DimEditField key={`${key}-n-${tr}`} initial={tr} color={AMBER} baseW={74} growW={176} suggestions={paramNames}
+            title="Variable — type an EXISTING param to point this dimension at it (adopts its value); a NEW name renames it scene-wide"
+            onCommit={(nm) => {
+              if (nm === tr) return;
+              // A NEW valid identifier renames the current param scene-wide.
+              // An EXISTING param (or any expression) RE-POINTS this dimension
+              // to it instead — so it can't conflict, and the value field then
+              // shows that variable's value.
+              if (LONE.test(nm) && !P[nm]) { if (renameParam) renameParam(tr, nm); }
+              else setCompDim(key, nm);
+            }} />
           <span style={{ color: '#64748b', fontFamily: 'monospace', fontSize: '11px' }}>=</span>
-          <DimEditField initial={pe} color={ACCENT} baseW={64} growW={150}
+          <DimEditField key={`${key}-v-${tr}-${pe}`} initial={pe} color={ACCENT} baseW={64} growW={150} suggestions={paramNames}
             title={`Value of ${tr} (= ${Number.isFinite(value) ? value.toFixed(3) : '?'} µm)`}
             onCommit={(v) => { if (updateParamExpr) updateParamExpr(tr, v); if (commitExpr) commitExpr(v, '1', 'µm', `Auto-created (${tr})`, tr); }} />
         </>
       );
     }
     return (
-      <DimEditField initial={expr} color={ACCENT} baseW={96} growW={184}
+      <DimEditField key={`${key}-e-${expr}`} initial={expr} color={ACCENT} baseW={96} growW={184} suggestions={paramNames}
         title={`${key} = ${Number.isFinite(value) ? value.toFixed(3) : '?'} µm — edit expression`}
         onCommit={(v) => setCompDim(key, v)} />
     );
@@ -896,7 +904,7 @@ function EditableDimsOverlay({ svgRef, viewport, cSel, dd, params, updateScene, 
 // resolved world point per vertex spec (resolvePolylineVertices), computed by
 // the caller so this matches the on-canvas vertex handles exactly. Arc/snap
 // vertices have no dx/dy and are skipped. Mounted with key=comp id.
-function EditablePolyDims({ svgRef, viewport, cSel, verts, updateScene, commitExpr }) {
+function EditablePolyDims({ svgRef, viewport, cSel, verts, params, updateScene, commitExpr }) {
   const [, bump] = useState(0);
   useEffect(() => {
     const on = () => bump((t) => t + 1);
@@ -918,6 +926,7 @@ function EditablePolyDims({ svgRef, viewport, cSel, verts, updateScene, commitEx
 
   const ACCENT = '#22d3ee';
   const specs = cSel.vertices || [];
+  const paramNames = Object.keys(params || {});
   const tagStyle = { fontSize: '9px', fontWeight: 700, fontFamily: 'monospace', color: '#94a3b8' };
 
   const updateVertex = (i, patch) => {
@@ -939,7 +948,7 @@ function EditablePolyDims({ svgRef, viewport, cSel, verts, updateScene, commitEx
   const field = (i, axis, expr, pos) => (
     <div key={`g${axis}-${i}`} style={{ position: 'absolute', left: pos.x, top: pos.y, transform: 'translate(-50%,-50%)', display: 'flex', gap: '3px', alignItems: 'center', pointerEvents: 'auto', whiteSpace: 'nowrap' }}>
       <span style={tagStyle}>{axis === 'x' ? 'Δx' : 'Δy'}</span>
-      <DimEditField initial={expr} color={ACCENT} baseW={54} growW={128}
+      <DimEditField key={`f-${axis}-${i}-${expr}`} initial={expr} color={ACCENT} baseW={54} growW={128} suggestions={paramNames}
         title={`vertex ${i} step Δ${axis} — edit`}
         onCommit={(val) => { updateVertex(i, { [axis === 'x' ? 'dx' : 'dy']: val }); if (commitExpr) commitExpr(val, '0', 'µm', `Auto-created (${cSel.id}.v${i}.d${axis})`); }} />
     </div>
@@ -4767,7 +4776,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           return (
             <EditablePolyDims
               key={`polydims-${cSel.id}`}
-              svgRef={svgRef} viewport={viewport} cSel={cSel} verts={verts}
+              svgRef={svgRef} viewport={viewport} cSel={cSel} verts={verts} params={scene.params || {}}
               updateScene={updateScene} commitExpr={commitExpr}
             />
           );
