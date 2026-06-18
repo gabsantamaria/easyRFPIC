@@ -24,6 +24,7 @@ import { evalExpr } from './params.js';
 import { anchorLocalRotated, anchorWorld, compRotationDeg } from './anchors.js';
 import { expandTransforms } from './transforms.js';
 import { tessellatePolylinePath, polylineBbox, polyshapeBbox } from '../geometry/polyline.js';
+import { buildRacetrackCenterline } from '../geometry/racetrack.js';
 
 // ── Solve diagnostics ──────────────────────────────────────────────────
 // Module-level record refreshed by every solveLayout call. `converged`
@@ -282,6 +283,37 @@ export function solveLayout(components, snaps, paramValues) {
     p._resolvedVerts = verts;
     return true;
   };
+  // Racetrack: derive the TRUE bounding box from the actual band geometry
+  // (centerline from R/L_straight/p, expanded by the waveguide width) rather
+  // than trusting the stored w/h expression — that expression is only a
+  // linear-in-p APPROXIMATION and, more importantly, can drift out of sync
+  // with the band when R/L_straight are edited independently of it, leaving
+  // the selection halo / anchors / snap targets sized for the wrong extent.
+  // The centerline is symmetric about the origin, so the AABB stays centered
+  // on (cx, cy) and no displayBbox is needed. Canvas-only: the HFSS export
+  // reads the scene's parametric w/h expression (via resolveSynthetics), not
+  // this resolved number.
+  const refreshRacetrackBbox = (c) => {
+    const R = evalExpr(c.R ?? '0', workingPV);
+    const Ls = evalExpr(c.L_straight ?? '0', workingPV);
+    const p = evalExpr(c.p ?? '0', workingPV);
+    const wgW = evalExpr(c.wgWidth ?? '0', workingPV);
+    if (!(R > 0)) return false;
+    const cl = buildRacetrackCenterline(R, Number.isFinite(Ls) && Ls >= 0 ? Ls : 0, Number.isFinite(p) ? p : 1);
+    if (!cl || cl.length < 2) return false;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const [x, y] of cl) {
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
+    const pad = Number.isFinite(wgW) && wgW > 0 ? wgW : 0;
+    const w = (maxX - minX) + pad;
+    const h = (maxY - minY) + pad;
+    if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return false;
+    c.w = w; c.h = h;
+    return true;
+  };
   const recordPlaced = (c) => {
     // For booleans, refresh bbox-derived cx/cy/w/h from operands BEFORE
     // recording, so the synthetic values reflect the actual geometry that
@@ -291,6 +323,7 @@ export function solveLayout(components, snaps, paramValues) {
     // half-width padding) rather than operand AABBs.
     if (c.kind === 'polyline') refreshPolylineBbox(c);
     if (c.kind === 'polyshape') refreshPolyshapeBbox(c);
+    if (c.kind === 'racetrack') refreshRacetrackBbox(c);
     // NaN guards: never write a non-finite synthetic. A NaN here would
     // silently poison every downstream expression that references it
     // (the poisoned expression evaluates to 0 via evalExpr's fallback,
