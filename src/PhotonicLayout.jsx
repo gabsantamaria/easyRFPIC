@@ -4726,26 +4726,49 @@ export default function App() {
     setExportPreview({ filename, content, downloaded: ok });
   };
 
-  // Sanitize the design name for use as a filename. Keep alphanumerics,
-  // underscore, hyphen, and dot; replace anything else with '_'. Empty
-  // / 'Untitled' falls back to 'layout' so we never produce an oddly
-  // named file like '_.py'.
+  // Sanitize a string for use in a filename. Keep alphanumerics,
+  // underscore, hyphen, and dot; collapse anything else to '_'.
+  const fileSan = (s) => String(s ?? '').replace(/[^A-Za-z0-9_.\-]+/g, '_');
+  // The DESIGN identifier (project name only). Used as the gdsfactory
+  // @gf.cell function name + internal .gds name (a stable Python-ish
+  // identifier, so it must NOT carry the version/timestamp). Empty /
+  // 'Untitled' falls back to 'layout' so we never emit a name like '_.py'.
   const designFileBase = () => {
     const raw = String(designName || '').trim();
     if (!raw || raw === 'Untitled') return 'layout';
-    return raw.replace(/[^A-Za-z0-9_.\-]+/g, '_');
+    return fileSan(raw);
   };
-  const handleExportPyAEDT = () => handleExport(`${designFileBase()}.py`, generatePyAEDT);
+  // Current design version tag for export filenames: 'vN' when sitting
+  // exactly on snapshot N, 'vNc' when the working state is modified
+  // (current) relative to N, and 'v0' when the design was never
+  // snapshotted.
+  const designVersionTag = () => {
+    const v = currentVersionId ? versions.find(vv => vv && vv.id === currentVersionId) : null;
+    if (!v) return 'v0';
+    return `v${v.versionNumber}${currentIsModified ? 'c' : ''}`;
+  };
+  // Full export-filename base: workspace_project_version_yyyy_mm_dd_hh_mm
+  // (LOCAL time — human-facing). Computed fresh per export so the
+  // timestamp is the actual export moment. Each handler appends its own
+  // type discriminator (_hfss / _gf) + extension.
+  const exportFileBase = () => {
+    const pad2 = (n) => String(n).padStart(2, '0');
+    const ws = fileSan(workspace || 'default') || 'default';
+    const d = new Date();
+    const ts = `${d.getFullYear()}_${pad2(d.getMonth() + 1)}_${pad2(d.getDate())}_${pad2(d.getHours())}_${pad2(d.getMinutes())}`;
+    return `${ws}_${designFileBase()}_${designVersionTag()}_${ts}`;
+  };
+  const handleExportPyAEDT = () => handleExport(`${exportFileBase()}.py`, generatePyAEDT);
   const handleExportHfssNative = () => {
     const appendToActive = !!(scene.simSetup && scene.simSetup.appendToActive);
     const suffix = appendToActive ? '_hfss_append' : '_hfss';
-    return handleExport(`${designFileBase()}${suffix}.py`, generateHfssNative, { appendToActive });
+    return handleExport(`${exportFileBase()}${suffix}.py`, generateHfssNative, { appendToActive });
   };
   // gdsfactory export: a parametric @gf.cell function. The design name
-  // is passed through so the function and output .gds share the design
-  // filename instead of defaulting to "layout".
+  // (project only — NOT the versioned filename) is passed through so the
+  // function and output .gds use a stable identifier.
   const handleExportGdsfactory = () => {
-    return handleExport(`${designFileBase()}_gf.py`, generateGdsfactory, { designName: designFileBase() });
+    return handleExport(`${exportFileBase()}_gf.py`, generateGdsfactory, { designName: designFileBase() });
   };
   // Figure exports — clone the LIVE canvas SVG and serialize it. This
   // captures EXACTLY what the user sees: every transform replication,
@@ -4772,7 +4795,7 @@ export default function App() {
       return;
     }
     if (!content) { await alertDialog('Failed to generate SVG.', 'Export error'); return; }
-    const filename = `${designFileBase()}.svg`;
+    const filename = `${exportFileBase()}.svg`;
     const ok = downloadFile(filename, content, 'image/svg+xml');
     setExportPreview({ filename, content, downloaded: ok });
   };
@@ -4788,7 +4811,7 @@ export default function App() {
       return;
     }
     if (!bytes || !bytes.length) { await alertDialog('Failed to generate PDF.', 'Export error'); return; }
-    const filename = `${designFileBase()}.pdf`;
+    const filename = `${exportFileBase()}.pdf`;
     const ok = downloadFile(filename, bytes, 'application/pdf');
     if (ok) {
       const summary = [
@@ -4820,7 +4843,7 @@ export default function App() {
       await alertDialog('Failed to generate GDS.', 'Export error');
       return;
     }
-    const gdsName = `${designFileBase()}.gds`;
+    const gdsName = `${exportFileBase()}.gds`;
     const ok = downloadFile(gdsName, bytes, 'application/octet-stream');
     if (!ok) {
       await alertDialog('Failed to start GDS download.', 'Export error');
