@@ -1348,6 +1348,65 @@ describe('D3/D4 exports: rounded rects + vias', () => {
     pyParses3(out, 'vitest_hfss_coplanar_above');
   });
 
+  // Regression: a layer with a BARE-NUMERIC thickness (e.g. "0.6", not a
+  // parameter) that ends up at the stack TOP must render its Z with the unit
+  // INSIDE the parens — "(0.6um)" — so the stack-spanning air-region ZSize
+  // stays a valid HFSS compound. The unit-OUTSIDE form "(0.6)um" parses only
+  // as a standalone field; HFSS's expression parser rejects it inside the sum
+  // "(((0um) + (h_clad)) + (0.6)um) - ...". This surfaced once the coplanar-
+  // group fix correctly stacked a bare-numeric conductor ON TOP of the cladding
+  // (before, the bare layer was buried and the air-region top was a clean
+  // parameter). See the user-reported HFSS parse error near "(0.6)um".
+  const bareNumericTopScene = () => {
+    const params = {
+      h_si: { expr: '250', unit: 'µm' },
+      h_sio2: { expr: '4.7', unit: 'µm' },
+      h_wg: { expr: '0.6', unit: 'µm' },
+      h_clad: { expr: '2.0', unit: 'µm' },
+      h_cond: { expr: '0', unit: 'µm' },
+    };
+    const s = {
+      params,
+      components: [
+        { id: 'e1', kind: 'rect', layer: 'electrode', conductorLayerId: 'l_top',
+          cx: 0, cy: 0, w: '10', h: '10', cutouts: [], transforms: [] },
+      ],
+      snaps: [], mirrors: [], groups: [], booleans: [],
+      stack: [
+        { id: 'l_sub', name: 'Si', thickness: 'h_si', material: 'silicon', color: '#5a6878', role: 'substrate' },
+        { id: 'l_box', name: 'BOX', thickness: 'h_sio2', material: 'silicon_dioxide', color: '#8da0c0', role: 'substrate' },
+        { id: 'l_wg', name: 'WG', thickness: 'h_wg', material: 'lithium_tantalate', color: '#86efac', role: 'waveguide',
+          core_width: 'w_wg', slab_height: 'h_slab', slab_width: 'w_slab', etch_angle: 'etch_angle', coplanarGroup: 'g0' },
+        { id: 'l_clad', name: 'Clad', thickness: 'h_clad', material: 'silicon_dioxide', color: '#cbd5e1', role: 'cladding', coplanarGroup: 'g0' },
+        // Bare-NUMERIC thickness, NO coplanarGroup → sequential, sits on the cladding top.
+        { id: 'l_top', name: 'TopMetal', thickness: '0.6', material: 'gold', color: '#805e00', role: 'conductor' },
+      ],
+      stackName: 'bare_numeric_top',
+      simSetup: scene.simSetup,
+    };
+    const { values: pv } = resolveParams({
+      ...params,
+      w_wg: { expr: '1.2' }, h_slab: { expr: '0.1' }, w_slab: { expr: '5' }, etch_angle: { expr: '70' },
+    });
+    return { s, pv };
+  };
+
+  it('HFSS: a bare-numeric layer thickness renders unit-INSIDE so no expression has a malformed ")um"', () => {
+    const { s, pv } = bareNumericTopScene();
+    const out = generateHfssNative(s, pv);
+    // The WHOLE script must be free of the unit-outside form "(<expr>)um".
+    expect(out).not.toMatch(/\)um/);
+    // The bare-numeric thickness renders unit-inside.
+    expect(out).toContain('(0.6um)');
+    // The always-emitted air-region ZSize spans the stack top (cladding + the
+    // bare-numeric layer) and stays well-formed.
+    const airZLine = out.split('\n').find(l => l.includes('ZSize') && l.includes('air_pad'));
+    expect(airZLine).toBeTruthy();
+    expect(airZLine).toContain('h_clad');
+    expect(airZLine).not.toMatch(/\)um/);
+    pyParses3(out, 'vitest_hfss_bare_numeric_top');
+  });
+
   // ── Rounded rects ─────────────────────────────────────────────────────
 
   const roundedScene = (extraComp = {}) => {

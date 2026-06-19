@@ -699,12 +699,27 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   const exprWithUm = (expr) => {
     const s = spaceHyphens(ascii(resolveSynthetics(String(expr ?? '0'))));
     if (/^[\d\s+\-*/.()]+$/.test(s)) {
-      // Pure numeric: parenthesize the whole and append um. HFSS will treat the
-      // result as unit-bearing.
-      return `(${s})um`;
+      // Pure numeric: append "um" INSIDE the parens — `(0.6um)`, matching the
+      // proven `(0um)` form used elsewhere. The unit MUST stay inside: `(0.6)um`
+      // (unit outside the closing paren) is a standalone-only HFSS quirk — its
+      // expression parser rejects it in any COMPOUND context (after `)` it
+      // expects an operator, not `u`), e.g. a stack-Z sum like
+      // `((0um) + (h_clad)) + (0.6)um`. With model units forced to um, the bare
+      // literal is already µm; the explicit unit just keeps it unambiguous in a
+      // length field. (A bare-numeric expr with a top-level `/` — vanishingly
+      // rare for a layer thickness — would bind the unit to the divisor; author
+      // such thicknesses as a parameter instead.)
+      return `(${s}um)`;
     }
     return `(${s})`;
   };
+  // Wrap an already-numeric value (a bare number / `.toFixed` string, possibly
+  // negative) as a unit-bearing HFSS length with the unit INSIDE the parens —
+  // `(26.0000um)`, NEVER `(26.0000)um`. The unit-outside form parses only as a
+  // standalone field value; HFSS's expression parser rejects it inside any
+  // compound (after `)` it wants an operator, not `u`). Use this for values
+  // already reduced to numbers; use exprWithUm for raw expression strings.
+  const numUm = (x) => `(${x}um)`;
   // ── Per-component Z offset (D5) ─────────────────────────────────────
   // Optional `zOffset` expression (µm) shifting the part's Z placement
   // relative to its layer. Emitted as a LIVE HFSS expression appended to
@@ -1623,8 +1638,8 @@ except Exception as e:
         // fully-parametric list.
         let polyHasFrozenVertex = false;
         // Build the parametric per-vertex (xExpr, yExpr) chain.
-        const baseCxExpr = ppShape ? exprWithUm(ppShape.cxExpr) : `(${cx.toFixed(4)})um`;
-        const baseCyExpr = ppShape ? exprWithUm(ppShape.cyExpr) : `(${cy.toFixed(4)})um`;
+        const baseCxExpr = ppShape ? exprWithUm(ppShape.cxExpr) : numUm(cx.toFixed(4));
+        const baseCyExpr = ppShape ? exprWithUm(ppShape.cyExpr) : numUm(cy.toFixed(4));
         if (!ppShape) {
           polyHasFrozenVertex = true;
           noteFrozen(c.id, `${shapeKind} base position (no parametric snap chain)`);
@@ -1927,10 +1942,10 @@ except Exception as e:
               const nx = ddy / len, ny = -ddx / len;
               const hw = baseWNum / 2;
               quadSheet([
-                { x: `(${(x0 + hw * nx).toFixed(4)})um`, y: `(${(y0 + hw * ny).toFixed(4)})um` },
-                { x: `(${(x1 + hw * nx).toFixed(4)})um`, y: `(${(y1 + hw * ny).toFixed(4)})um` },
-                { x: `(${(x1 - hw * nx).toFixed(4)})um`, y: `(${(y1 - hw * ny).toFixed(4)})um` },
-                { x: `(${(x0 - hw * nx).toFixed(4)})um`, y: `(${(y0 - hw * ny).toFixed(4)})um` },
+                { x: numUm((x0 + hw * nx).toFixed(4)), y: numUm((y0 + hw * ny).toFixed(4)) },
+                { x: numUm((x1 + hw * nx).toFixed(4)), y: numUm((y1 + hw * ny).toFixed(4)) },
+                { x: numUm((x1 - hw * nx).toFixed(4)), y: numUm((y1 - hw * ny).toFixed(4)) },
+                { x: numUm((x0 - hw * nx).toFixed(4)), y: numUm((y0 - hw * ny).toFixed(4)) },
               ], label);
             }
           };
@@ -2581,8 +2596,8 @@ except Exception as e:
       cyExprUm = exprWithUm(mpp.cyExpr);
       notePara(c.id, `pos (mirror reflection of ${mpp.srcId}), size`);
     } else {
-      cxExprUm = `(${cx.toFixed(4)})um`;
-      cyExprUm = `(${cy.toFixed(4)})um`;
+      cxExprUm = numUm(cx.toFixed(4));
+      cyExprUm = numUm(cy.toFixed(4));
       noteFrozen(c.id, isMirrorTgt
         ? 'mirror target (asymmetric shape or source without chain) - position baked numerically'
         : 'position not derivable from snap chain - baked numerically');
@@ -2907,9 +2922,9 @@ except Exception as e:
         ];
       }
       // Sweep vector — length along the axis is the component's full dimension.
-      const sweepVxExpr = (axis === 'x') ? wExprUm : `(0)um`;
-      const sweepVyExpr = (axis === 'y') ? hExprUm : `(0)um`;
-      const sweepVzExpr = `(0)um`;
+      const sweepVxExpr = (axis === 'x') ? wExprUm : numUm(0);
+      const sweepVyExpr = (axis === 'y') ? hExprUm : numUm(0);
+      const sweepVzExpr = numUm(0);
 
       // The rib cross-section lives in the X=const (Y-Z) plane and must be
       // COVERED (filled into a face) so the SweepAlongVector produces a SOLID
