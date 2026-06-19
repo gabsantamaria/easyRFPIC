@@ -1263,6 +1263,91 @@ describe('D3/D4 exports: rounded rects + vias', () => {
     pyParses3(out, 'vitest_gdsfactory_via');
   });
 
+  // ── Coplanar-group stacking: a layer ABOVE a coplanar group starts at
+  //    the group's CLADDING top, not the group's zBottom. ─────────────────
+  //
+  // Stack: substrate, then a coplanar group g0 = { waveguide, cladding,
+  // in-group conductor } (all share zBottom = 0), then a top conductor with
+  // NO coplanarGroup (sequential — stacks ABOVE the group). The in-group
+  // conductor is made TALLER than the cladding (h_c0 = 3.0 > h_clad = 2.0)
+  // so the test discriminates the correct "cladding-top" advance (l_top
+  // sits at z = h_clad = 2.0) from the old "max-thickness-of-run" advance
+  // (which would put it at h_c0 = 3.0) AND from the original bug (l_top
+  // buried at the group zBottom = 0). Vias surface the layer Z numerically
+  // (pyAEDT) and parametrically (HFSS).
+  const coplanarAboveScene = () => {
+    const params = {
+      h_si: { expr: '250', unit: 'µm' },
+      h_wg: { expr: '0.6', unit: 'µm' },
+      h_clad: { expr: '2.0', unit: 'µm' },
+      h_c0: { expr: '3.0', unit: 'µm' },   // in-group conductor (taller than cladding)
+      h_top: { expr: '0.5', unit: 'µm' },  // conductor ABOVE the group
+      via_r: { expr: '2', unit: 'µm' },
+    };
+    const s = {
+      params,
+      components: [
+        // v1: from a group member (l_wg, zBottom 0) up to the above-conductor.
+        { id: 'v1', kind: 'via', layer: 'via', cx: 10, cy: 5, r: 'via_r',
+          w: '2*via_r', h: '2*via_r', layerFrom: 'l_wg', layerTo: 'l_top',
+          cutouts: [], transforms: [] },
+        // v2: within the group (l_wg → in-group conductor) — proves they're coplanar.
+        { id: 'v2', kind: 'via', layer: 'via', cx: -10, cy: 5, r: 'via_r',
+          w: '2*via_r', h: '2*via_r', layerFrom: 'l_wg', layerTo: 'l_c0',
+          cutouts: [], transforms: [] },
+      ],
+      snaps: [], mirrors: [], groups: [], booleans: [],
+      stack: [
+        { id: 'l_sub', name: 'Si', thickness: 'h_si', material: 'silicon', color: '#5a6878', role: 'substrate' },
+        { id: 'l_wg', name: 'WG', thickness: 'h_wg', material: 'lithium_tantalate', color: '#86efac', role: 'waveguide',
+          core_width: 'w_wg', slab_height: 'h_slab', slab_width: 'w_slab', etch_angle: 'etch_angle', coplanarGroup: 'g0' },
+        { id: 'l_clad', name: 'Clad', thickness: 'h_clad', material: 'silicon_dioxide', color: '#cbd5e1', role: 'cladding', coplanarGroup: 'g0' },
+        { id: 'l_c0', name: 'GroupMetal', thickness: 'h_c0', material: 'gold', color: '#daa520', role: 'conductor', coplanarGroup: 'g0' },
+        { id: 'l_top', name: 'TopMetal', thickness: 'h_top', material: 'gold', color: '#805e00', role: 'conductor' },
+      ],
+      stackName: 'coplanar_above_stack',
+      simSetup: scene.simSetup,
+    };
+    const { values: pv } = resolveParams({
+      ...params,
+      w_wg: { expr: '1.2' }, h_slab: { expr: '0.1' },
+      w_slab: { expr: '5' }, etch_angle: { expr: '70' },
+    });
+    return { s, pv };
+  };
+
+  it('pyAEDT: a conductor above a coplanar group sits at the cladding top (not the group zBottom)', () => {
+    const { s, pv } = coplanarAboveScene();
+    const out = generatePyAEDT(s, pv);
+    // v1 spans l_wg bottom (0) to l_top top. l_top sits on the CLADDING top
+    // (h_clad = 2.0), NOT the group zBottom (0) and NOT the tallest member
+    // (h_c0 = 3.0). So l_top.zTop = 2.0 + 0.5 = 2.5 → height 2.5.
+    //   buggy (shared zBottom):     0.5
+    //   max-thickness advance:      3.0 + 0.5 = 3.5
+    //   correct (cladding-top):     2.0 + 0.5 = 2.5
+    expect(out).toContain('height="2.5000um"');
+    // v2 within the group: l_wg → l_c0, both share zBottom 0, so height = h_c0 = 3.0.
+    expect(out).toContain('height="3.0000um"');
+    pyParses3(out, 'vitest_pyaedt_coplanar_above');
+  });
+
+  it('HFSS: above-group conductor Z rides the cladding thickness, not the in-group conductor', () => {
+    const { s, pv } = coplanarAboveScene();
+    const out = generateHfssNative(s, pv);
+    const b1 = out.slice(out.indexOf('# v1: via'), out.indexOf('# v2: via'));
+    // v1 ZStart = l_wg group bottom = '0um'.
+    expect(b1).toContain('"ZCenter:=", "0um"');
+    // Height = l_top top - l_wg bottom = (cladding top + h_top). It must
+    // reference the CLADDING thickness (h_clad) and the above-conductor
+    // (h_top), and must NOT reference the in-group conductor (h_c0) — the
+    // group advances by its cladding, not its tallest metal.
+    const height1 = /"Height:=", "([^"]+)"/.exec(b1)?.[1] || '';
+    expect(height1).toContain('h_clad');
+    expect(height1).toContain('h_top');
+    expect(height1).not.toContain('h_c0');
+    pyParses3(out, 'vitest_hfss_coplanar_above');
+  });
+
   // ── Rounded rects ─────────────────────────────────────────────────────
 
   const roundedScene = (extraComp = {}) => {

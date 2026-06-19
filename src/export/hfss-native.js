@@ -17,6 +17,7 @@ import { parseAnchor, anchorLocal } from '../scene/anchors.js';
 import { solveLayout, applyMirrors } from '../scene/solver.js';
 import { expandTransforms } from '../scene/transforms.js';
 import { detectPortIntegrationLine } from '../scene/lumpedPort.js';
+import { migrateStackCoplanarGroups } from '../scene/schema.js';
 import { shapeInstanceToRing } from '../geometry/rings.js';
 import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/racetrack.js';
 import { instanceChainOffsetExpr, chainOwnerForInstance } from '../scene/instance-positions.js';
@@ -766,29 +767,41 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   const wgMaterial = wgLayer ? wgLayer.material : 'lithium_tantalate';
 
   // Compute per-layer Z map. Walk the stack bottom-up and assign each layer a
-  // (zBottom, zTop) pair. Adjacent device-role layers (waveguide/conductor/cladding)
-  // share zBottom — the level's top is the max of all their thicknesses.
-  // A non-device layer above the device level stacks on top of the level top.
+  // (zBottom, zTop) pair. Layers sharing a `coplanarGroup` id (adjacent in the
+  // stack) are COPLANAR — they share zBottom; the group's TOP (where the next
+  // layer stacks) is the top of the group's CLADDING (the encapsulating layer),
+  // NOT the group's zBottom and NOT the tallest member. A layer with no
+  // coplanarGroup is sequential — it stacks on top of the previous level. So a
+  // conductor placed ABOVE a coplanar device group starts at that group's
+  // cladding top, not buried at the group's zBottom.
   //
   // PARAMETRIC Z: alongside the numeric (zBottom, zTop, thickness), build
   // HFSS-side expression strings (zBottomExpr, zTopExpr, thicknessExpr)
   // that reference the stack's thickness variables (h_si, h_wg, h_clad,
   // h_cond, …) instead of being baked at export time. Sweeping any
   // layer thickness in HFSS then moves the substrate / cladding /
-  // conductor / port-sheet Z positions in lockstep. The "max of a
-  // device-level run" advance — which HFSS can't express with min/max
-  // — is resolved at export by picking the run's max-thickness layer
-  // numerically, then emitting THAT layer's thicknessExpr as the
-  // cursor advance. Works perfectly when the run's relative ordering
-  // (which layer is tallest) is stable under sweeps; numerically
-  // re-checked sweeps should land on the same choice.
+  // conductor / port-sheet Z positions in lockstep. The group-top advance
+  // is the cladding's own thicknessExpr — a single variable, so it is
+  // parametrically EXACT (a single-cladding group, the norm, sweeps
+  // perfectly). A group with multiple claddings picks the thickest one
+  // numerically (HFSS has no max() in expressions); a sweep that reorders
+  // which cladding is tallest would need a re-export.
   const isDeviceRole = (r) => r === 'waveguide' || r === 'conductor' || r === 'cladding';
+  // Defensive: the in-app scene is always normalized (migrateStackCoplanarGroups
+  // ran on load, so device runs carry explicit coplanarGroup ids). Raw / imported
+  // stacks reaching the exporter directly might not — migrate here so the walk
+  // groups identically to the canvas in every case (a no-op passthrough when any
+  // layer already declares a group).
+  const zStack = migrateStackCoplanarGroups(stack);
   const layerZ = {}; // layer.id -> { zBottom, zTop, thickness, zBottomExpr, zTopExpr, thicknessExpr }
 
-  // First, find the start of the array's first device-level run, so we can pin Z=0 there.
-  // Substrates BEFORE the first device level go to negative Z; everything else stacks up from there.
-  let firstDeviceIdx = stack.findIndex(l => isDeviceRole(l.role));
-  if (firstDeviceIdx === -1) firstDeviceIdx = stack.length;
+  // Pin Z=0 at the first device level — the first device-role layer OR the
+  // first member of any coplanar group (every group carries a cladding, so a
+  // group whose lowest member happens to be a non-device role still pins its
+  // bottom here, consistent with the coplanarGroup-based upward walk).
+  // Substrates below it go to negative Z.
+  let firstDeviceIdx = zStack.findIndex(l => isDeviceRole(l.role) || l.coplanarGroup);
+  if (firstDeviceIdx === -1) firstDeviceIdx = zStack.length;
 
   // Compute thickness of each layer
   const tOf = (layer) => {
@@ -800,12 +813,21 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   // numbers in the design base unit, which is meters by default).
   const tExprOf = (layer) => exprWithUm(layer.thickness ?? '0');
 
+  // The layer whose TOP defines a coplanar group's top surface (where the next
+  // layer stacks): the cladding (thickest, if several), else — for a malformed
+  // group with no cladding — the thickest member (preserves legacy behavior).
+  const advanceLayerOf = (members) => {
+    const clad = members.filter(m => m.role === 'cladding');
+    const pool = clad.length ? clad : members;
+    return pool.reduce((a, b) => (tOf(b) > tOf(a) ? b : a), pool[0]);
+  };
+
   // Substrates below the first device level (i = 0 to firstDeviceIdx-1, which should all be substrates).
   // Stack them at negative Z, with the highest one ending at Z=0.
   let zCursor = 0;
   let zCursorExpr = '0um';
   for (let i = firstDeviceIdx - 1; i >= 0; i--) {
-    const layer = stack[i];
+    const layer = zStack[i];
     const t = tOf(layer);
     const tExpr = tExprOf(layer);
     const zBottomExpr = `(${zCursorExpr}) - ${tExpr}`;
@@ -817,41 +839,39 @@ export function generateHfssNative(scene, paramValues, options = {}) {
     zCursorExpr = zBottomExpr;
   }
 
-  // Now walk upward from the first device level. Group adjacent device-role layers,
-  // and non-device layers each get their own Z slot above the previous level top.
+  // Now walk upward from the first device level. Coplanar-group members share
+  // zBottom; the cursor advances past a group by its cladding top. A layer with
+  // no coplanarGroup gets its own Z slot above the previous level.
   zCursor = 0;
   zCursorExpr = '0um';
   let i = firstDeviceIdx;
-  while (i < stack.length) {
-    const layer = stack[i];
-    if (isDeviceRole(layer.role)) {
-      // Find the run of adjacent device-role layers
+  while (i < zStack.length) {
+    const layer = zStack[i];
+    const gid = layer.coplanarGroup;
+    if (gid) {
+      // Find the run of adjacent layers sharing this coplanarGroup id.
       const runStart = i;
       let runEnd = i;
-      while (runEnd + 1 < stack.length && isDeviceRole(stack[runEnd + 1].role)) runEnd++;
-      // All layers in the run share zBottom; level top = zBottom + max thickness.
+      while (runEnd + 1 < zStack.length && zStack[runEnd + 1].coplanarGroup === gid) runEnd++;
+      // All members share zBottom; each keeps its own thickness/zTop.
       const zBottom = zCursor;
       const zBottomExpr = zCursorExpr;
-      let maxT = 0;
-      let maxLayer = null;
+      const members = [];
       for (let j = runStart; j <= runEnd; j++) {
-        const t = tOf(stack[j]);
-        const tExpr = tExprOf(stack[j]);
-        layerZ[stack[j].id] = {
+        const t = tOf(zStack[j]);
+        const tExpr = tExprOf(zStack[j]);
+        layerZ[zStack[j].id] = {
           zBottom, zTop: zBottom + t, thickness: t,
           zBottomExpr,
           zTopExpr: `(${zBottomExpr}) + ${tExpr}`,
           thicknessExpr: tExpr,
         };
-        if (t > maxT) { maxT = t; maxLayer = stack[j]; }
+        members.push(zStack[j]);
       }
-      zCursor = zBottom + maxT;
-      // Advance the parametric cursor by the run's max-thickness layer's
-      // expression — picked numerically at export time. If the user
-      // sweeps such that the OTHER layer becomes the taller one, the
-      // numeric pick is wrong and they'd need to re-export. Documented
-      // limitation; HFSS has no first-class max(a,b) in expressions.
-      zCursorExpr = maxLayer ? `(${zBottomExpr}) + ${tExprOf(maxLayer)}` : zBottomExpr;
+      // Advance to the group's cladding TOP — the next layer stacks there.
+      const adv = advanceLayerOf(members);
+      zCursor = zBottom + tOf(adv);
+      zCursorExpr = `(${zBottomExpr}) + ${tExprOf(adv)}`;
       i = runEnd + 1;
     } else {
       const t = tOf(layer);
