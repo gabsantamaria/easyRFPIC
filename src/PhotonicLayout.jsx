@@ -4761,8 +4761,9 @@ export default function App() {
   const handleExportPyAEDT = () => handleExport(`${exportFileBase()}.py`, generatePyAEDT);
   const handleExportHfssNative = () => {
     const appendToActive = !!(scene.simSetup && scene.simSetup.appendToActive);
-    const suffix = appendToActive ? '_hfss_append' : '_hfss';
-    return handleExport(`${exportFileBase()}${suffix}.py`, generateHfssNative, { appendToActive });
+    // Filename is always "_hfss" regardless of append mode (appendToActive
+    // still drives the generated script's behavior, just not the name).
+    return handleExport(`${exportFileBase()}_hfss.py`, generateHfssNative, { appendToActive });
   };
   // gdsfactory export: a parametric @gf.cell function. The design name
   // (project only — NOT the versioned filename) is passed through so the
