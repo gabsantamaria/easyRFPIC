@@ -5708,16 +5708,18 @@ export default function App() {
               // exclusive, so it's still clear which design is loaded).
               const rowModified = !!activeCurId && (isCurrent ? currentIsModified : !!(cached && cached.modified));
               return (
-                <div key={name} className={`border-b border-slate-800 ${isCurrent ? 'bg-slate-800/40' : ''}`}>
-                  <div className={`flex items-center gap-1 px-3 py-1.5 hover:bg-slate-800/60`}>
+                <div key={name} className={`border-b border-slate-800 border-l-2 ${isCurrent ? 'bg-emerald-500/10 border-l-emerald-400' : 'border-l-transparent'}`}>
+                  <div className={`flex items-center gap-1 px-3 py-1.5 ${isCurrent ? '' : 'hover:bg-slate-800/60'}`}>
                     <button
                       onClick={() => toggleDesignExpanded(name)}
                       className="text-slate-500 hover:text-slate-200 w-3 flex-shrink-0"
                       title={isExpanded ? 'Collapse versions' : 'Show versions'}
                     >{isExpanded ? '▾' : '▸'}</button>
                     <button onClick={() => { handleLoad(name); setShowDesigns(false); }} className="flex-1 text-left text-xs font-mono text-slate-200 hover:text-cyan-300 truncate flex items-center gap-1 min-w-0">
-                      {isCurrent && <span className="text-emerald-400 flex-shrink-0">●</span>}
-                      <span className="truncate">{name}</span>
+                      {isCurrent
+                        ? <span className="flex-shrink-0 inline-flex items-center gap-1 px-1 py-px rounded text-[8px] font-bold uppercase tracking-wide bg-emerald-500/25 text-emerald-200 border border-emerald-400/60" title="This is the design you're currently working on">● active</span>
+                        : null}
+                      <span className={`truncate ${isCurrent ? 'text-emerald-100 font-semibold' : ''}`}>{name}</span>
                       {activeVer && (
                         <span
                           className={`flex-shrink-0 inline-flex items-center gap-1 px-1 py-px rounded text-[9px] font-mono ${
@@ -5784,7 +5786,14 @@ export default function App() {
                           design's working state. */}
                       {rowModified && activeVer && (
                         <div
-                          className="flex items-start gap-1 py-1 rounded px-1 bg-amber-900/20 border-l-2 border-amber-400 -ml-px group"
+                          className={`flex items-start gap-1 py-1 rounded px-1 border-l-2 -ml-px group ${
+                            isCurrent
+                              // ACTIVE design's live working state — full-strength amber.
+                              ? 'bg-amber-900/20 border-amber-400'
+                              // Another design's stored working state — muted, so the
+                              // active design's "current" row is the one that stands out.
+                              : 'bg-slate-800/30 border-amber-700/40'
+                          }`}
                         >
                           <button
                             type="button"
