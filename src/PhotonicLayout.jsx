@@ -1123,30 +1123,41 @@ export default function App() {
   // (starts a new chain entry). Marks the design as `unsaved` so
   // the user is reminded that they've moved off the latest state.
   const handleLoadVersion = useCallback(async (name, versionId) => {
-    if (name !== designName) {
-      // The snapshot belongs to a DIFFERENT design — this is a design SWITCH
-      // (load that design at the chosen version). The CURRENT design's working
-      // state must persist, not be discarded: flush it (same save-before-switch
-      // as handleLoad), only confirming if it's a never-saved design.
+    const sameDesign = name === designName;
+    // Loading a snapshot of a DIFFERENT design is a design SWITCH — the design
+    // you're LEAVING must persist, so flush it first (only confirms for a
+    // never-saved scratch design). The design you're switching TO is handled by
+    // the discard check below, same as a same-design revert.
+    if (!sameDesign) {
       if (!(await flushCurrentBeforeSwitch('this version'))) return;
-    } else if (saveStatus === 'unsaved' || currentIsModified) {
-      // Reverting the CURRENT design to one of its OWN snapshots REPLACES the
-      // working state, so confirm before losing the in-progress edits. (The
-      // "current" synthetic row drift is caught by currentIsModified even when
-      // saveStatus is 'saved' — autosave persists but doesn't snapshot.)
-      const msg = currentIsModified
-        ? 'Your working state has unsnapshotted edits ("current" row above). Loading this version will REPLACE them.\n\nDiscard your in-progress edits and load this version?'
-        : 'Discard unsaved changes and load this version?';
-      const ok = await confirmDialog(msg, 'Load version', {
-        confirmLabel: 'Discard & load',
-        confirmTone: 'danger',
-      });
-      if (!ok) return;
     }
     const d = await loadDesign(workspace, name);
     if (!d) { await alertDialog('Failed to load design.', 'Error'); return; }
     const v = findVersionById(d.versions, versionId);
     if (!v) { await alertDialog('Version not found.', 'Error'); return; }
+    // Loading a snapshot REPLACES the TARGET design's working state. If that
+    // working state has unsnapshotted edits, warn before discarding them —
+    // whether the target is the active design (live drift check) or another
+    // design (compare its STORED working scene to the snapshot its pointer is
+    // on). This is the prompt the user expects when clicking a design's own
+    // version row; clicking ANOTHER design's version never silently drops the
+    // edits of the design that owns it.
+    const targetModified = sameDesign
+      ? (saveStatus === 'unsaved' || currentIsModified)
+      : (() => {
+          if (!d.currentVersionId) return false;
+          const cur = (d.versions || []).find(x => x && x.id === d.currentVersionId);
+          if (!cur || !cur.scene) return false;
+          try { return JSON.stringify(d.scene) !== JSON.stringify(cur.scene); } catch { return false; }
+        })();
+    if (targetModified) {
+      const subject = sameDesign ? 'Your working state' : `Design "${name}"`;
+      const ok = await confirmDialog(
+        `${subject} has unsnapshotted edits ("current"). Loading this version will REPLACE them.\n\nDiscard those edits and load this version?`,
+        'Load version', { confirmLabel: 'Discard & load', confirmTone: 'danger' },
+      );
+      if (!ok) return;
+    }
     setScene(normalizeScene(v.scene));
     setHistory([]);
     setFuture([]);
