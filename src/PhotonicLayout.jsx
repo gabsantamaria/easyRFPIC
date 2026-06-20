@@ -1564,23 +1564,34 @@ export default function App() {
   // Save to storage 2 seconds after the last edit, but only for designs that
   // already exist in storage (i.e., the user has saved at least once).
   // We persist the full undo/redo stacks alongside the scene.
+  //
+  // The "already exists" check is done against LIVE STORAGE when the timer
+  // fires — NOT the savedList React cache. savedList lags a just-saved design
+  // (its refresh is async), and gating on it would SKIP autosave for a design
+  // the user just saved, leaving subsequent edits unpersisted until a manual
+  // save / design switch (the "edit then close the tab" loss). Probing storage
+  // is authoritative: it autosaves any design with a real storage home, never
+  // creates a key for a brand-new/unsaved scratch design (it waits for an
+  // explicit Save), and never resurrects a just-deleted one.
   const [lastAutoSavedAt, setLastAutoSavedAt] = useState(null);
   useEffect(() => {
-    // Only autosave when status is unsaved AND the design name exists in saved
-    // list. (Stays gated on saveStatus, not isDirty: a design that is merely
-    // modified-since-snapshot is already persisted as the working state — its
-    // edits are safe — so re-autosaving it would loop. The save-before-switch
-    // flush below is the safety net that covers any dirty-but-not-persisted
-    // window, gated on isDirty.)
+    // Gated on saveStatus, not isDirty: a design that's merely modified-since-
+    // snapshot is already persisted as the working state, so re-autosaving it
+    // would loop. The save-before-switch flush (gated on isDirty) is the net
+    // for any dirty-but-not-persisted window.
     if (saveStatus !== 'unsaved') return;
-    if (!designName || !savedList.includes(designName)) return;
+    if (!designName) return;
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     autosaveTimerRef.current = setTimeout(async () => {
+      const name = (designName || '').trim();
+      let exists = false;
+      try { exists = (await listSavedDesigns(workspace)).includes(name); } catch { exists = false; }
+      if (!name || !exists) return; // brand-new/unsaved scratch design, or deleted — skip
       setSaveStatus('saving');
       // Preserve versions[] and currentVersionId through autosave
       // too — otherwise the first autosave after a snapshot would
       // silently drop history / the current-version pointer.
-      const res = await saveDesign(workspace, designName, { scene, history, future, updatedAt: Date.now(), versions, currentVersionId });
+      const res = await saveDesign(workspace, name, { scene, history, future, updatedAt: Date.now(), versions, currentVersionId });
       if (res.ok) {
         setSaveStatus('saved');
         setLastAutoSavedAt(Date.now());
@@ -1598,7 +1609,7 @@ export default function App() {
     return () => {
       if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     };
-  }, [workspace, scene, history, future, versions, currentVersionId, designName, savedList, saveStatus, mirrorWorkspaceToFileIfLinked]);
+  }, [workspace, scene, history, future, versions, currentVersionId, designName, saveStatus, mirrorWorkspaceToFileIfLinked]);
 
   // Tick to update "saved Xs ago" label every 5s
   const [tickNow, setTickNow] = useState(Date.now());
