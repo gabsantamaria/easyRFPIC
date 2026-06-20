@@ -1264,12 +1264,16 @@ export default function App() {
     if (versionsByDesign[name]) return; // cached
     const d = await loadDesign(workspace, name);
     if (!d) return;
+    const curId = resolveCurrentVersionId(d.currentVersionId, d.versions);
+    // Does this design have unsnapshotted working edits? Compare its STORED
+    // working scene to the snapshot its pointer is on. Cached so the SAVED
+    // DESIGNS panel can show its "current" row even while it isn't active.
+    const cur = (d.versions || []).find(v => v && v.id === curId);
+    let modified = false;
+    try { modified = !!(cur && cur.scene) && JSON.stringify(d.scene) !== JSON.stringify(cur.scene); } catch { modified = false; }
     setVersionsByDesign(prev => ({
       ...prev,
-      [name]: {
-        versions: sortedVersions(d.versions),
-        currentVersionId: resolveCurrentVersionId(d.currentVersionId, d.versions),
-      },
+      [name]: { versions: sortedVersions(d.versions), currentVersionId: curId, modified },
     }));
   }, [workspace, designName, versionsByDesign]);
 
@@ -1297,9 +1301,9 @@ export default function App() {
     if (!designName) return;
     setVersionsByDesign(prev => ({
       ...prev,
-      [designName]: { versions: sortedVersions(versions), currentVersionId },
+      [designName]: { versions: sortedVersions(versions), currentVersionId, modified: currentIsModified },
     }));
-  }, [designName, versions, currentVersionId]);
+  }, [designName, versions, currentVersionId, currentIsModified]);
 
   const handleDeleteDesign = useCallback(async (name) => {
     const ok = await confirmDialog(`Delete "${name}"? This cannot be undone.`, 'Delete design');
@@ -5696,6 +5700,13 @@ export default function App() {
               // = 'saved') and still be modified relative to the
               // snapshot — Save just persists, it doesn't snapshot.
               const isModified = isCurrent && currentIsModified && activeCurId;
+              // "Has unsnapshotted edits" for ANY design — the ACTIVE one via the
+              // live drift check, others via their cached `modified` flag. Drives
+              // the "current" working-state row + a chip marker so a design's
+              // in-progress state stays VISIBLE after you switch away from it
+              // (the active-design cues — green ● + row background — stay
+              // exclusive, so it's still clear which design is loaded).
+              const rowModified = !!activeCurId && (isCurrent ? currentIsModified : !!(cached && cached.modified));
               return (
                 <div key={name} className={`border-b border-slate-800 ${isCurrent ? 'bg-slate-800/40' : ''}`}>
                   <div className={`flex items-center gap-1 px-3 py-1.5 hover:bg-slate-800/60`}>
@@ -5710,24 +5721,27 @@ export default function App() {
                       {activeVer && (
                         <span
                           className={`flex-shrink-0 inline-flex items-center gap-1 px-1 py-px rounded text-[9px] font-mono ${
-                            !isCurrent
-                              // NON-active design: a NEUTRAL "where it was left off"
-                              // chip — must NOT read as the active "on this version"
-                              // cue, so two designs can't look current at once.
-                              ? 'bg-slate-800 text-slate-500 border border-slate-700'
-                              : isModified
-                                ? 'bg-amber-900/40 text-amber-300 border border-amber-700'
-                                : 'bg-cyan-900/40 text-cyan-300 border border-cyan-800'
+                            rowModified
+                              // ANY design with unsnapshotted edits → amber "*"
+                              // (which design is ACTIVE is shown by the green ● +
+                              // row background, so amber here reads as "modified",
+                              // not "current/active").
+                              ? 'bg-amber-900/40 text-amber-300 border border-amber-700'
+                              : isCurrent
+                                // Active design sitting exactly on a snapshot.
+                                ? 'bg-cyan-900/40 text-cyan-300 border border-cyan-800'
+                                // Other design, on a snapshot — neutral.
+                                : 'bg-slate-800 text-slate-500 border border-slate-700'
                           }`}
                           title={
                             (isCurrent ? 'On' : 'Last left on') +
                             ` v${activeVer.versionNumber} (${activeVer.id})${
                               activeVer.description ? `: ${activeVer.description}` : ''
-                            }${isCurrent && isModified ? ' · modified since this snapshot' : ''}`
+                            }${rowModified ? ' · has unsnapshotted edits' : ''}`
                           }
                         >
                           @v{activeVer.versionNumber}
-                          {isCurrent && isModified && <span className="opacity-80">*</span>}
+                          {rowModified && <span className="opacity-80">*</span>}
                         </span>
                       )}
                     </button>
@@ -5759,21 +5773,28 @@ export default function App() {
                   </div>
                   {isExpanded && (
                     <div className="pl-6 pr-2 pb-1.5 border-l-2 border-cyan-900/40 ml-3 mb-1">
-                      {/* Synthetic "current" virtual row — ONLY for the
-                          active design when the working state has
-                          drifted from its currentVersionId snapshot.
-                          Represents the in-progress edits the user
-                          hasn't snapshotted yet. Visually mirrors a
-                          real version row (cyan border + ● bullet)
-                          so the user knows their work isn't lost,
-                          and that clicking a real snapshot row would
-                          replace it (with the existing confirm
-                          dialog as a backstop). */}
-                      {isCurrent && currentIsModified && activeVer && (
+                      {/* Synthetic "current" virtual row — shown for ANY design
+                          whose working state has drifted from its
+                          currentVersionId snapshot, not just the active one, so
+                          a design's unsnapshotted "current" state stays listed
+                          after you switch away from it. For the ACTIVE design it
+                          is the live working state (with a snapshot button); for
+                          another design it represents that design's stored
+                          working state — clicking it returns to (loads) that
+                          design's working state. */}
+                      {rowModified && activeVer && (
                         <div
                           className="flex items-start gap-1 py-1 rounded px-1 bg-amber-900/20 border-l-2 border-amber-400 -ml-px group"
                         >
-                          <div className="flex-1 text-left min-w-0">
+                          <button
+                            type="button"
+                            onClick={isCurrent ? undefined : () => { handleLoad(name); setShowDesigns(false); }}
+                            disabled={isCurrent}
+                            className="flex-1 text-left min-w-0 disabled:cursor-default"
+                            title={isCurrent
+                              ? 'Your in-progress working state (not yet snapshotted)'
+                              : `Return to "${name}"'s unsnapshotted working state`}
+                          >
                             <div className="flex items-center gap-1.5 text-[10px] font-mono">
                               <span className="text-amber-300 font-bold" title="Working state — not yet snapshotted">●</span>
                               <span className="text-amber-300 font-bold">current</span>
@@ -5783,16 +5804,20 @@ export default function App() {
                               </span>
                             </div>
                             <div className="text-[10px] text-slate-400 italic truncate mt-0.5">
-                              Working state — click <span className="text-cyan-300 font-mono not-italic">snapshot</span> above to save as a new version.
+                              {isCurrent
+                                ? <>Working state — click <span className="text-cyan-300 font-mono not-italic">snapshot</span> above to save as a new version.</>
+                                : <>Unsnapshotted working state — click to return to it.</>}
                             </div>
-                          </div>
-                          <button
-                            onClick={handleSnapshot}
-                            className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-800/60 hover:bg-cyan-700 text-cyan-100 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
-                            title="Commit the current state as a new snapshot"
-                          >
-                            snapshot
                           </button>
+                          {isCurrent && (
+                            <button
+                              onClick={handleSnapshot}
+                              className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-800/60 hover:bg-cyan-700 text-cyan-100 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+                              title="Commit the current state as a new snapshot"
+                            >
+                              snapshot
+                            </button>
+                          )}
                         </div>
                       )}
                       {vlist.length === 0 ? (
