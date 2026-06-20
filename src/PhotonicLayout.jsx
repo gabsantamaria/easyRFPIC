@@ -1002,12 +1002,28 @@ export default function App() {
     setDesignName(result.name);
     setHistory([]);
     setFuture([]);
-    setVersions([]);
-    setCurrentVersionId(null);
+    // DATA-LOSS GUARD: if a stored design already has this name, autosave
+    // WILL fire (its trigger is exactly saveStatus==='unsaved' AND
+    // savedList.includes(designName)) and write the imported scene over it.
+    // Resetting versions to [] here would make that save wipe the existing
+    // design's entire snapshot chain. Instead, carry the EXISTING design's
+    // snapshots into the working state: the imported geometry becomes the
+    // new "current" on top of the preserved history, so nothing is lost.
+    let nextVersions = [];
+    let nextCurrentVersionId = null;
+    try {
+      const existing = await loadDesign(workspace, result.name);
+      if (existing && Array.isArray(existing.versions) && existing.versions.length) {
+        nextVersions = existing.versions;
+        nextCurrentVersionId = resolveCurrentVersionId(existing.currentVersionId, existing.versions);
+      }
+    } catch { /* no existing design (or load failed) — start a fresh chain */ }
+    setVersions(nextVersions);
+    setCurrentVersionId(nextCurrentVersionId);
     setSelection({ ids: new Set(), primary: null });
-    // Imported state isn't in workspace storage yet — leave it unsaved so
-    // the user explicitly Saves to keep it (and doesn't clobber a stored
-    // design of the same name via autosave).
+    // Mark unsaved so the user explicitly Saves a brand-new design (no
+    // collision → autosave is gated off until then); for a name collision,
+    // the preserved snapshots above keep autosave from destroying history.
     setSaveStatus('unsaved');
   };
 
