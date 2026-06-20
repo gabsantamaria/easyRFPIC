@@ -1198,6 +1198,23 @@ export default function App() {
     });
   }, [loadVersionsForDesign]);
 
+  // Mirror the ACTIVE design's snapshot chain into `versionsByDesign`.
+  // loadVersionsForDesign deliberately skips the current design (the SAVED
+  // DESIGNS list reads its versions from the live `versions` state instead),
+  // so that design's cache entry would otherwise never be populated. The
+  // moment you switch to another design, its row falls back to the empty
+  // cache and flashes "no snapshots yet" until you click it again. Keeping
+  // the entry in sync here means the design you just left already has its
+  // (correct, current) snapshots cached, so the chip / count / version list
+  // stay populated without a reload.
+  useEffect(() => {
+    if (!designName) return;
+    setVersionsByDesign(prev => ({
+      ...prev,
+      [designName]: { versions: sortedVersions(versions), currentVersionId },
+    }));
+  }, [designName, versions, currentVersionId]);
+
   const handleDeleteDesign = useCallback(async (name) => {
     const ok = await confirmDialog(`Delete "${name}"? This cannot be undone.`, 'Delete design');
     if (!ok) return;
