@@ -924,8 +924,9 @@ function EditableDimsOverlay({ svgRef, viewport, cSel, dd, params, updateScene, 
   );
 }
 
-// Editable snap-offset (dx / dy) overlay for the snaps that INVOLVE the
-// primary-selected component. For each such snap with a non-zero offset it draws
+// Editable snap-offset (dx / dy) overlay for the snaps whose PARENT (`from`
+// side) is the primary-selected component — the parent owns the gap to each of
+// its children, so only it shows these. For each such snap with a non-zero offset it draws
 // the violet dx (horizontal) and dy (vertical) dimension legs between the parent
 // anchor and the child anchor, each with an EDITABLE field: a lone-param offset
 // shows NAME + VALUE fields (rename / edit the param scene-wide), a
@@ -4998,18 +4999,19 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         return null;
       })()}
 
-      {/* Editable snap-offset (dx/dy) overlay for the snaps that involve the
-          selected component — rendered alongside the editable W/H overlay above
-          (any component kind, so long as it has a snap link). Suppressed while
-          the global read-only `showDimensions` overlay is on (that draws all
-          snap dims read-only) to avoid double-drawing the selection's snaps. */}
+      {/* Editable snap-offset (dx/dy) overlay for the snaps where the selected
+          component is the PARENT (the `from` side that OWNS the gap to each of
+          its children) — rendered alongside the editable W/H overlay above (any
+          component kind). Only the parent shows these so the offsets aren't
+          duplicated on the child side. Suppressed while the global read-only
+          `showDimensions` overlay is on (that draws all snap dims read-only). */}
       {editDims && !rulerMode && !showDimensions && selectedId && (() => {
-        const involving = scene.snaps.filter(s => s.to.compId === selectedId || s.from.compId === selectedId);
-        if (!involving.length) return null;
+        const childSnaps = scene.snaps.filter(s => s.from.compId === selectedId);
+        if (!childSnaps.length) return null;
         return (
           <EditableSnapDims
             key={`snapdims-${selectedId}`}
-            svgRef={svgRef} viewport={viewport} snaps={involving} solved={solved}
+            svgRef={svgRef} viewport={viewport} snaps={childSnaps} solved={solved}
             transformInstances={transformInstances} paramValues={paramValues} params={scene.params || {}}
             updateScene={updateScene} commitExpr={commitExpr}
             renameParam={renameParam} updateParamExpr={updateParamExpr}
