@@ -427,6 +427,19 @@ export default function App() {
   // localStorage already, prime the in-memory cache so the first
   // Paste in this tab is instant.
   useEffect(() => {
+    // Prefer the synchronous localStorage entry (the cross-tab channel) so the
+    // newest cross-tab Copy is primed immediately; fall back to the async IDB
+    // mirror only when localStorage is disabled / empty.
+    try {
+      const t = window.localStorage.getItem(CLIPBOARD_STORAGE_KEY);
+      if (t) {
+        const parsed = JSON.parse(t);
+        if (parsed && parsed._kind === CLIPBOARD_KIND && Array.isArray(parsed.components)) {
+          setClipboard({ components: parsed.components, snaps: parsed.snaps || [], params: parsed.params || {} });
+          return undefined;
+        }
+      }
+    } catch { /* fall through to IDB */ }
     let cancelled = false;
     (async () => {
       try {
@@ -1422,8 +1435,13 @@ export default function App() {
     const payload = { components, snaps, params };
     setClipboard(payload);
     const wireFormat = JSON.stringify({ _kind: CLIPBOARD_KIND, ...payload });
-    // Cross-tab: same-origin localStorage is the source of truth for
-    // Paste in another tab.
+    // Cross-tab: write to localStorage SYNCHRONOUSLY. It's shared across every
+    // same-origin tab and is committed before this handler returns — unlike the
+    // IDB write below, which is async and can still be in flight when the user
+    // switches tabs and pastes. localStorage is the reliable cross-tab channel;
+    // the clipboard payload is small (a few components), well under the cap.
+    try { window.localStorage.setItem(CLIPBOARD_STORAGE_KEY, wireFormat); } catch { /* private mode / quota — IDB + OS clipboard cover it */ }
+    // Mirror to the high-capacity IDB store too (covers localStorage-disabled).
     try { await window.storage.set(CLIPBOARD_STORAGE_KEY, wireFormat); } catch {}
     // Cross-app bonus: try the OS clipboard too. The permission prompt
     // is browser-mediated and fires on the FIRST writeText() in a
@@ -1447,6 +1465,21 @@ export default function App() {
     //      (CLIPBOARD_KIND). Lets users paste content that was copied
     //      in an earlier session whose localStorage got cleared.
     let cb = clipboard;
+    // 2a. localStorage — synchronous, shared across same-origin tabs. Checked
+    // before IDB so a payload a DIFFERENT tab just copied is picked up
+    // immediately, with no async-read race.
+    if (!cb || cb.components.length === 0) {
+      try {
+        const t = window.localStorage.getItem(CLIPBOARD_STORAGE_KEY);
+        if (t) {
+          const parsed = JSON.parse(t);
+          if (parsed && parsed._kind === CLIPBOARD_KIND && Array.isArray(parsed.components)) {
+            cb = { components: parsed.components, snaps: parsed.snaps || [], params: parsed.params || {} };
+          }
+        }
+      } catch { /* corrupt/missing — fall through to IDB */ }
+    }
+    // 2b. IDB store (covers the localStorage-disabled / migrated-data case).
     if (!cb || cb.components.length === 0) {
       try {
         const r = await window.storage.get(CLIPBOARD_STORAGE_KEY);
