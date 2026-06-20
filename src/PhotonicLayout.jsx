@@ -15,7 +15,7 @@ import { generateHfssNative } from './export/hfss-native.js';
 import { generateGdsfactory } from './export/gdsfactory.js';
 import { generateSvgFromElement, generatePdfFromElement } from './export/figure.js';
 import { defaultStack, normalizeScene, makeDefaultScene, makeBlankScene, paramsForStack, migrateStackCoplanarGroups } from './scene/schema.js';
-import { buildDesignExport, parseDesignImport, designExportFilename } from './scene/design-file.js';
+import { buildDesignExport, designExportFilename } from './scene/design-file.js';
 import {
   BASE_DESIGN_PREFIX, BASE_LIB_PREFIX, BASE_ARCHIVE_PREFIX, WORKSPACE_KEY,
   designPrefix, libPrefix, archivePrefix, activeDesignKey,
@@ -1011,78 +1011,43 @@ export default function App() {
   // chain. This is the "hand someone the design" / "move it between
   // browsers or machines" file, distinct from the full workspace bundle
   // (which carries every design + library + versions).
-  const handleDownloadDesign = () => {
-    const now = new Date();
-    const payload = buildDesignExport(scene, designName, now.toISOString());
-    const filename = `${designExportFilename(designName, now.toISOString().slice(0, 10))}.json`;
-    const ok = downloadFile(filename, JSON.stringify(payload, null, 2), 'application/json;charset=utf-8');
-    if (!ok) alertDialog('Could not download the design file (the browser may be blocking downloads here).', 'Export error');
+  // Download ONE version's scene as a standalone design JSON. `versionId === null`
+  // means the live working state ("current"). Works for any design in the list:
+  // the active design reads its live scene / in-memory versions; another design
+  // is loaded from storage on demand to fetch the snapshot scene. Plain function
+  // (not useCallback) so it resolves downloadFile — defined later in the body —
+  // at call time without a dep-array TDZ.
+  const handleDownloadVersion = async (name, versionId) => {
+    try {
+      let sceneObj = null;
+      let label = name;
+      if (name === designName) {
+        if (versionId == null) { sceneObj = sceneRef.current || scene; label = `${name}_current`; }
+        else {
+          const v = versions.find(vv => vv && vv.id === versionId);
+          if (v) { sceneObj = v.scene; label = `${name}_v${v.versionNumber}`; }
+        }
+      } else {
+        const d = await loadDesign(workspace, name);
+        if (d) {
+          if (versionId == null) { sceneObj = d.scene; label = `${name}_current`; }
+          else {
+            const v = (d.versions || []).find(vv => vv && vv.id === versionId);
+            if (v) { sceneObj = v.scene; label = `${name}_v${v.versionNumber}`; }
+          }
+        }
+      }
+      if (!sceneObj) { await alertDialog('Could not find that version to download.', 'Export error'); return; }
+      const now = new Date();
+      const payload = buildDesignExport(sceneObj, label, now.toISOString());
+      const filename = `${designExportFilename(label, now.toISOString().slice(0, 10))}.json`;
+      const ok = downloadFile(filename, JSON.stringify(payload, null, 2), 'application/json;charset=utf-8');
+      if (!ok) await alertDialog('Could not download the file (the browser may be blocking downloads here).', 'Export error');
+    } catch (e) {
+      await alertDialog(`Download failed: ${e.message}`, 'Export error');
+    }
   };
 
-  // Import a design from a JSON file, REPLACING the canvas. Only the scene
-  // is read — any history / versions in the file are ignored (the imported
-  // design starts a fresh working state with empty undo + no snapshots).
-  // Accepts: our export format ({ format, scene }), a full design payload
-  // (takes its .scene), or a bare scene object ({ components, ... }).
-  const handleImportDesignFile = async () => {
-    if (saveStatus === 'unsaved') {
-      const ok = await confirmDialog('Discard unsaved changes and import a design from a file?', 'Import design');
-      if (!ok) return;
-    }
-    // Hidden <input type=file> — works in every browser incl. Safari and
-    // sandboxed iframes where the File System Access picker is blocked.
-    const file = await new Promise((resolve) => {
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.accept = 'application/json,.json';
-      input.onchange = (e) => resolve(e.target.files?.[0] || null);
-      input.click();
-    });
-    if (!file) return;
-    let parsed;
-    try {
-      parsed = JSON.parse(await file.text());
-    } catch (e) {
-      await alertDialog('Could not read that file as JSON.\n\n' + e.message, 'Import failed');
-      return;
-    }
-    // Extract just the scene (ignores any history / versions in the file).
-    const result = parseDesignImport(parsed, file.name.replace(/\.json$/i, ''));
-    if (result.error) {
-      const msg = result.error === 'no-scene' || result.error === 'not-object'
-        ? 'That file does not contain a design (no scene with components was found).'
-        : 'The design in that file could not be loaded.\n\n' + (result.message || '');
-      await alertDialog(msg, 'Import failed');
-      return;
-    }
-    setScene(result.scene);
-    setDesignName(result.name);
-    setHistory([]);
-    setFuture([]);
-    // DATA-LOSS GUARD: if a stored design already has this name, autosave
-    // WILL fire (its trigger is exactly saveStatus==='unsaved' AND
-    // savedList.includes(designName)) and write the imported scene over it.
-    // Resetting versions to [] here would make that save wipe the existing
-    // design's entire snapshot chain. Instead, carry the EXISTING design's
-    // snapshots into the working state: the imported geometry becomes the
-    // new "current" on top of the preserved history, so nothing is lost.
-    let nextVersions = [];
-    let nextCurrentVersionId = null;
-    try {
-      const existing = await loadDesign(workspace, result.name);
-      if (existing && Array.isArray(existing.versions) && existing.versions.length) {
-        nextVersions = existing.versions;
-        nextCurrentVersionId = resolveCurrentVersionId(existing.currentVersionId, existing.versions);
-      }
-    } catch { /* no existing design (or load failed) — start a fresh chain */ }
-    setVersions(nextVersions);
-    setCurrentVersionId(nextCurrentVersionId);
-    setSelection({ ids: new Set(), primary: null });
-    // Mark unsaved so the user explicitly Saves a brand-new design (no
-    // collision → autosave is gated off until then); for a name collision,
-    // the preserved snapshots above keep autosave from destroying history.
-    setSaveStatus('unsaved');
-  };
 
   // Before switching AWAY from the current design — to another design, or to
   // another design's SNAPSHOT — make sure its working ("current") state isn't
@@ -1371,6 +1336,98 @@ export default function App() {
 
   // ----- Copy / Paste -----
   //
+  // Build a portable scene fragment from a set of component ids: the selected
+  // components (deep-ish copied), their INTERNAL snaps (both endpoints in the
+  // set), and the transitive closure of every referenced parameter. Shared by
+  // Copy and "Download selection". Returns { components, snaps, params } or null.
+  const buildSelectionFragment = useCallback((ids) => {
+    if (!ids || ids.size === 0) return null;
+    const components = scene.components
+      .filter(c => ids.has(c.id))
+      .map(c => ({ ...c, cutouts: (c.cutouts || []).map(cu => ({ ...cu })) }));
+    if (components.length === 0) return null;
+    const snaps = scene.snaps
+      .filter(s => ids.has(s.from.compId) && ids.has(s.to.compId))
+      .map(s => ({ ...s }));
+    const params = {};
+    const used = new Set();
+    const frontier = [];
+    for (const c of components) for (const id of tokenizeComponentExprs(c)) frontier.push(id);
+    for (const s of snaps) for (const expr of [s.dx, s.dy]) {
+      if (typeof expr === 'string') for (const id of tokenizeIdents(expr)) frontier.push(id);
+    }
+    while (frontier.length) {
+      const id = frontier.pop();
+      if (RESERVED_IDENTS.has(id) || id.startsWith('_comp_') || used.has(id)) continue;
+      const p = scene.params[id];
+      if (!p) continue;
+      used.add(id);
+      params[id] = { ...p };
+      if (typeof p.expr === 'string') for (const childId of tokenizeIdents(p.expr)) {
+        if (!used.has(childId)) frontier.push(childId);
+      }
+    }
+    return { components, snaps, params };
+  }, [scene.components, scene.snaps, scene.params]);
+
+  // Insert a scene fragment (components + internal snaps + params) into the
+  // current scene: fresh `<id>_copy` ids, snap endpoints remapped, params
+  // backfilled (destination WINS on a name collision), and the new components
+  // selected. Placement: opts.at = { x, y } (world) centers the fragment's
+  // centroid there; otherwise it's offset by 5 grid steps (the Paste default).
+  // Shared by Paste and "Upload shapes". Returns the number of components added.
+  const applyShapeFragment = useCallback((cb, opts = {}) => {
+    if (!cb || !Array.isArray(cb.components) || cb.components.length === 0) return 0;
+    const idMap = {};
+    const existingIds = new Set(scene.components.map(c => c.id));
+    for (const c of cb.components) {
+      let candidate = `${c.id}_copy`;
+      let i = 2;
+      while (existingIds.has(candidate)) candidate = `${c.id}_copy${i++}`;
+      existingIds.add(candidate);
+      idMap[c.id] = candidate;
+    }
+    let dx, dy;
+    if (opts.at && Number.isFinite(opts.at.x) && Number.isFinite(opts.at.y)) {
+      let sx = 0, sy = 0, n = 0;
+      for (const c of cb.components) {
+        if (Number.isFinite(c.cx) && Number.isFinite(c.cy)) { sx += c.cx; sy += c.cy; n++; }
+      }
+      dx = opts.at.x - (n ? sx / n : 0);
+      dy = opts.at.y - (n ? sy / n : 0);
+    } else {
+      const offset = gridSize * 5;
+      dx = offset; dy = -offset;
+    }
+    const newComponents = cb.components.map(c => ({
+      ...c,
+      id: idMap[c.id],
+      cx: (Number.isFinite(c.cx) ? c.cx : 0) + dx,
+      cy: (Number.isFinite(c.cy) ? c.cy : 0) + dy,
+    }));
+    const newSnaps = (cb.snaps || []).map(s => ({
+      ...s,
+      id: `snap_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      from: { ...s.from, compId: idMap[s.from.compId] },
+      to: { ...s.to, compId: idMap[s.to.compId] },
+    }));
+    updateScene(prev => {
+      const mergedParams = { ...prev.params };
+      for (const [name, p] of Object.entries(cb.params || {})) {
+        if (!(name in mergedParams)) mergedParams[name] = { ...p };
+      }
+      return {
+        ...prev,
+        params: mergedParams,
+        components: [...prev.components, ...newComponents],
+        snaps: [...prev.snaps, ...newSnaps],
+      };
+    });
+    const newIds = new Set(newComponents.map(c => c.id));
+    setSelection({ ids: newIds, primary: newComponents[newComponents.length - 1].id });
+    return newComponents.length;
+  }, [scene.components, gridSize, updateScene, setSelection]);
+
   // The clipboard payload is a rich scene fragment (components + snaps,
   // with cutouts/transforms preserved). We persist it three ways, each
   // with a different reach:
@@ -1385,54 +1442,8 @@ export default function App() {
   //      Will silently no-op if the API isn't present or the user
   //      hasn't granted clipboard-write permission.
   const handleCopy = useCallback(async () => {
-    if (selectedIds.size === 0) return;
-    const ids = selectedIds;
-    const components = scene.components
-      .filter(c => ids.has(c.id))
-      .map(c => ({ ...c, cutouts: (c.cutouts || []).map(cu => ({ ...cu })) }));
-    // Internal snaps: both endpoints in the selection.
-    const snaps = scene.snaps
-      .filter(s => ids.has(s.from.compId) && ids.has(s.to.compId))
-      .map(s => ({ ...s }));
-    // Collect the transitive closure of every parameter referenced by
-    // the copied components or snaps. Paste will use these to backfill
-    // any params that are missing on the destination side (with the
-    // SOURCE's value), but leave any same-name destination params
-    // alone — see handlePaste. Synthetic _comp_<id>_* identifiers and
-    // math-fn RESERVED_IDENTS are filtered (they're not workspace
-    // params; we'd just bloat the payload).
-    const params = {};
-    {
-      const used = new Set();
-      const frontier = [];
-      for (const c of components) {
-        for (const id of tokenizeComponentExprs(c)) frontier.push(id);
-      }
-      for (const s of snaps) {
-        for (const expr of [s.dx, s.dy]) {
-          if (typeof expr !== 'string') continue;
-          for (const id of tokenizeIdents(expr)) frontier.push(id);
-        }
-      }
-      while (frontier.length) {
-        const id = frontier.pop();
-        if (RESERVED_IDENTS.has(id)) continue;
-        if (id.startsWith('_comp_')) continue; // solver internal
-        if (used.has(id)) continue;
-        const p = scene.params[id];
-        if (!p) continue;
-        used.add(id);
-        // Snapshot a deep-ish copy so subsequent edits in the source
-        // workspace don't mutate the clipboard payload.
-        params[id] = { ...p };
-        if (typeof p.expr === 'string') {
-          for (const childId of tokenizeIdents(p.expr)) {
-            if (!used.has(childId)) frontier.push(childId);
-          }
-        }
-      }
-    }
-    const payload = { components, snaps, params };
+    const payload = buildSelectionFragment(selectedIds);
+    if (!payload) return;
     setClipboard(payload);
     const wireFormat = JSON.stringify({ _kind: CLIPBOARD_KIND, ...payload });
     // Cross-tab: write to localStorage SYNCHRONOUSLY. It's shared across every
@@ -1453,7 +1464,7 @@ export default function App() {
       }
     } catch { /* permission denied / not allowed — silent fallback */ }
     setSaveStatus(s => s); // no-op, just to indicate user feedback could go here
-  }, [selectedIds, scene.components, scene.snaps]);
+  }, [selectedIds, buildSelectionFragment]);
 
   const handlePaste = useCallback(async () => {
     // Resolve the clipboard payload with a three-tier fallback so paste
@@ -1503,65 +1514,13 @@ export default function App() {
       } catch { /* permission denied / not JSON / not our payload — give up */ }
     }
     if (!cb || cb.components.length === 0) return;
-    // Generate fresh IDs for pasted components, mapping old → new
-    const idMap = {};
-    const existingIds = new Set(scene.components.map(c => c.id));
-    for (const c of cb.components) {
-      // Try `<id>_copy`, `<id>_copy2`, …
-      let candidate = `${c.id}_copy`;
-      let i = 2;
-      while (existingIds.has(candidate)) {
-        candidate = `${c.id}_copy${i++}`;
-      }
-      existingIds.add(candidate);
-      idMap[c.id] = candidate;
-    }
-    // Offset the pasted components so they're visible (in grid units)
-    const offset = gridSize * 5;
-    const newComponents = cb.components.map(c => ({
-      ...c,
-      id: idMap[c.id],
-      cx: c.cx + offset,
-      cy: c.cy - offset,
-      // Width/height KEEP their parameter expressions (the whole point: shared parameters)
-    }));
-    // Snaps among the copied set: rewire endpoints to the new IDs
-    // Note: dx/dy expressions stay the same — they reference the same gap_* parameters,
-    // so the pasted pair has the same separation as the original.
-    const newSnaps = cb.snaps.map(s => ({
-      ...s,
-      id: `snap_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-      from: { ...s.from, compId: idMap[s.from.compId] },
-      to: { ...s.to, compId: idMap[s.to.compId] },
-    }));
-    updateScene(prev => {
-      // Backfill any parameters the copied components reference but
-      // the destination workspace doesn't have yet. Existing-name
-      // collisions: DESTINATION WINS — same name in both probably
-      // means "same parameter, different value" (e.g. a wider trace
-      // in this workspace), and silently overwriting would break the
-      // user's existing geometry. The pasted shape will adopt the
-      // destination's value, which is the spec's intended behavior:
-      // "the pasted elements could be different since the destination
-      // parameters have different values and that's okay".
-      const mergedParams = { ...prev.params };
-      for (const [name, p] of Object.entries(cb.params || {})) {
-        if (!(name in mergedParams)) mergedParams[name] = { ...p };
-      }
-      return {
-        ...prev,
-        params: mergedParams,
-        components: [...prev.components, ...newComponents],
-        snaps: [...prev.snaps, ...newSnaps],
-      };
-    });
-    // Select the pasted set
-    const newIds = new Set(newComponents.map(c => c.id));
-    setSelection({ ids: newIds, primary: newComponents[newComponents.length - 1].id });
+    // Insert with fresh ids + the standard paste offset, params backfilled,
+    // and the new set selected (shared with "Upload shapes").
+    applyShapeFragment(cb);
     // Keep the in-memory cache hot so the NEXT paste skips the
     // localStorage / OS-clipboard lookup.
     setClipboard(cb);
-  }, [clipboard, scene.components, gridSize, updateScene, setSelection]);
+  }, [clipboard, applyShapeFragment]);
 
   // Cmd+S = save, Cmd+C / Cmd+V = copy/paste, + = union, - = subtract
   useEffect(() => {
@@ -2490,6 +2449,61 @@ export default function App() {
   // Right-click context menu state (right-clicking a component opens it).
   // null when closed; otherwise { x, y, items }.
   const [contextMenu, setContextMenu] = useState(null);
+  // Download just the selected shapes (components + internal snaps + the params
+  // they reference) as a portable `easyrfpic_shapes` JSON, which "Upload shapes"
+  // (canvas right-click) re-inserts into any design.
+  const handleDownloadSelection = (ids) => {
+    const frag = buildSelectionFragment(ids);
+    if (!frag) { alertDialog('Select one or more shapes first.', 'Nothing to download'); return; }
+    const payload = { format: 'easyrfpic_shapes', version: 1, exportedAt: new Date().toISOString(), ...frag };
+    const ws = (workspace || 'default').replace(/[^A-Za-z0-9._-]+/g, '_') || 'default';
+    const ts = new Date().toISOString().slice(0, 10);
+    const filename = `${ws}_shapes_${frag.components.length}_${ts}.json`;
+    const ok = downloadFile(filename, JSON.stringify(payload, null, 2), 'application/json;charset=utf-8');
+    if (!ok) alertDialog('Could not download the shapes file (the browser may be blocking downloads here).', 'Export error');
+  };
+
+  // Upload a shapes file (or any design .json) and INSERT its components into
+  // the current design (non-destructive append). `at` (world point) centers the
+  // inserted group at the right-click location. Accepts a "Download selection"
+  // file (top-level components), a design export ({ scene: { components } }), or
+  // a bare scene object.
+  const handleUploadShapes = async (at) => {
+    const file = await new Promise((resolve) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'application/json,.json';
+      input.onchange = (e) => resolve(e.target.files?.[0] || null);
+      input.click();
+    });
+    if (!file) return;
+    let parsed;
+    try { parsed = JSON.parse(await file.text()); }
+    catch (e) { await alertDialog('Could not read that file as JSON.\n\n' + e.message, 'Upload failed'); return; }
+    const src = (parsed && Array.isArray(parsed.components)) ? parsed
+      : (parsed && parsed.scene && Array.isArray(parsed.scene.components)) ? parsed.scene
+      : null;
+    if (!src || src.components.length === 0) {
+      await alertDialog('That file has no shapes to upload (expected a "Download selection" file or a design file with components).', 'Upload failed');
+      return;
+    }
+    const frag = { components: src.components, snaps: src.snaps || [], params: src.params || {} };
+    const n = applyShapeFragment(frag, at ? { at } : {});
+    if (!n) await alertDialog('Could not insert the shapes from that file.', 'Upload failed');
+  };
+
+  // Canvas-background right-click menu: upload shapes (at the click point) and,
+  // when the clipboard holds shapes, a Paste shortcut.
+  const openBackgroundContextMenu = ({ x, y, worldX, worldY }) => {
+    const items = [
+      { label: 'Upload shapes here…', icon: Upload, onClick: () => handleUploadShapes({ x: worldX, y: worldY }) },
+    ];
+    if (clipboard && Array.isArray(clipboard.components) && clipboard.components.length) {
+      items.push({ label: `Paste (${clipboard.components.length})`, icon: Copy, hint: '⌘V', onClick: () => handlePaste() });
+    }
+    setContextMenu({ x, y, items });
+  };
+
   const openComponentContextMenu = ({ compId, x, y }) => {
     const comp = scene.components.find(c => c.id === compId);
     if (!comp) return;
@@ -2531,6 +2545,8 @@ export default function App() {
       { divider: true },
       { label: multi ? `Duplicate (${selectedIds.size})` : 'Duplicate', icon: Copy,
         onClick: () => duplicateIds(multi ? selectedIds : new Set([compId])) },
+      { label: multi ? `Download selection (${selectedIds.size})` : 'Download shape', icon: Download,
+        onClick: () => handleDownloadSelection(multi ? selectedIds : new Set([compId])) },
       { divider: true },
       { label: multi ? `Delete (${selectedIds.size})` : 'Delete', icon: Trash2,
         onClick: () => deleteComp(multi ? selectedIds : new Set([compId])), hint: 'Del' },
@@ -5570,12 +5586,9 @@ export default function App() {
             <button onClick={handleNewBlank} className="flex items-center gap-1 px-2 py-1 rounded text-xs border border-slate-600 hover:bg-slate-800" title="New blank design — starts from a completely empty scene (no components, no parameters; layer stack preserved). Prompts to save the current design first if unsaved.">
               <FilePlus size={11} /> blank
             </button>
-            <button onClick={handleDownloadDesign} className="flex items-center gap-1 px-2 py-1 rounded text-xs border border-slate-600 hover:bg-slate-800" title="Export this design to a JSON file — the current canvas only (params, components, snaps, stack, cells). Snapshots and version history are NOT included.">
-              <Download size={11} /> export
-            </button>
-            <button onClick={handleImportDesignFile} className="flex items-center gap-1 px-2 py-1 rounded text-xs border border-slate-600 hover:bg-slate-800" title="Import a design from a JSON file — replaces the canvas. Only the geometry is loaded; any snapshots/version history in the file are ignored. Prompts before discarding unsaved changes.">
-              <Upload size={11} /> import
-            </button>
+            {/* Per-design export moved to a download icon on each version (incl.
+                current) in the SAVED DESIGNS list; design import lives in that
+                panel's footer. */}
           </div>
         </div>
       </header>
@@ -5888,6 +5901,13 @@ export default function App() {
                                 : <>Unsnapshotted working state — click to return to it.</>}
                             </div>
                           </button>
+                          <button
+                            onClick={() => handleDownloadVersion(name, null)}
+                            className="text-slate-500 hover:text-cyan-400 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 flex-shrink-0"
+                            title="Download the current working state as a design .json file"
+                          >
+                            <Download size={10} />
+                          </button>
                           {isCurrent && (
                             <button
                               onClick={handleSnapshot}
@@ -5966,6 +5986,13 @@ export default function App() {
                                 title="Edit this version's description"
                               >
                                 <Pencil size={10} />
+                              </button>
+                              <button
+                                onClick={() => handleDownloadVersion(name, v.id)}
+                                className="text-slate-600 hover:text-cyan-400 opacity-0 group-hover:opacity-100 transition-opacity p-0.5"
+                                title={`Download v${v.versionNumber} as a design .json file (this snapshot's scene only)`}
+                              >
+                                <Download size={10} />
                               </button>
                               <button
                                 onClick={() => handleDeleteVersion(name, v.id)}
@@ -7103,6 +7130,7 @@ export default function App() {
             setAddMode={setAddMode}
             commitDragAdd={commitDragAdd}
             onComponentContextMenu={openComponentContextMenu}
+            onBackgroundContextMenu={openBackgroundContextMenu}
             onSvgElement={(el) => { canvasSvgRef.current = el; }}
             flashAnchor={flashAnchor}
           />

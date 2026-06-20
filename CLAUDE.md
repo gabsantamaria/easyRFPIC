@@ -277,6 +277,13 @@ Canvas uses SVG with `y-up world → y-down screen` transform.
 
 ## Exports
 
+### Design / shape JSON download & upload (UI)
+
+- **Per-version download** (`handleDownloadVersion(name, versionId)`): a Download icon on EVERY row of the SAVED DESIGNS version list — each snapshot AND the synthetic "current" row (`versionId === null` ⇒ live working scene) — writes that one scene as a standalone design JSON via `buildDesignExport`. Works for any design in the list (the active one reads live/in-memory state; another design is loaded from storage on demand). This REPLACED the old toolbar "export" button. Whole-design-with-history export still lives on each design row (`handleExportDesign` → `exportDesign` bundle).
+- **Design import** lives only in the SAVED DESIGNS panel footer (`handleImportDesignFromFile` → adds the file as a NEW design in the workspace). The old toolbar "import" (which REPLACED the canvas, `handleImportDesignFile`) was removed as redundant.
+- **Selected-shapes download / upload** (context menus): right-clicking selected shapes → "Download selection" writes an `{ format:'easyrfpic_shapes', components, snaps, params }` file (`handleDownloadSelection`); right-clicking the canvas BACKGROUND → "Upload shapes here…" (`handleUploadShapes`) inserts those shapes at the click point (`onBackgroundContextMenu` in Canvas.jsx supplies the world point). Upload also accepts a design export ({ scene:{components} }) or a bare scene.
+- **Shared fragment helpers**: `buildSelectionFragment(ids)` (components + internal snaps + transitive param closure) backs both Copy and Download-selection; `applyShapeFragment(cb, { at? })` (id-collision `<id>_copy` rename, snap remap, dest-wins param backfill, select) backs both Paste and Upload-shapes. `opts.at` (world point) centers the fragment there; otherwise the 5-grid-step Paste offset.
+
 ### pyAEDT (`generatePyAEDT`)
 
 For each component, emits ONE shape-creation call at the BASE position (no transforms applied), then emits each transform in `c.transforms` as a SEPARATE pyAEDT call. The HFSS modeler history ends up mirroring the SHAPES panel tree.

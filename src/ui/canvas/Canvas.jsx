@@ -1168,7 +1168,7 @@ function EditablePolyDims({ svgRef, viewport, cSel, verts, params, updateScene, 
 // =========================================================================
 // CANVAS
 // =========================================================================
-export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelection, viewport, setViewport, snapMode, setSnapMode, gridSize, gridSnapEnabled, showGrid = true, paramValues, addParam, updateParamExpr, rulerMode, setRulerMode, rulerMeasurements, setRulerMeasurements, rulerInProgress, setRulerInProgress, rulerSnapPoint, setRulerSnapPoint, alertDialog, setInteractionStatus, showDimensions, editDims = false, commitExpr = null, renameParam = null, addMode, setAddMode, commitDragAdd, onComponentContextMenu, onSvgElement, flashAnchor = null, canvasTheme = DEFAULT_CANVAS_THEME }) {
+export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelection, viewport, setViewport, snapMode, setSnapMode, gridSize, gridSnapEnabled, showGrid = true, paramValues, addParam, updateParamExpr, rulerMode, setRulerMode, rulerMeasurements, setRulerMeasurements, rulerInProgress, setRulerInProgress, rulerSnapPoint, setRulerSnapPoint, alertDialog, setInteractionStatus, showDimensions, editDims = false, commitExpr = null, renameParam = null, addMode, setAddMode, commitDragAdd, onComponentContextMenu, onBackgroundContextMenu, onSvgElement, flashAnchor = null, canvasTheme = DEFAULT_CANVAS_THEME }) {
   // Drop a single committed ruler measurement by id.
   const deleteRuler = (id) => setRulerMeasurements((prev) => prev.filter((m) => m.id !== id));
   const svgRef = useRef(null);
@@ -3328,19 +3328,25 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         }
       }}
       onContextMenu={(e) => {
-        // Right-click on a component opens the App-level context menu.
-        // Right-click on the bare canvas falls through to the browser's
-        // own menu (no preventDefault) so DevTools / "save image" stay
-        // accessible during dev.
+        // Right-click on a component opens the App-level component menu;
+        // right-click on the bare canvas opens the background menu (e.g.
+        // "Upload shapes here"). Both preventDefault the browser menu.
         const cid = e.target?.dataset?.compId;
-        if (!cid || !onComponentContextMenu) return;
-        e.preventDefault();
-        // Replace the selection with this component if it isn't already
-        // included, so the menu operations have a clear target.
-        if (!selectedIds.has(cid)) {
-          setSelection({ ids: new Set([cid]), primary: cid });
+        if (cid && onComponentContextMenu) {
+          e.preventDefault();
+          // Replace the selection with this component if it isn't already
+          // included, so the menu operations have a clear target.
+          if (!selectedIds.has(cid)) {
+            setSelection({ ids: new Set([cid]), primary: cid });
+          }
+          onComponentContextMenu({ compId: cid, x: e.clientX, y: e.clientY });
+          return;
         }
-        onComponentContextMenu({ compId: cid, x: e.clientX, y: e.clientY });
+        if (onBackgroundContextMenu) {
+          e.preventDefault();
+          const wp = screenToWorld(e.clientX, e.clientY);
+          onBackgroundContextMenu({ x: e.clientX, y: e.clientY, worldX: wp.x, worldY: wp.y });
+        }
       }}
     >
       <defs>
