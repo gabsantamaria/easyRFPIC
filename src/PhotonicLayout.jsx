@@ -1028,9 +1028,35 @@ export default function App() {
   };
 
   const handleLoad = useCallback(async (name) => {
+    if (name === designName) return; // already on this design — nothing to do
     if (saveStatus === 'unsaved') {
-      const ok = await confirmDialog('Discard unsaved changes and load "' + name + '"?', 'Load design');
-      if (!ok) return;
+      // Switching to a DIFFERENT design with unsaved working edits. The
+      // working ("current") state of the design you're LEAVING is not a thing
+      // to throw away — it should persist and be there when you return. If
+      // that design is stored, flush it to storage now (autosave would have
+      // done the same within ~2s) and switch silently. Only a brand-new
+      // design with no storage home can actually be lost, so that case still
+      // confirms before discarding. (Loading a specific SNAPSHOT —
+      // handleLoadVersion — keeps its own discard prompt; that genuinely
+      // replaces the working state.)
+      if (designName && savedList.includes(designName)) {
+        const res = await saveDesign(workspace, designName, { scene, history, future, updatedAt: Date.now(), versions, currentVersionId });
+        if (res.ok) {
+          mirrorWorkspaceToFileIfLinked();
+        } else {
+          // Storage write failed (e.g. quota) — DON'T silently lose the
+          // current design's edits. Surface it and let the user decide.
+          console.error('Save-before-switch failed:', describeSaveFailure(res), res);
+          const ok = await confirmDialog(
+            `Could not save "${designName}" before switching (${res.message || 'storage error'}).\n\nLoad "${name}" anyway and lose its unsaved changes?`,
+            'Save failed',
+          );
+          if (!ok) return;
+        }
+      } else {
+        const ok = await confirmDialog('Discard unsaved changes and load "' + name + '"?', 'Load design');
+        if (!ok) return;
+      }
     }
     const d = await loadDesign(workspace, name);
     if (!d) { await alertDialog('Failed to load.', 'Error'); return; }
@@ -1043,7 +1069,7 @@ export default function App() {
     setDesignName(name);
     await setActiveDesignName(workspace, name);
     setSaveStatus('saved');
-  }, [workspace, saveStatus, setSelection, confirmDialog, alertDialog]);
+  }, [workspace, saveStatus, designName, savedList, scene, history, future, versions, currentVersionId, setSelection, confirmDialog, alertDialog, mirrorWorkspaceToFileIfLinked]);
 
   // Load a specific VERSION of a design into the working state. The
   // working state becomes the version's frozen scene; the user can
