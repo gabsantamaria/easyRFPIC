@@ -175,6 +175,11 @@ For non-rect shapes, `expandTransforms` propagates shape-specific fields (r, rx,
 
 **Snap-graph validation** (`validateSnapGraph`): live check surfaced in the UI; flags `duplicate-to` (two+ snaps target the same component) and dangling compId references. Run it after any programmatic snap surgery.
 
+**Snap discoverability aids** (Canvas render):
+- **Alt-held anchor guides**: while Option/Alt is held (and not in add/ruler/snap-mode), faint amber dots show the 9 snap anchors of every instance INCLUDING repeat replicas (sourced from `transformInstances`, viewport-culled, `pointerEvents:none`), so the user can see where an Alt-drag will land. They vanish on Alt release; the dragged cluster's own anchors are skipped.
+- **Snap-mode anchor hover-highlight**: in `snapMode==='creating'`, hovering a fixed anchor enlarges it + draws a cyan ring (`#06b6d4`) and sets `snapHover={kind:'anchor', …}` so the preview line locks onto it. `snapHover` now carries a `kind` (`'anchor'`|`'edge'`); the edge hover-dot is gated to `kind==='edge'`.
+- **Snap-offset dims on selection**: the violet dimension overlay (the `showDimensions` block) ALSO fires when `editDims && selectedId` — drawing the dx/dy of snaps that involve the selected component (the W/H stay on the cyan EditableDimsOverlay). Reuses the same renderer via a `selOnly` flag (which also skips the comp-W/H loop and filters snaps to the selection). For a replica snap (`from.instanceIdx>0`) the `fromW` anchor is shifted to the replica via `resolveInstanceAnchorNumeric`. NOTE: the shared renderer SKIPS a dim whose label can't fit along its length — small offsets only appear once zoomed in (pre-existing behavior).
+
 ## Canvas editing UX (Phase 4)
 
 **On-canvas vertex editing** (Canvas.jsx, helpers exported for tests): the PRIMARY-selected polyline/polyshape shows index-stable vertex handles (from `resolvePolylineVertices`).

@@ -14,6 +14,7 @@ import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { DeferredTextInput } from '../DeferredTextInput.jsx';
 import { DEFAULT_CANVAS_THEME } from '../theme.js';
+import { resolveInstanceAnchorNumeric } from '../../scene/instance-positions.js';
 import { ANCHORS, parseAnchor, anchorLocal, anchorLocalRotated, anchorWorld, compRotationDeg, rotateLocal } from '../../scene/anchors.js';
 import { evalExpr } from '../../scene/params.js';
 import { solveLayout, applyMirrors, resolveBooleanBboxes } from '../../scene/solver.js';
@@ -3851,16 +3852,23 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
               const ax = b.cx + local.x;
               const ay = -(b.cy + local.y);
               const isPicked = snapPick?.compId === b.id && snapPick.anchor === a;
+              const isHover = snapHover?.kind === 'anchor' && snapHover.compId === b.id && snapHover.anchor === a;
               return (
-                <circle key={'sa_' + a}
-                  cx={ax} cy={ay} r={hr * 1.2}
-                  fill={isPicked ? '#ef4444' : '#f59e0b'}
-                  stroke="white" strokeWidth={0.2}
-                  style={{ cursor: 'crosshair' }}
-                  onMouseEnter={() => setSnapHover(null)}
-                  onMouseDown={(e) => e.stopPropagation()}
-                  onClick={(e) => { e.stopPropagation(); onAnchorClick(b.id, a, e); }}
-                />
+                <g key={'sa_' + a}>
+                  {isHover && !isPicked && (
+                    <circle cx={ax} cy={ay} r={hr * 2.2} fill="none" stroke="#06b6d4" strokeWidth={screen(1.2)} opacity={0.9} pointerEvents="none" />
+                  )}
+                  <circle
+                    cx={ax} cy={ay} r={isHover ? hr * 1.7 : hr * 1.2}
+                    fill={isPicked ? '#ef4444' : (isHover ? '#22d3ee' : '#f59e0b')}
+                    stroke="white" strokeWidth={0.2}
+                    style={{ cursor: 'crosshair' }}
+                    onMouseEnter={() => setSnapHover({ kind: 'anchor', compId: b.id, anchor: a, x: b.cx + local.x, y: b.cy + local.y })}
+                    onMouseLeave={() => setSnapHover(null)}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={(e) => { e.stopPropagation(); onAnchorClick(b.id, a, e); }}
+                  />
+                </g>
               );
             })}
           </g>
@@ -4483,7 +4491,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                     }
                   }
                   const local = anchorLocalRotated(`${side}:${t}`, w, h, rotE);
-                  setSnapHover({ compId: c.id, side, t, x: c.cx + local.x, y: c.cy + local.y });
+                  setSnapHover({ kind: 'edge', compId: c.id, side, t, x: c.cx + local.x, y: c.cy + local.y });
                 };
                 const mkEdge = (side, ax, ay, bx, by) => {
                   const p1 = toWorldE(ax, ay);
@@ -4511,8 +4519,9 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   />
                 ));
               })()}
-              {/* Snap-mode hover preview dot */}
-              {snapMode === 'creating' && snapHover && snapHover.compId === c.id && (
+              {/* Snap-mode EDGE hover preview dot (anchor hovers get their own
+                  enlarged highlight on the anchor dot below). */}
+              {snapMode === 'creating' && snapHover && snapHover.kind === 'edge' && snapHover.compId === c.id && (
                 <circle
                   cx={snapHover.x} cy={-snapHover.y} r={hr * 0.9}
                   fill="rgba(245,158,11,0.85)"
@@ -4528,16 +4537,23 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                 const ax = c.cx + local.x;
                 const ay = -(c.cy + local.y);
                 const isPicked = snapPick?.compId === c.id && snapPick.anchor === a;
+                const isHover = snapHover?.kind === 'anchor' && snapHover.compId === c.id && snapHover.anchor === a;
                 return (
-                  <circle key={'sa_' + a}
-                    cx={ax} cy={ay} r={hr * 1.2}
-                    fill={isPicked ? '#ef4444' : '#f59e0b'}
-                    stroke="white" strokeWidth={0.2}
-                    style={{ cursor: 'crosshair' }}
-                    onMouseEnter={() => setSnapHover(null)}
-                    onMouseDown={(e) => e.stopPropagation()}
-                    onClick={(e) => { e.stopPropagation(); onAnchorClick(c.id, a, e); }}
-                  />
+                  <g key={'sa_' + a}>
+                    {isHover && !isPicked && (
+                      <circle cx={ax} cy={ay} r={hr * 2.2} fill="none" stroke="#06b6d4" strokeWidth={screen(1.2)} opacity={0.9} pointerEvents="none" />
+                    )}
+                    <circle
+                      cx={ax} cy={ay} r={isHover ? hr * 1.7 : hr * 1.2}
+                      fill={isPicked ? '#ef4444' : (isHover ? '#22d3ee' : '#f59e0b')}
+                      stroke="white" strokeWidth={0.2}
+                      style={{ cursor: 'crosshair' }}
+                      onMouseEnter={() => setSnapHover({ kind: 'anchor', compId: c.id, anchor: a, x: c.cx + local.x, y: c.cy + local.y })}
+                      onMouseLeave={() => setSnapHover(null)}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={(e) => { e.stopPropagation(); onAnchorClick(c.id, a, e); }}
+                    />
+                  </g>
                 );
               })}
             </g>
@@ -4551,13 +4567,19 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           Style is engineering-drawing-like: extension lines from the
           geometry, an arrow line offset perpendicular, end arrows, and a
           centered label on a dark pill so it reads against any background. */}
-      {showDimensions && (() => {
+      {(showDimensions || (editDims && !rulerMode && selectedId)) && (() => {
+        // When the global overlay is OFF but a component is selected (the
+        // "Show dimensions on select" path), draw ONLY the snap-link dx/dy
+        // offsets that involve the selected component — its own W/H come from
+        // the cyan EditableDimsOverlay below. `selOnly` scopes that.
+        const selOnly = !showDimensions;
         // Heuristic: an expression is "parameter-bound" iff it contains at
         // least one alphabetic identifier. Pure numerics like "20" are not.
         const hasParam = (expr) => typeof expr === 'string' && /[A-Za-z_]/.test(expr);
         const dims = [];
-        // Component widths and heights
-        for (const c of solved) {
+        // Component widths and heights (full overlay only — the selected
+        // rect's W/H are handled by the editable cyan overlay below).
+        if (!selOnly) for (const c of solved) {
           const { w, h } = dimsByCompId[c.id]; // [F2]
           if (!Number.isFinite(w) || !Number.isFinite(h)) continue;
           if (hasParam(c.w)) {
@@ -4584,10 +4606,21 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // Snap offsets (dx and dy) when parameter-bound. Drawn between the
         // two anchor points, projected to a single axis (X for dx, Y for dy).
         for (const s of scene.snaps) {
+          // editDims-only: restrict to snaps that involve the selected
+          // component (incoming = it's the child, or outgoing = it's the parent).
+          if (selOnly && s.to.compId !== selectedId && s.from.compId !== selectedId) continue;
           const fromComp = solved.find(cc => cc.id === s.from.compId);
           const toComp   = solved.find(cc => cc.id === s.to.compId);
           if (!fromComp || !toComp) continue;
-          const fromW = anchorWorld(fromComp, s.from.anchor, paramValues);
+          // For a snap onto a repeat replica (from.instanceIdx>0) the reference
+          // anchor is on the replica — shift fromW so the dx/dy arrow measures
+          // the ACTUAL gap (replica→child), not base→child.
+          let fromW = anchorWorld(fromComp, s.from.anchor, paramValues);
+          if (s.from.instanceIdx > 0) {
+            const byIdSolvedForDims = Object.fromEntries(solved.map(cc => [cc.id, cc]));
+            const ra = resolveInstanceAnchorNumeric(s.from.compId, s.from.anchor, s.from.instanceIdx, byIdSolvedForDims, transformInstances, paramValues);
+            if (ra && Number.isFinite(ra.x) && Number.isFinite(ra.y)) fromW = ra;
+          }
           const toW   = anchorWorld(toComp,   s.to.anchor,   paramValues);
           if (hasParam(s.dx)) {
             const valDx = evalExpr(s.dx, paramValues);
@@ -5075,6 +5108,42 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           for shapes far from the dragged cluster (more than a handful
           of snap thresholds away) so the canvas doesn't fill with
           irrelevant ghost-lines on a busy scene. */}
+      {/* Snap-anchor guides: while Option/Alt is held (outside the other
+          tools), show the 9 snap anchors of every shape AND its repeat
+          replicas as faint dots, so the user can see where an Alt-drag will
+          land. Purely visual (pointerEvents none) — the actual targets come
+          from the alt-drag candidate index. They vanish when Alt is released.
+          Viewport-culled so big repeated arrays stay cheap; the dragged
+          cluster's own anchors are skipped. */}
+      {altKey && !addMode && !rulerMode && snapMode !== 'creating' && (() => {
+        const consumed = new Set(solved.filter(cc => cc.consumedBy).map(cc => cc.id));
+        const pad = Math.max(viewport.w, viewport.h) * 0.05;
+        const xMin = viewport.x - viewport.w / 2 - pad, xMax = viewport.x + viewport.w / 2 + pad;
+        const yMin = viewport.y - viewport.h / 2 - pad, yMax = viewport.y + viewport.h / 2 + pad;
+        const dots = [];
+        for (const inst of transformInstances) {
+          if (consumed.has(inst.compId)) continue;
+          if (drag?.clusterSet && drag.clusterSet.has(inst.compId)) continue;
+          const iw = inst.w, ih = inst.h;
+          if (!Number.isFinite(iw) || !Number.isFinite(ih) || iw <= 0 || ih <= 0) continue;
+          if (inst.cx < xMin || inst.cx > xMax || inst.cy < yMin || inst.cy > yMax) continue;
+          const irot = inst.rotation || 0;
+          for (let ai = 0; ai < ANCHORS.length; ai++) {
+            const lp = anchorLocalRotated(ANCHORS[ai], iw, ih, irot);
+            dots.push({ x: inst.cx + lp.x, y: inst.cy + lp.y, k: `sg_${inst.compId}_${inst.idx}_${ai}` });
+          }
+        }
+        if (!dots.length) return null;
+        return (
+          <g pointerEvents="none">
+            {dots.map(d => (
+              <circle key={d.k} cx={d.x} cy={-d.y} r={hr * 0.5}
+                fill="#f59e0b" fillOpacity={0.45} stroke="white" strokeWidth={screen(0.25)} strokeOpacity={0.5} />
+            ))}
+          </g>
+        );
+      })()}
+
       {drag && drag.kind === 'move' && altKey && (() => {
         const screenThresh = 30;
         const worldThresh = screenThresh * (viewport.w / (svgRef.current?.clientWidth || 1));
