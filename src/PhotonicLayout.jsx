@@ -1039,7 +1039,16 @@ export default function App() {
       // confirms before discarding. (Loading a specific SNAPSHOT —
       // handleLoadVersion — keeps its own discard prompt; that genuinely
       // replaces the working state.)
-      if (designName && savedList.includes(designName)) {
+      // Does the current design actually exist in storage? Probe storage
+      // DIRECTLY rather than testing the `savedList` STATE — that derived cache
+      // is the wrong oracle here: it can lag a just-saved/snapshotted design
+      // (async refreshSavedList) OR miss it on an untrimmed-name mismatch
+      // ("A " vs stored "A"), and either one makes a genuinely-saved design
+      // look brand-new and wrongly pops the discard prompt. loadDesign reads
+      // the live key and returns null only when it's truly absent — a design
+      // that was never saved, the one case that really must ask before losing.
+      const curStored = designName ? await loadDesign(workspace, designName) : null;
+      if (curStored) {
         const res = await saveDesign(workspace, designName, { scene, history, future, updatedAt: Date.now(), versions, currentVersionId });
         if (res.ok) {
           mirrorWorkspaceToFileIfLinked();
@@ -1069,7 +1078,7 @@ export default function App() {
     setDesignName(name);
     await setActiveDesignName(workspace, name);
     setSaveStatus('saved');
-  }, [workspace, saveStatus, designName, savedList, scene, history, future, versions, currentVersionId, setSelection, confirmDialog, alertDialog, mirrorWorkspaceToFileIfLinked]);
+  }, [workspace, saveStatus, designName, scene, history, future, versions, currentVersionId, setSelection, confirmDialog, alertDialog, mirrorWorkspaceToFileIfLinked]);
 
   // Load a specific VERSION of a design into the working state. The
   // working state becomes the version's frozen scene; the user can
@@ -5569,7 +5578,11 @@ export default function App() {
               type="text"
               value={designName}
               onChange={(e) => { setDesignName(e.target.value); setSaveStatus('unsaved'); }}
-              onBlur={() => { /* user can hit Save afterwards */ }}
+              // Trim on commit so the name settles to exactly what's stored as
+              // the design key (leading/trailing whitespace would otherwise make
+              // designName diverge from the storage key — phantom autosaves and
+              // a spurious "discard?" prompt on switch). Mid-name spaces are kept.
+              onBlur={() => { const t = designName.trim(); if (t && t !== designName) setDesignName(t); }}
               className="flex-1 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-cyan-300 outline-none focus:border-cyan-400"
               placeholder="design name"
             />
