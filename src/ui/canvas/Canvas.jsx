@@ -13,6 +13,7 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { DeferredTextInput } from '../DeferredTextInput.jsx';
+import { DEFAULT_CANVAS_THEME } from '../theme.js';
 import { ANCHORS, parseAnchor, anchorLocal, anchorLocalRotated, anchorWorld, compRotationDeg, rotateLocal } from '../../scene/anchors.js';
 import { evalExpr } from '../../scene/params.js';
 import { solveLayout, applyMirrors, resolveBooleanBboxes } from '../../scene/solver.js';
@@ -1004,7 +1005,7 @@ function EditablePolyDims({ svgRef, viewport, cSel, verts, params, updateScene, 
 // =========================================================================
 // CANVAS
 // =========================================================================
-export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelection, viewport, setViewport, snapMode, setSnapMode, gridSize, gridSnapEnabled, showGrid = true, paramValues, addParam, updateParamExpr, rulerMode, setRulerMode, rulerMeasurements, setRulerMeasurements, rulerInProgress, setRulerInProgress, rulerSnapPoint, setRulerSnapPoint, alertDialog, setInteractionStatus, showDimensions, editDims = false, commitExpr = null, renameParam = null, addMode, setAddMode, commitDragAdd, onComponentContextMenu, onSvgElement, flashAnchor = null }) {
+export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelection, viewport, setViewport, snapMode, setSnapMode, gridSize, gridSnapEnabled, showGrid = true, paramValues, addParam, updateParamExpr, rulerMode, setRulerMode, rulerMeasurements, setRulerMeasurements, rulerInProgress, setRulerInProgress, rulerSnapPoint, setRulerSnapPoint, alertDialog, setInteractionStatus, showDimensions, editDims = false, commitExpr = null, renameParam = null, addMode, setAddMode, commitDragAdd, onComponentContextMenu, onSvgElement, flashAnchor = null, canvasTheme = DEFAULT_CANVAS_THEME }) {
   // Drop a single committed ruler measurement by id.
   const deleteRuler = (id) => setRulerMeasurements((prev) => prev.filter((m) => m.id !== id));
   const svgRef = useRef(null);
@@ -3099,7 +3100,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       viewBox={`${vbX} ${vbY} ${viewport.w} ${viewport.h}`}
       preserveAspectRatio="xMidYMid meet"
       className="w-full h-full"
-      style={{ background: '#f1f5f9', cursor: addMode ? 'crosshair' : (marquee ? 'crosshair' : (altKey ? 'crosshair' : (pan ? 'grabbing' : (drag?.kind === 'move' ? 'move' : 'default')))) }}
+      style={{ background: canvasTheme.canvasBg, cursor: addMode ? 'crosshair' : (marquee ? 'crosshair' : (altKey ? 'crosshair' : (pan ? 'grabbing' : (drag?.kind === 'move' ? 'move' : 'default')))) }}
       onMouseDown={onMouseDown}
       onMouseMove={onMouseMove}
       onMouseUp={onMouseUp}
@@ -3172,10 +3173,10 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     >
       <defs>
         <pattern id="grid" width={gridSize} height={gridSize} patternUnits="userSpaceOnUse">
-          <path d={`M ${gridSize} 0 L 0 0 0 ${gridSize}`} fill="none" stroke="#cbd5e1" strokeWidth="0.3" />
+          <path d={`M ${gridSize} 0 L 0 0 0 ${gridSize}`} fill="none" stroke={canvasTheme.gridFine} strokeWidth="0.3" />
         </pattern>
         <pattern id="gridMajor" width={gridSize * 5} height={gridSize * 5} patternUnits="userSpaceOnUse">
-          <path d={`M ${gridSize * 5} 0 L 0 0 0 ${gridSize * 5}`} fill="none" stroke="#94a3b8" strokeWidth="0.4" />
+          <path d={`M ${gridSize * 5} 0 L 0 0 0 ${gridSize * 5}`} fill="none" stroke={canvasTheme.gridMajor} strokeWidth="0.4" />
         </pattern>
         {/* Arrowhead for lumped-port integration line. markerUnits=
             strokeWidth scales the arrowhead with the line's strokeWidth
@@ -3207,8 +3208,8 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           a clean screenshot / vector export, these axes go too. */}
       {showGrid && (
         <>
-          <line x1={vbX} y1={0} x2={vbX + viewport.w} y2={0} stroke="#475569" strokeWidth={sw * 0.7} strokeDasharray={`${sw * 3},${sw * 3}`} pointerEvents="none" />
-          <line x1={0} y1={vbY} x2={0} y2={vbY + viewport.h} stroke="#475569" strokeWidth={sw * 0.7} strokeDasharray={`${sw * 3},${sw * 3}`} pointerEvents="none" />
+          <line x1={vbX} y1={0} x2={vbX + viewport.w} y2={0} stroke={canvasTheme.axis} strokeWidth={sw * 0.7} strokeDasharray={`${sw * 3},${sw * 3}`} pointerEvents="none" />
+          <line x1={0} y1={vbY} x2={0} y2={vbY + viewport.h} stroke={canvasTheme.axis} strokeWidth={sw * 0.7} strokeDasharray={`${sw * 3},${sw * 3}`} pointerEvents="none" />
         </>
       )}
 
@@ -4210,7 +4211,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                           x={inst.cx + cdx - cw / 2}
                           y={-(inst.cy + cdy + ch / 2)}
                           width={cw} height={ch}
-                          fill="#f1f5f9"
+                          fill={canvasTheme.canvasBg}
                           stroke="#64748b" strokeWidth={sw * 0.4} strokeDasharray={`${sw * 1.5},${sw * 1.5}`}
                           pointerEvents="none"
                         />

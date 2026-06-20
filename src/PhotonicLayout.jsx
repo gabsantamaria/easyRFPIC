@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { Plus, Trash2, RotateCcw, RotateCw, Download, Upload, Lock, Unlock, FlipHorizontal, FlipVertical, Layers, Settings2, Box, Square, Link2, Link2Off, Grid3x3, AlertTriangle, Maximize2, Save, FileText, FilePlus, Copy, FolderTree, BookOpen, Package, Boxes, Pencil, Ruler, Eye, EyeOff, ArrowDown, ArrowUp, Move, Repeat, Combine, Minus, X as XIcon, Circle, Hexagon, Radio, HelpCircle, Search, ChevronDown, ChevronRight, Sparkles } from 'lucide-react';
+import { Plus, Trash2, RotateCcw, RotateCw, Download, Upload, Lock, Unlock, FlipHorizontal, FlipVertical, Layers, Settings2, Settings, Box, Square, Link2, Link2Off, Grid3x3, AlertTriangle, Maximize2, Save, FileText, FilePlus, Copy, FolderTree, BookOpen, Package, Boxes, Pencil, Ruler, Eye, EyeOff, ArrowDown, ArrowUp, Move, Repeat, Combine, Minus, X as XIcon, Circle, Hexagon, Radio, HelpCircle, Search, ChevronDown, ChevronRight, Sparkles } from 'lucide-react';
 import { eulerBend180Centerline, buildRacetrackCenterline, offsetCenterlineToBand } from './geometry/racetrack.js';
 import { tokenizeIdents, tokenizeComponentExprs, resolveParams, evalExpr, RESERVED_IDENTS } from './scene/params.js';
 import { renameIdentInScene } from './scene/rename-ident.js';
@@ -74,6 +74,9 @@ import { DropdownMenu } from './ui/DropdownMenu.jsx';
 import { ModalDialog } from './ui/ModalDialog.jsx';
 import { HelpTutorial } from './ui/HelpTutorial.jsx';
 import { AiAssistantDialog } from './ui/AiAssistantDialog.jsx';
+import { SettingsPanel } from './ui/SettingsPanel.jsx';
+import { DEFAULT_SETTINGS, loadSettings, saveSettings, buildSettingsExport, parseSettingsImport } from './ui/settings.js';
+import { resolveCanvasTheme, applyThemeAttr } from './ui/theme.js';
 import { applyFragment as applyAiGeometryFragment } from './ai/assistant.js';
 import { WorkspaceCreateRow, LibraryItemRow } from './ui/panels/LibraryPanelRows.jsx';
 import { ParamRow } from './ui/panels/ParamRow.jsx';
@@ -294,27 +297,36 @@ export default function App() {
   };
   const [history, setHistory] = useState([]); // past scenes
   const [future, setFuture] = useState([]); // redo stack
-  const [gridSize, setGridSize] = useState(2);
-  const [gridSnapEnabled, setGridSnapEnabled] = useState(true);
-  // Grid visibility is decoupled from snap behavior — users often want to
-  // keep snap on while hiding the grid for cleaner screenshots / exports.
-  const [showGrid, setShowGrid] = useState(true);
-  // Dimension overlay: when on, draws engineering-style dimension arrows over
-  // every parameter-bound width/height/snap-offset. Variable name is the
-  // primary label; numeric value is appended only if there's room.
-  const [showDimensions, setShowDimensions] = useState(false);
-  // Editable on-canvas dimensions for the primary-selected rectangle (W below,
-  // H to the right) with inline name/value fields. Optional + persisted across
-  // reloads (separate from the read-only global `showDimensions` overlay).
-  const [editDims, setEditDims] = useState(() => {
-    // ON by default — only OFF if the user has explicitly turned it off before.
-    try { return window.localStorage?.getItem('photonic_layout_edit_dims') !== '0'; } catch { return true; }
-  });
-  const toggleEditDims = () => setEditDims(v => {
-    const n = !v;
-    try { window.localStorage?.setItem('photonic_layout_edit_dims', n ? '1' : '0'); } catch { /* ignore */ }
-    return n;
-  });
+  // ── User settings (persisted; see src/ui/settings.js) ──────────────────
+  // One serializable object holds the appearance theme + canvas view prefs.
+  // These were previously separate, un-persisted useStates; folding them into
+  // a single settings object adds persistence + JSON export/import via the
+  // Settings panel. Derived consts + thin proxy setters below keep every
+  // existing call site (setShowGrid, toggleEditDims, etc.) working unchanged.
+  const [settings, setSettings] = useState(() => loadSettings());
+  // Persist on every change. Runs on mount too, which establishes the storage
+  // key and makes the legacy edit-dims migration (in loadSettings) stick.
+  useEffect(() => { saveSettings(settings); }, [settings]);
+  const updateSetting = useCallback((key, value) => {
+    setSettings(prev => ({ ...prev, [key]: typeof value === 'function' ? value(prev[key]) : value }));
+  }, []);
+  const [showSettings, setShowSettings] = useState(false);
+  // Apply the chrome theme — CSS does the recolor via the [data-theme] attr.
+  useEffect(() => { applyThemeAttr(settings.theme); }, [settings.theme]);
+  // Canvas surface palette (background/grid/axes) for the active theme.
+  const canvasTheme = useMemo(() => resolveCanvasTheme(settings.theme), [settings.theme]);
+
+  // Derived view-state. The canonical source of truth is `settings`.
+  const gridSize = settings.gridSize;
+  const gridSnapEnabled = settings.gridSnap;
+  const showGrid = settings.gridVisible;            // grid visibility (independent of snap)
+  const showDimensions = settings.showDimensionsOverlay;   // read-only dimension overlay (all parts)
+  const editDims = settings.showDimensionsOnSelect;        // editable dims on the selected shape
+  const setGridSize = (u) => updateSetting('gridSize', u);
+  const setGridSnapEnabled = (u) => updateSetting('gridSnap', u);
+  const setShowGrid = (u) => updateSetting('gridVisible', u);
+  const setShowDimensions = (u) => updateSetting('showDimensionsOverlay', u);
+  const toggleEditDims = () => updateSetting('showDimensionsOnSelect', v => !v);
   // Help / tutorial overlay. Opened from the "?" button in the header.
   const [showHelp, setShowHelp] = useState(false);
   // AI geometry assistant dialog (✨ header button): natural-language /
@@ -4843,6 +4855,28 @@ export default function App() {
     }
   };
 
+  // ── Settings export / import / restore (Settings panel footer) ─────────
+  const handleExportSettings = () => {
+    const payload = buildSettingsExport(settings);
+    const pad2 = (n) => String(n).padStart(2, '0');
+    const d = new Date();
+    const stamp = `${d.getFullYear()}_${pad2(d.getMonth() + 1)}_${pad2(d.getDate())}`;
+    downloadFile(`photonic_layout_settings_${stamp}.json`, JSON.stringify(payload, null, 2), 'application/json');
+  };
+  // PARTIAL import: only the settings present-and-valid in the file are
+  // applied; everything else keeps its current value (merge over current).
+  const handleImportSettings = (parsed) => {
+    setSettings(prev => parseSettingsImport(parsed, prev).settings);
+  };
+  const handleRestoreSettings = async () => {
+    const ok = await confirmDialog(
+      'Reset every setting (including the appearance theme) to its default?',
+      'Restore defaults',
+      { confirmLabel: 'Restore', confirmTone: 'danger' },
+    );
+    if (ok) setSettings({ ...DEFAULT_SETTINGS });
+  };
+
   // Generic export: generate a script with the given function and present it.
   // Tries to trigger a download; always shows a preview modal so the user can copy
   // the script manually if the sandbox blocks downloads.
@@ -4932,7 +4966,7 @@ export default function App() {
     if (!svgEl) { await alertDialog('Canvas not ready yet — try again in a moment.', 'Export error'); return; }
     let content;
     try {
-      content = generateSvgFromElement(svgEl, { designName });
+      content = generateSvgFromElement(svgEl, { designName, background: canvasTheme.canvasBg });
     } catch (e) {
       console.error('SVG generator error:', e);
       await alertDialog('Error generating SVG: ' + e.message, 'Export error');
@@ -4948,7 +4982,7 @@ export default function App() {
     if (!svgEl) { await alertDialog('Canvas not ready yet — try again in a moment.', 'Export error'); return; }
     let bytes;
     try {
-      bytes = await generatePdfFromElement(svgEl, { designName, dpi: 300 });
+      bytes = await generatePdfFromElement(svgEl, { designName, dpi: 300, background: canvasTheme.canvasBg });
     } catch (e) {
       console.error('PDF generator error:', e);
       await alertDialog('Error generating PDF: ' + e.message, 'Export error');
@@ -5024,8 +5058,8 @@ export default function App() {
   };
 
   return (
-    <div className="h-screen w-full flex flex-col relative" style={{ fontFamily: "'IBM Plex Sans', system-ui, sans-serif", background: '#0f172a', color: '#e2e8f0' }}>
-      <header className="border-b border-slate-700" style={{ background: '#020617' }}>
+    <div className="h-screen w-full flex flex-col relative" style={{ fontFamily: "'IBM Plex Sans', system-ui, sans-serif", background: 'var(--app-slate-900)', color: 'var(--app-slate-200)' }}>
+      <header className="border-b border-slate-700" style={{ background: 'var(--app-slate-950)' }}>
         {/* Row 1 — primary tools and identity */}
         <div className="flex items-center justify-between px-4 py-2">
           <div className="flex items-center gap-3">
@@ -5183,7 +5217,7 @@ export default function App() {
                     title="Layer for the next shape created"
                   >
                     {layerOptions.map(o => (
-                      <option key={o.value} value={o.value} style={{ background: '#1e293b', color: '#e2e8f0' }}>
+                      <option key={o.value} value={o.value} style={{ background: 'var(--app-slate-800)', color: 'var(--app-slate-200)' }}>
                         {o.label}
                       </option>
                     ))}
@@ -5192,7 +5226,7 @@ export default function App() {
                     key="add-rect"
                     onClick={() => toggleShape('rect')}
                     className={baseBtn + (isShapeActive('rect') ? activeRing : '')}
-                    style={{ background: '#1e293b', color: '#e2e8f0' }}
+                    style={{ background: 'var(--app-slate-800)', color: 'var(--app-slate-200)' }}
                     title="Add rectangle — drag on canvas to size."
                   >
                     <Square size={13} />
@@ -5201,7 +5235,7 @@ export default function App() {
                     key="add-circle"
                     onClick={() => toggleShape('circle')}
                     className={baseBtn + (isShapeActive('circle') ? activeRing : '')}
-                    style={{ background: '#1e293b', color: '#e2e8f0' }}
+                    style={{ background: 'var(--app-slate-800)', color: 'var(--app-slate-200)' }}
                     title="Add circle — drag a bbox; an inscribed circle is created."
                   >
                     <Circle size={13} />
@@ -5210,7 +5244,7 @@ export default function App() {
                     key="add-ellipse"
                     onClick={() => toggleShape('ellipse')}
                     className={baseBtn + (isShapeActive('ellipse') ? activeRing : '')}
-                    style={{ background: '#1e293b', color: '#e2e8f0' }}
+                    style={{ background: 'var(--app-slate-800)', color: 'var(--app-slate-200)' }}
                     title="Add ellipse — drag a bbox; the inscribed ellipse fills it."
                   >
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -5221,7 +5255,7 @@ export default function App() {
                     key="add-polyline"
                     onClick={() => toggleShape('polyline')}
                     className={baseBtn + (isShapeActive('polyline') ? activeRing : '')}
-                    style={{ background: '#1e293b', color: '#e2e8f0' }}
+                    style={{ background: 'var(--app-slate-800)', color: 'var(--app-slate-200)' }}
                     title="Polyline trace — click to place each vertex; double-click or Enter to finish, Esc to cancel. Press 'a' while drawing to toggle ARC mode (next click places a 90° arc — HFSS AngularArc, fully parametric). Snap halos appear on other shapes' anchors; cursor aligns with previous vertices on H/V axes (purple guides). The trace's width is a parameter and the Z extrusion is the bound conductor's thickness — HFSS sees it as CreatePolyline + sweep, fully parametric. Per-vertex taper widths, arcs, and spline runs are editable in the inspector."
                   >
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -5236,7 +5270,7 @@ export default function App() {
                     key="add-polyshape"
                     onClick={() => toggleShape('polyshape')}
                     className={baseBtn + (isShapeActive('polyshape') ? activeRing : '')}
-                    style={{ background: '#1e293b', color: '#e2e8f0' }}
+                    style={{ background: 'var(--app-slate-800)', color: 'var(--app-slate-200)' }}
                     title="Polygon path (closed 2-D shape) — click each vertex; double-click, Enter, or click vertex 0 to close. Same snap halos, H/V axis guides, and shift-lock as the polyline tool — but the result is a filled polygon (not a swept band), with no trace width. HFSS export emits CreatePolyline + sweep for a polygonal sheet."
                   >
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" fillOpacity="0.35" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -5253,7 +5287,7 @@ export default function App() {
                       key="add-poly"
                       onClick={() => toggleShape('polygon')}
                       className={baseBtn + (isShapeActive('polygon') ? activeRing : '')}
-                      style={{ background: '#1e293b', color: '#e2e8f0' }}
+                      style={{ background: 'var(--app-slate-800)', color: 'var(--app-slate-200)' }}
                       title={`Add regular polygon (${polygonSides} sides) — drag a bbox; the polygon's circumradius fills it.`}
                     >
                       <Hexagon size={13} />
@@ -5282,7 +5316,7 @@ export default function App() {
                     onClick={toggleVia}
                     disabled={!viaEligible}
                     className={baseBtn + (isViaActive ? activeRing : '') + (viaEligible ? '' : ' opacity-40 cursor-not-allowed')}
-                    style={{ background: '#1e293b', color: '#e2e8f0' }}
+                    style={{ background: 'var(--app-slate-800)', color: 'var(--app-slate-200)' }}
                     title={viaEligible
                       ? 'Add via — click on canvas to place a vertical interconnect (default r = 2 µm). Spans layerFrom → layerTo through the stack; both are editable in the inspector. HFSS sees a parametric CreateCylinder whose height is the live stack-thickness expression.'
                       : 'Via tool needs at least two non-substrate layers in the stack (something to connect).'}
@@ -5298,7 +5332,7 @@ export default function App() {
             <button
               onClick={() => { setSnapMode(snapMode === 'creating' ? 'idle' : 'creating'); setAddMode(null); setRulerMode(false); }}
               className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium ${snapMode === 'creating' ? 'ring-2 ring-amber-400' : ''}`}
-              style={{ background: snapMode === 'creating' ? '#f59e0b' : '#334155', color: snapMode === 'creating' ? '#0f172a' : '#e2e8f0' }}
+              style={{ background: snapMode === 'creating' ? '#f59e0b' : 'var(--app-slate-700)', color: snapMode === 'creating' ? '#0f172a' : 'var(--app-slate-200)' }}
               title="Pick two anchor points to create a snap. Click one of the 9 fixed dots, or anywhere along an orange edge for a parametric anchor. Hold Shift while picking the second anchor to lock the connection axis-aligned."
             >
               <Link2 size={11} /> {snapMode === 'creating' ? 'pick anchor' : 'snap'}
@@ -5316,7 +5350,7 @@ export default function App() {
                 }
               }}
               className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium ${rulerMode ? 'ring-2 ring-cyan-400' : ''}`}
-              style={{ background: rulerMode ? '#06b6d4' : '#334155', color: rulerMode ? '#0f172a' : '#e2e8f0' }}
+              style={{ background: rulerMode ? '#06b6d4' : 'var(--app-slate-700)', color: rulerMode ? '#0f172a' : 'var(--app-slate-200)' }}
               title="Ruler: click two points to measure distance. Snaps to nearby corners, edge midpoints, centers, and edges. Hold Shift while picking the second point to lock the line horizontal or vertical. Esc cancels in-progress, or exits the tool."
             >
               <Ruler size={11} /> {rulerMode ? (rulerInProgress ? 'pick end' : 'pick start') : 'ruler'}
@@ -5370,6 +5404,16 @@ export default function App() {
               )}
               <span className="text-[9px] opacity-70 normal-case font-normal">▾</span>
             </button>
+            {/* Settings & appearance — theme picker + canvas view prefs,
+                with JSON export/import and restore-defaults. */}
+            <button
+              onClick={() => setShowSettings(true)}
+              className="flex items-center justify-center w-7 h-7 rounded-full border border-slate-600 hover:bg-slate-800 hover:border-slate-400 text-slate-400 hover:text-slate-100 ml-1"
+              title="Settings & appearance"
+              aria-label="Settings"
+            >
+              <Settings size={14} />
+            </button>
             {/* AI geometry assistant — describe a structure in plain
                 language (or paste a sketch) and Claude generates a
                 parametric fragment that inserts like a template. */}
@@ -5395,7 +5439,7 @@ export default function App() {
           </div>
         </div>
         {/* Row 2 — secondary tools and view controls */}
-        <div className="flex items-center justify-between px-4 py-1.5 border-t border-slate-800" style={{ background: '#0a0f1f' }}>
+        <div className="flex items-center justify-between px-4 py-1.5 border-t border-slate-800" style={{ background: 'var(--app-slate-950)' }}>
           <div className="flex items-center gap-1.5">
             <DropdownMenu
               label="mirror"
@@ -5426,7 +5470,7 @@ export default function App() {
             <button
               onClick={diagnoseScene}
               className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium"
-              style={{ background: sceneIssues.length > 0 ? '#dc2626' : '#334155', color: '#e2e8f0' }}
+              style={{ background: sceneIssues.length > 0 ? '#dc2626' : 'var(--app-slate-700)', color: 'var(--app-slate-200)' }}
               title={sceneIssues.length === 0
                 ? 'Validate scene: check for snap conflicts, orphans, cycles, broken expressions'
                 : `${sceneIssues.length} issue${sceneIssues.length === 1 ? '' : 's'} detected — click to diagnose\n${sceneIssues.slice(0, 8).map(it => `• ${it.message}`).join('\n')}${sceneIssues.length > 8 ? '\n…' : ''}`}
@@ -5437,7 +5481,7 @@ export default function App() {
               <button
                 onClick={() => { setRulerMeasurements([]); setRulerInProgress(null); }}
                 className="flex items-center gap-1 px-2 py-1 rounded text-xs"
-                style={{ background: '#334155', color: '#e2e8f0' }}
+                style={{ background: 'var(--app-slate-700)', color: 'var(--app-slate-200)' }}
                 title={`Clear ${rulerMeasurements.length} measurement${rulerMeasurements.length === 1 ? '' : 's'}`}
               >
                 <Trash2 size={11} /> clear ({rulerMeasurements.length})
@@ -5478,13 +5522,6 @@ export default function App() {
             >
               <Ruler size={11} /> dimensions
             </button>
-            <button
-              onClick={toggleEditDims}
-              className={`flex items-center gap-1 px-2 py-1 rounded text-xs ${editDims ? 'bg-cyan-600 text-white' : 'border border-slate-600 hover:bg-slate-800'}`}
-              title="Edit dimensions on canvas: select (or create) a rectangle to show its width & height as arrows with inline-editable variable names / values."
-            >
-              <Pencil size={11} /> edit dims
-            </button>
           </div>
           <div className="flex items-center gap-1.5">
             <button onClick={undo} disabled={history.length === 0} className="flex items-center gap-1 px-2 py-1 rounded text-xs border border-slate-600 hover:bg-slate-800 disabled:opacity-30" title="Undo (Cmd/Ctrl+Z)">
@@ -5513,7 +5550,7 @@ export default function App() {
       {/* Workspace switcher dialog */}
       {showWorkspaceDialog && (
         <div className="fixed inset-0 z-40 flex items-center justify-center" style={{ background: 'rgba(15,23,42,0.6)' }} onClick={() => setShowWorkspaceDialog(false)}>
-          <div className="rounded-lg shadow-2xl border border-slate-700 w-[28rem] max-w-[90vw] overflow-hidden" style={{ background: '#0f172a' }} onClick={(e) => e.stopPropagation()}>
+          <div className="rounded-lg shadow-2xl border border-slate-700 w-[28rem] max-w-[90vw] overflow-hidden" style={{ background: 'var(--app-slate-900)' }} onClick={(e) => e.stopPropagation()}>
             <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
               <div>
                 <span className="text-sm font-medium text-slate-200">Workspaces</span>
@@ -5533,7 +5570,7 @@ export default function App() {
                   return (
                     <div key={ws || '__default__'} className={`flex items-center gap-2 rounded px-2 py-1.5 ${isCurrent ? 'border border-cyan-500 bg-cyan-900/20' : 'border border-slate-700 hover:border-slate-500'}`}>
                       <FolderTree size={11} className={isCurrent ? 'text-cyan-400' : 'text-slate-400'} />
-                      <span className="font-mono text-xs flex-1 truncate" style={{ color: isCurrent ? '#67e8f9' : '#cbd5e1' }}>{label}</span>
+                      <span className="font-mono text-xs flex-1 truncate" style={{ color: isCurrent ? '#67e8f9' : 'var(--app-slate-300)' }}>{label}</span>
                       {isCurrent ? (
                         <span className="text-[9px] text-cyan-400 font-medium">CURRENT</span>
                       ) : (
@@ -5643,7 +5680,7 @@ export default function App() {
 
       {/* Designs dropdown overlay */}
       {showDesigns && (
-        <div className="absolute z-30 right-4 top-12 w-80 rounded-lg shadow-2xl border border-slate-700 overflow-hidden" style={{ background: '#0f172a' }}>
+        <div className="absolute z-30 right-4 top-12 w-80 rounded-lg shadow-2xl border border-slate-700 overflow-hidden" style={{ background: 'var(--app-slate-900)' }}>
           <div className="px-3 py-2 border-b border-slate-700 flex items-center justify-between">
             <span className="text-xs font-medium uppercase tracking-wider text-slate-400">Saved Designs ({savedList.length})</span>
             <button onClick={() => setShowDesigns(false)} className="text-slate-500 hover:text-slate-200 text-xs">✕</button>
@@ -5929,7 +5966,7 @@ export default function App() {
 
       <div className="flex-1 flex overflow-hidden">
         {/* LEFT */}
-        <div className="w-72 border-r border-slate-700 flex flex-col" style={{ background: '#0f172a' }}>
+        <div className="w-72 border-r border-slate-700 flex flex-col" style={{ background: 'var(--app-slate-900)' }}>
           <div className="flex flex-wrap border-b border-slate-700 text-[10px]">
             {[
               { id: 'params', label: 'PARAMS', icon: Settings2 },
@@ -6077,7 +6114,7 @@ export default function App() {
                     the current one as a new entry. The dropdown reads
                     out the scene's stackName so the user can see which
                     stack they're wearing right now. */}
-                <div className="rounded border border-slate-700 px-2 py-1.5" style={{ background: '#1e293b' }}>
+                <div className="rounded border border-slate-700 px-2 py-1.5" style={{ background: 'var(--app-slate-800)' }}>
                   <div className="flex items-center gap-1 mb-1">
                     <Layers size={11} className="text-cyan-400 flex-shrink-0" />
                     <span className="text-[9px] uppercase tracking-wider text-slate-400">Stack</span>
@@ -6510,7 +6547,7 @@ export default function App() {
               <div className="space-y-1">
                 <p className="text-[10px] text-slate-500 italic px-1">Snaps form a graph; the root component is freely positioned, the rest follow.</p>
                 {scene.snaps.map(s => (
-                  <div key={s.id} className="p-2 rounded text-xs border border-slate-700" style={{ background: '#1e293b' }}>
+                  <div key={s.id} className="p-2 rounded text-xs border border-slate-700" style={{ background: 'var(--app-slate-800)' }}>
                     <div className="flex items-center gap-1 mb-1">
                       {/* C10: clicking either endpoint label flashes that
                           anchor on the canvas (cyan halo, ~1s). */}
@@ -6581,7 +6618,7 @@ export default function App() {
               <div className="space-y-1">
                 <p className="text-[10px] text-slate-500 italic px-1 mb-2">Select a shape, then Mirror H / V. Toggle the lock to break symmetry.</p>
                 {scene.mirrors.map(m => (
-                  <div key={m.id} className="p-2 rounded text-xs border border-slate-700" style={{ background: '#1e293b' }}>
+                  <div key={m.id} className="p-2 rounded text-xs border border-slate-700" style={{ background: 'var(--app-slate-800)' }}>
                     <div className="flex items-center justify-between mb-1">
                       <span className="font-mono text-[10px] text-violet-300">{m.axis} @ {m.axisCoord}</span>
                       <button onClick={() => deleteMirror(m.id)} className="text-slate-500 hover:text-red-400"><Trash2 size={11} /></button>
@@ -7026,6 +7063,7 @@ export default function App() {
             setInteractionStatus={setInteractionStatus}
             showDimensions={showDimensions}
             editDims={editDims}
+            canvasTheme={canvasTheme}
             commitExpr={commitExpr}
             renameParam={renameParam}
             addMode={addMode}
@@ -7070,7 +7108,7 @@ export default function App() {
         </div>
 
         {/* RIGHT — Inspector */}
-        <div className="w-72 border-l border-slate-700 flex flex-col" style={{ background: '#0f172a' }}>
+        <div className="w-72 border-l border-slate-700 flex flex-col" style={{ background: 'var(--app-slate-900)' }}>
           <div className="px-3 py-2 border-b border-slate-700 text-xs font-medium uppercase tracking-wider text-slate-400 flex items-center justify-between">
             <span>Inspector{selectedIds.size > 1 ? ` · ${selectedIds.size} selected` : ''}</span>
             {selectedIds.size > 0 && (
@@ -8060,6 +8098,17 @@ export default function App() {
         />
       )}
 
+      {/* Settings & appearance panel */}
+      <SettingsPanel
+        open={showSettings}
+        settings={settings}
+        onChange={updateSetting}
+        onClose={() => setShowSettings(false)}
+        onExport={handleExportSettings}
+        onImport={handleImportSettings}
+        onRestore={handleRestoreSettings}
+      />
+
       {/* Animated help tutorial overlay */}
       <HelpTutorial open={showHelp} onClose={() => setShowHelp(false)} />
       <AiAssistantDialog
@@ -8092,7 +8141,7 @@ export default function App() {
         >
           <div
             className="rounded-lg border border-slate-700 shadow-2xl flex flex-col"
-            style={{ background: '#0f172a', width: 'min(900px, 92vw)', height: 'min(80vh, 700px)' }}
+            style={{ background: 'var(--app-slate-900)', width: 'min(900px, 92vw)', height: 'min(80vh, 700px)' }}
             onClick={(e) => e.stopPropagation()}
           >
             <div className="px-4 py-2 border-b border-slate-700 flex items-center justify-between">

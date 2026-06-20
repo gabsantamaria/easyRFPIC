@@ -1,1 +1,104 @@
 @import "tailwindcss";
+
+/* ── Appearance themes ────────────────────────────────────────────────────
+   The UI chrome is built from Tailwind `*-slate-*` utility classes plus a few
+   var-ified inline styles. We remap Tailwind's slate ramp onto our own
+   `--app-slate-*` CSS variables with `@theme inline`, so every existing
+   `bg-slate-*` / `text-slate-*` / `border-slate-*` utility compiles to
+   `var(--app-slate-…)` with ZERO class rewrites. Inline styles reference the
+   same `var(--app-slate-…)` directly. Then each theme just overrides the
+   `--app-slate-*` values under a `[data-theme="…"]` selector.
+
+   `:root` carries the DEFAULT theme (original Tailwind slate), so the default
+   look is unchanged and there's no flash before JS runs. The default theme
+   uses no `data-theme` attribute (see theme.js applyThemeAttr).
+
+   Canvas (the SVG) is themed separately via the `canvasTheme` prop — it paints
+   SVG attributes in JS and can't ride this CSS remap. See src/ui/theme.js. */
+
+@theme inline {
+  --color-slate-50: var(--app-slate-50);
+  --color-slate-100: var(--app-slate-100);
+  --color-slate-200: var(--app-slate-200);
+  --color-slate-300: var(--app-slate-300);
+  --color-slate-400: var(--app-slate-400);
+  --color-slate-500: var(--app-slate-500);
+  --color-slate-600: var(--app-slate-600);
+  --color-slate-700: var(--app-slate-700);
+  --color-slate-800: var(--app-slate-800);
+  --color-slate-900: var(--app-slate-900);
+  --color-slate-950: var(--app-slate-950);
+}
+
+:root {
+  /* Default theme — original Tailwind slate ramp. */
+  --app-slate-50: #f8fafc;
+  --app-slate-100: #f1f5f9;
+  --app-slate-200: #e2e8f0;
+  --app-slate-300: #cbd5e1;
+  --app-slate-400: #94a3b8;
+  --app-slate-500: #64748b;
+  --app-slate-600: #475569;
+  --app-slate-700: #334155;
+  --app-slate-800: #1e293b;
+  --app-slate-900: #0f172a;
+  --app-slate-950: #020617;
+}
+
+/* Midnight — deep navy chrome (dark canvas). Text stays light; surfaces and
+   borders darken with a cool tint. */
+[data-theme="midnight"] {
+  --app-slate-50: #f5f8fc;
+  --app-slate-100: #e8eef7;
+  --app-slate-200: #d2dcec;
+  --app-slate-300: #a7b6d0;
+  --app-slate-400: #7585a3;
+  --app-slate-500: #52617c;
+  --app-slate-600: #374559;
+  --app-slate-700: #222f45;
+  --app-slate-800: #111b2e;
+  --app-slate-900: #0a1120;
+  --app-slate-950: #050a14;
+}
+
+/* Blueprint — blue-tinted chrome (deep blueprint-blue canvas). */
+[data-theme="blueprint"] {
+  --app-slate-50: #eef6fd;
+  --app-slate-100: #dbeafa;
+  --app-slate-200: #bfd9f4;
+  --app-slate-300: #93b9e4;
+  --app-slate-400: #5e8dc1;
+  --app-slate-500: #3d679a;
+  --app-slate-600: #2b507e;
+  --app-slate-700: #1f4069;
+  --app-slate-800: #143051;
+  --app-slate-900: #0c2339;
+  --app-slate-950: #07172b;
+}
+
+/* Paper — light chrome (light canvas). The slate ramp INVERTS by role: high
+   stops (700–950, used for backgrounds/borders) become light; low stops
+   (50–400, used for text) become dark. The app uses `bg-slate-900` for
+   surfaces and `text-slate-100/200` for text, so this flip keeps contrast. */
+[data-theme="paper"] {
+  --app-slate-50: #0f172a;   /* darkest text */
+  --app-slate-100: #0f172a;  /* primary text → near-black */
+  --app-slate-200: #1e293b;  /* text */
+  --app-slate-300: #475569;  /* muted text */
+  --app-slate-400: #64748b;  /* more muted text */
+  --app-slate-500: #94a3b8;  /* mid / faint text */
+  --app-slate-600: #cbd5e1;  /* subtle border */
+  --app-slate-700: #d8dee7;  /* border / divider → light */
+  --app-slate-800: #ffffff;  /* panel surface → white */
+  --app-slate-900: #f1f5f9;  /* main background → light gray */
+  --app-slate-950: #e2e8f0;  /* header / deepest → slightly darker */
+
+  /* Paper is the only LIGHT chrome — a few accent tokens used as light text on
+     dark panels need darkening so they stay legible on white. */
+  --color-cyan-300: #0e7490;
+  --color-cyan-400: #0891b2;
+  --color-emerald-400: #059669;
+  --color-emerald-300: #047857;
+  --color-amber-400: #b45309;
+  --color-violet-300: #7c3aed;
+}

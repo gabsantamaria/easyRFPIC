@@ -5,6 +5,17 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>MPL easyRFPIC</title>
+    <!-- Apply the saved appearance theme before React mounts, so the chrome
+         doesn't flash the default theme first. Only sets the attribute; the
+         actual colors live in src/index.css ([data-theme] blocks). -->
+    <script>
+      try {
+        var s = JSON.parse(localStorage.getItem('photonic_layout_settings') || '{}');
+        if (s && typeof s.theme === 'string' && s.theme !== 'default') {
+          document.documentElement.setAttribute('data-theme', s.theme);
+        }
+      } catch (e) { /* ignore */ }
+    </script>
   </head>
   <body>
     <div id="root"></div>
