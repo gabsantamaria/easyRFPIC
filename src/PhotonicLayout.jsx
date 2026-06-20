@@ -704,6 +704,38 @@ export default function App() {
     }
   }, [scene, versions, currentVersionId]);
 
+  // Single "needs persisting" signal. `saveStatus` only tracks the last write
+  // OUTCOME ('saved'/'saving'/'unsaved'); it does NOT mean "the working scene
+  // is safely in storage and matches its snapshot". `currentIsModified` covers
+  // "scene drifted from the snapshot" (true even after an autosave, which
+  // persists the working state but does NOT snapshot); `saveStatus==='unsaved'`
+  // covers a brand-new / never-snapshotted design (currentVersionId null →
+  // currentIsModified false). Use isDirty — not saveStatus — to decide whether
+  // the working state must be flushed before we drop it on a design switch.
+  const isDirty = saveStatus === 'unsaved' || currentIsModified;
+
+  // Latest-value refs so the save-before-switch flush always persists the
+  // EXACT current working state and gates on real dirtiness, regardless of a
+  // stale callback closure or React batching between the last edit and the
+  // click. Mirrored every render (same pattern as undoRef/redoRef below).
+  const sceneRef = useRef(scene);
+  const historyRef = useRef(history);
+  const futureRef = useRef(future);
+  const versionsRef = useRef(versions);
+  const currentVersionIdRef = useRef(currentVersionId);
+  const designNameRef = useRef(designName);
+  const isDirtyRef = useRef(isDirty);
+  // Pending autosave timer (declared here so the save-before-switch flush can
+  // cancel it; the autosave effect below sets it).
+  const autosaveTimerRef = useRef(null);
+  sceneRef.current = scene;
+  historyRef.current = history;
+  futureRef.current = future;
+  versionsRef.current = versions;
+  currentVersionIdRef.current = currentVersionId;
+  designNameRef.current = designName;
+  isDirtyRef.current = isDirty;
+
   // Undo checkpointing: only commit a snapshot to history once per ~2s of continuous edits.
   // pendingCheckpointRef holds the scene as it was at the start of the current edit window.
   // checkpointTimerRef holds the timer that will commit it.
@@ -1030,29 +1062,44 @@ export default function App() {
   // Before switching AWAY from the current design — to another design, or to
   // another design's SNAPSHOT — make sure its working ("current") state isn't
   // thrown away. Returns true to proceed with the switch, false to abort.
-  //   • No unsaved edits → proceed.
-  //   • Current design exists in storage → flush it silently and proceed (its
-  //     working state persists and is there when you return; autosave would
-  //     have done the same within ~2s). We probe storage DIRECTLY rather than
-  //     testing the savedList STATE — that derived cache can lag a just-saved
-  //     design (async refresh) or miss it on an untrimmed-name mismatch, and
-  //     either would wrongly treat a saved design as brand-new.
-  //   • Current design has unsaved edits but no storage home (never saved), or
-  //     the flush failed → confirm before discarding.
+  //   • Not dirty → proceed (nothing to lose).
+  //   • Dirty + a stored design with a real name → flush the LATEST working
+  //     scene to storage and proceed, so it's there when you return.
+  //   • Dirty + never saved (no storage home) → confirm before discarding.
+  //   • Flush failed → confirm before discarding.
+  //
+  // Reads everything via refs so it always persists the newest scene and gates
+  // on REAL dirtiness (isDirty), not the saveStatus label: a design that was
+  // autosaved but still differs from its snapshot, or hit a save/edit race, is
+  // 'saved' yet must still be flushed before its in-memory scene is dropped.
+  // We probe storage DIRECTLY (loadDesign) rather than the savedList cache.
   const flushCurrentBeforeSwitch = useCallback(async (targetLabel) => {
-    if (saveStatus !== 'unsaved') return true;
-    const curStored = designName ? await loadDesign(workspace, designName) : null;
-    if (!curStored) {
+    if (!isDirtyRef.current) return true;
+    const name = (designNameRef.current || '').trim();
+    const payload = {
+      scene: sceneRef.current, history: historyRef.current, future: futureRef.current,
+      updatedAt: Date.now(), versions: versionsRef.current, currentVersionId: currentVersionIdRef.current,
+    };
+    const curStored = name ? await loadDesign(workspace, name) : null;
+    if (!name || !curStored) {
+      // Genuinely-new / never-saved scratch design — no storage home. Ask
+      // before discarding (don't silently create a key for a throwaway scene).
       return await confirmDialog(`Discard unsaved changes and load ${targetLabel}?`, 'Load design');
     }
-    const res = await saveDesign(workspace, designName, { scene, history, future, updatedAt: Date.now(), versions, currentVersionId });
-    if (res.ok) { mirrorWorkspaceToFileIfLinked(); return true; }
+    const res = await saveDesign(workspace, name, payload);
+    if (res.ok) {
+      // Cancel any pending autosave so a late timer can't fire against the new
+      // designName with this (now-superseded) scene closure.
+      if (autosaveTimerRef.current) { clearTimeout(autosaveTimerRef.current); autosaveTimerRef.current = null; }
+      mirrorWorkspaceToFileIfLinked();
+      return true;
+    }
     console.error('Save-before-switch failed:', describeSaveFailure(res), res);
     return await confirmDialog(
-      `Could not save "${designName}" before switching (${res.message || 'storage error'}).\n\nLoad ${targetLabel} anyway and lose its unsaved changes?`,
+      `Could not save "${name}" before switching (${res.message || 'storage error'}).\n\nLoad ${targetLabel} anyway and lose its unsaved changes?`,
       'Save failed',
     );
-  }, [workspace, saveStatus, designName, scene, history, future, versions, currentVersionId, confirmDialog, mirrorWorkspaceToFileIfLinked]);
+  }, [workspace, confirmDialog, mirrorWorkspaceToFileIfLinked]);
 
   const handleLoad = useCallback(async (name) => {
     if (name === designName) return; // already on this design — nothing to do
@@ -1247,6 +1294,8 @@ export default function App() {
     const ok = await confirmDialog(`Delete "${name}"? This cannot be undone.`, 'Delete design');
     if (!ok) return;
     await deleteDesignStored(workspace, name);
+    // Drop the cached versions so a deleted design leaves no orphaned chip.
+    setVersionsByDesign(prev => { if (!prev[name]) return prev; const next = { ...prev }; delete next[name]; return next; });
     await refreshSavedList();
     if (name === designName) {
       // Stayed on the now-deleted design. Mark as unsaved so user can re-save under a new name.
@@ -1270,6 +1319,9 @@ export default function App() {
       return;
     }
     await deleteDesignStored(workspace, oldName);
+    // Re-key the cached versions (old → new) so the renamed design doesn't
+    // leave an orphaned entry under the old name.
+    setVersionsByDesign(prev => { if (!prev[oldName]) return prev; const next = { ...prev }; next[trimmed] = next[oldName]; delete next[oldName]; return next; });
     if (designName === oldName) {
       setDesignName(trimmed);
       await setActiveDesignName(workspace, trimmed);
@@ -1513,9 +1565,13 @@ export default function App() {
   // already exist in storage (i.e., the user has saved at least once).
   // We persist the full undo/redo stacks alongside the scene.
   const [lastAutoSavedAt, setLastAutoSavedAt] = useState(null);
-  const autosaveTimerRef = useRef(null);
   useEffect(() => {
-    // Only autosave when status is unsaved AND the design name exists in saved list
+    // Only autosave when status is unsaved AND the design name exists in saved
+    // list. (Stays gated on saveStatus, not isDirty: a design that is merely
+    // modified-since-snapshot is already persisted as the working state — its
+    // edits are safe — so re-autosaving it would loop. The save-before-switch
+    // flush below is the safety net that covers any dirty-but-not-persisted
+    // window, gated on isDirty.)
     if (saveStatus !== 'unsaved') return;
     if (!designName || !savedList.includes(designName)) return;
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
@@ -5632,18 +5688,24 @@ export default function App() {
                       {activeVer && (
                         <span
                           className={`flex-shrink-0 inline-flex items-center gap-1 px-1 py-px rounded text-[9px] font-mono ${
-                            isModified
-                              ? 'bg-amber-900/40 text-amber-300 border border-amber-700'
-                              : 'bg-cyan-900/40 text-cyan-300 border border-cyan-800'
+                            !isCurrent
+                              // NON-active design: a NEUTRAL "where it was left off"
+                              // chip — must NOT read as the active "on this version"
+                              // cue, so two designs can't look current at once.
+                              ? 'bg-slate-800 text-slate-500 border border-slate-700'
+                              : isModified
+                                ? 'bg-amber-900/40 text-amber-300 border border-amber-700'
+                                : 'bg-cyan-900/40 text-cyan-300 border border-cyan-800'
                           }`}
                           title={
-                            `On v${activeVer.versionNumber} (${activeVer.id})${
+                            (isCurrent ? 'On' : 'Last left on') +
+                            ` v${activeVer.versionNumber} (${activeVer.id})${
                               activeVer.description ? `: ${activeVer.description}` : ''
-                            }${isModified ? ' · modified since this snapshot' : ''}`
+                            }${isCurrent && isModified ? ' · modified since this snapshot' : ''}`
                           }
                         >
                           @v{activeVer.versionNumber}
-                          {isModified && <span className="opacity-80">*</span>}
+                          {isCurrent && isModified && <span className="opacity-80">*</span>}
                         </span>
                       )}
                     </button>
@@ -5731,7 +5793,11 @@ export default function App() {
                           // becomes just the version we're "based on"
                           // — toned-down highlight, no ● bullet (the
                           // bullet lives on the synthetic row).
-                          const isCurVer = v.id === activeCurId;
+                          // The "current version" cue (cyan highlight + ● bullet)
+                          // is EXCLUSIVE to the ACTIVE design — a non-current
+                          // design's cached pointer must not paint a version row
+                          // as "current", or several designs look active at once.
+                          const isCurVer = isCurrent && v.id === activeCurId;
                           const isBasedOn = isCurVer && isModified; // synthetic current is the bullet holder
                           const isExactlyOn = isCurVer && !isModified;
                           return (
