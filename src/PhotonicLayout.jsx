@@ -1027,46 +1027,36 @@ export default function App() {
     setSaveStatus('unsaved');
   };
 
+  // Before switching AWAY from the current design — to another design, or to
+  // another design's SNAPSHOT — make sure its working ("current") state isn't
+  // thrown away. Returns true to proceed with the switch, false to abort.
+  //   • No unsaved edits → proceed.
+  //   • Current design exists in storage → flush it silently and proceed (its
+  //     working state persists and is there when you return; autosave would
+  //     have done the same within ~2s). We probe storage DIRECTLY rather than
+  //     testing the savedList STATE — that derived cache can lag a just-saved
+  //     design (async refresh) or miss it on an untrimmed-name mismatch, and
+  //     either would wrongly treat a saved design as brand-new.
+  //   • Current design has unsaved edits but no storage home (never saved), or
+  //     the flush failed → confirm before discarding.
+  const flushCurrentBeforeSwitch = useCallback(async (targetLabel) => {
+    if (saveStatus !== 'unsaved') return true;
+    const curStored = designName ? await loadDesign(workspace, designName) : null;
+    if (!curStored) {
+      return await confirmDialog(`Discard unsaved changes and load ${targetLabel}?`, 'Load design');
+    }
+    const res = await saveDesign(workspace, designName, { scene, history, future, updatedAt: Date.now(), versions, currentVersionId });
+    if (res.ok) { mirrorWorkspaceToFileIfLinked(); return true; }
+    console.error('Save-before-switch failed:', describeSaveFailure(res), res);
+    return await confirmDialog(
+      `Could not save "${designName}" before switching (${res.message || 'storage error'}).\n\nLoad ${targetLabel} anyway and lose its unsaved changes?`,
+      'Save failed',
+    );
+  }, [workspace, saveStatus, designName, scene, history, future, versions, currentVersionId, confirmDialog, mirrorWorkspaceToFileIfLinked]);
+
   const handleLoad = useCallback(async (name) => {
     if (name === designName) return; // already on this design — nothing to do
-    if (saveStatus === 'unsaved') {
-      // Switching to a DIFFERENT design with unsaved working edits. The
-      // working ("current") state of the design you're LEAVING is not a thing
-      // to throw away — it should persist and be there when you return. If
-      // that design is stored, flush it to storage now (autosave would have
-      // done the same within ~2s) and switch silently. Only a brand-new
-      // design with no storage home can actually be lost, so that case still
-      // confirms before discarding. (Loading a specific SNAPSHOT —
-      // handleLoadVersion — keeps its own discard prompt; that genuinely
-      // replaces the working state.)
-      // Does the current design actually exist in storage? Probe storage
-      // DIRECTLY rather than testing the `savedList` STATE — that derived cache
-      // is the wrong oracle here: it can lag a just-saved/snapshotted design
-      // (async refreshSavedList) OR miss it on an untrimmed-name mismatch
-      // ("A " vs stored "A"), and either one makes a genuinely-saved design
-      // look brand-new and wrongly pops the discard prompt. loadDesign reads
-      // the live key and returns null only when it's truly absent — a design
-      // that was never saved, the one case that really must ask before losing.
-      const curStored = designName ? await loadDesign(workspace, designName) : null;
-      if (curStored) {
-        const res = await saveDesign(workspace, designName, { scene, history, future, updatedAt: Date.now(), versions, currentVersionId });
-        if (res.ok) {
-          mirrorWorkspaceToFileIfLinked();
-        } else {
-          // Storage write failed (e.g. quota) — DON'T silently lose the
-          // current design's edits. Surface it and let the user decide.
-          console.error('Save-before-switch failed:', describeSaveFailure(res), res);
-          const ok = await confirmDialog(
-            `Could not save "${designName}" before switching (${res.message || 'storage error'}).\n\nLoad "${name}" anyway and lose its unsaved changes?`,
-            'Save failed',
-          );
-          if (!ok) return;
-        }
-      } else {
-        const ok = await confirmDialog('Discard unsaved changes and load "' + name + '"?', 'Load design');
-        if (!ok) return;
-      }
-    }
+    if (!(await flushCurrentBeforeSwitch(`"${name}"`))) return;
     const d = await loadDesign(workspace, name);
     if (!d) { await alertDialog('Failed to load.', 'Error'); return; }
     setScene(normalizeScene(d.scene));
@@ -1078,7 +1068,7 @@ export default function App() {
     setDesignName(name);
     await setActiveDesignName(workspace, name);
     setSaveStatus('saved');
-  }, [workspace, saveStatus, designName, scene, history, future, versions, currentVersionId, setSelection, confirmDialog, alertDialog, mirrorWorkspaceToFileIfLinked]);
+  }, [workspace, designName, flushCurrentBeforeSwitch, setSelection, alertDialog]);
 
   // Load a specific VERSION of a design into the working state. The
   // working state becomes the version's frozen scene; the user can
@@ -1086,14 +1076,17 @@ export default function App() {
   // (starts a new chain entry). Marks the design as `unsaved` so
   // the user is reminded that they've moved off the latest state.
   const handleLoadVersion = useCallback(async (name, versionId) => {
-    // Two reasons to confirm-discard: unsaved edits since last Save,
-    // OR scene drifted from the snapshot the current pointer points
-    // to (i.e. the synthetic "current" row in the version list is
-    // showing). The user might've hit Cmd+S already (saveStatus =
-    // 'saved') but their working state is still ahead of any
-    // snapshot — without this second branch they'd lose those
-    // edits silently when loading a different version.
-    if (saveStatus === 'unsaved' || currentIsModified) {
+    if (name !== designName) {
+      // The snapshot belongs to a DIFFERENT design — this is a design SWITCH
+      // (load that design at the chosen version). The CURRENT design's working
+      // state must persist, not be discarded: flush it (same save-before-switch
+      // as handleLoad), only confirming if it's a never-saved design.
+      if (!(await flushCurrentBeforeSwitch('this version'))) return;
+    } else if (saveStatus === 'unsaved' || currentIsModified) {
+      // Reverting the CURRENT design to one of its OWN snapshots REPLACES the
+      // working state, so confirm before losing the in-progress edits. (The
+      // "current" synthetic row drift is caught by currentIsModified even when
+      // saveStatus is 'saved' — autosave persists but doesn't snapshot.)
       const msg = currentIsModified
         ? 'Your working state has unsnapshotted edits ("current" row above). Loading this version will REPLACE them.\n\nDiscard your in-progress edits and load this version?'
         : 'Discard unsaved changes and load this version?';
@@ -1119,7 +1112,7 @@ export default function App() {
     // back into the working state (vs. silently overwriting after
     // an autosave debounce).
     setSaveStatus('unsaved');
-  }, [workspace, saveStatus, currentIsModified, setSelection, confirmDialog, alertDialog]);
+  }, [workspace, designName, saveStatus, currentIsModified, flushCurrentBeforeSwitch, setSelection, confirmDialog, alertDialog]);
 
   // Delete a single version from a design's history. The confirmation
   // explicitly recommends snapshotting the current state first so a
