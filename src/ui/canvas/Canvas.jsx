@@ -5137,8 +5137,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         return (
           <g pointerEvents="none">
             {dots.map(d => (
-              <circle key={d.k} cx={d.x} cy={-d.y} r={hr * 0.5}
-                fill="#f59e0b" fillOpacity={0.45} stroke="white" strokeWidth={screen(0.25)} strokeOpacity={0.5} />
+              // Amber snap dot (matches the snap-mode anchor color) with a crisp
+              // white ring so it stays visible on amber/gold electrodes, the
+              // light canvas, and the dark themes alike.
+              <circle key={d.k} cx={d.x} cy={-d.y} r={hr * 0.9}
+                fill="#f59e0b" fillOpacity={0.95} stroke="white" strokeWidth={screen(0.7)} strokeOpacity={0.95} />
             ))}
           </g>
         );
