@@ -23,6 +23,7 @@
 import { evalExpr } from './params.js';
 import { anchorLocalRotated, anchorWorld, compRotationDeg } from './anchors.js';
 import { expandTransforms } from './transforms.js';
+import { instanceChainOffsetExpr, chainOwnerForInstance } from './instance-positions.js';
 import { tessellatePolylinePath, polylineBbox, polyshapeBbox } from '../geometry/polyline.js';
 import { buildRacetrackCenterline } from '../geometry/racetrack.js';
 
@@ -398,7 +399,43 @@ export function solveLayout(components, snaps, paramValues) {
       // center). For now, allow the snap to push an offset on top of the
       // bbox center: place at fromAnchor + dx - toLocal where toLocal is
       // computed from the boolean's bbox-derived w/h.
-      const fromAnchor = anchorWorld(fromComp, s.from.anchor, workingPV);
+      let fromAnchor = anchorWorld(fromComp, s.from.anchor, workingPV);
+      // Snap-to-replica: when the snap targets a specific instance produced
+      // by the parent's `repeat`/`displace` chain (from.instanceIdx > 0),
+      // shift the reference anchor by the parent's base→instance-k chain
+      // offset. Reuses the SAME instanceChainOffsetExpr machinery polyline
+      // snap-vertices use, evaluated numerically here. Exact for
+      // repeat/displace (size + orientation preserved, so the anchor offset
+      // is unchanged and instance-k anchor = base anchor + k·(dx,dy)); for
+      // rotate/mirror chains it's the centroid offset (orientation not
+      // tracked — matches the numeric exporters). Out-of-range / unsupported
+      // idx falls back to the base anchor with a solve diagnostic.
+      const fromIdx = (s.from && s.from.instanceIdx) || 0;
+      if (fromIdx > 0) {
+        const owner = chainOwnerForInstance(fromComp, byId) || fromComp;
+        const fw = typeof fromComp.w === 'number' ? fromComp.w : evalExpr(fromComp.w, workingPV);
+        const fh = typeof fromComp.h === 'number' ? fromComp.h : evalExpr(fromComp.h, workingPV);
+        const off = instanceChainOffsetExpr(owner, fromIdx, {
+          paramValues: workingPV,
+          exprWithUm: (x) => `(${x})`,
+          baseCxExpr: String(Number.isFinite(fromComp.cx) ? fromComp.cx : 0),
+          baseCyExpr: String(Number.isFinite(fromComp.cy) ? fromComp.cy : 0),
+          baseWExpr: String(Number.isFinite(fw) ? fw : 0),
+          baseHExpr: String(Number.isFinite(fh) ? fh : 0),
+          components,
+        });
+        if (off) {
+          const odx = evalExpr(off.dxExpr, workingPV);
+          const ody = evalExpr(off.dyExpr, workingPV);
+          if (Number.isFinite(odx) && Number.isFinite(ody)) {
+            fromAnchor = { x: fromAnchor.x + odx, y: fromAnchor.y + ody };
+          } else {
+            diag.issues.push({ kind: 'nan-instance-offset', message: `Snap ${s.id ?? `${s.from.compId}→${s.to.compId}`}: instance ${fromIdx} offset of ${s.from.compId} evaluated non-finite — treated as base` });
+          }
+        } else {
+          diag.issues.push({ kind: 'dangling-instance', message: `Snap ${s.id ?? `${s.from.compId}→${s.to.compId}`}: from.instanceIdx ${fromIdx} out of range for ${s.from.compId} — treated as base` });
+        }
+      }
       // For boolean toComp: refresh bbox FIRST so its w/h reflect current
       // operand positions. Then we compute the snap-driven center based on
       // those dimensions, which will be DIFFERENT from the natural bbox

@@ -467,10 +467,54 @@ export function computeParametricPositions(components, snaps, paramValues = {}) 
     // parameter as well as the position parameters.
     const fromOff = anchorOffsetExpr(snap.from.anchor, parentPos.wExpr, parentPos.hExpr, componentRotationExpr(parent));
     const toOff   = anchorOffsetExpr(snap.to.anchor,   cDims.wExpr,     cDims.hExpr,     componentRotationExpr(c));
+    // Snap-to-replica: when the snap targets a specific instance of the
+    // parent's `repeat`/`displace` chain (from.instanceIdx > 0), add the
+    // parent's base→instance-k chain offset to the reference term. This is
+    // the SAME parametric (base + k·dx) form the repeat already exports as
+    // DuplicateAlongLine, so an HFSS sweep of the repeat pitch moves the
+    // replicas AND this snapped child together. Reuses instanceChainOffsetExpr
+    // (the polyline snap-vertex precedent). repeat/displace stay fully
+    // parametric; rotate/mirror chains bake the numeric centroid offset
+    // (the anchor's orientation under a rotate/mirror isn't expressible the
+    // same way — same accepted contract as the vertex path).
+    let instDx = null, instDy = null;
+    const fromInstanceIdx = (snap.from && snap.from.instanceIdx) || 0;
+    if (fromInstanceIdx > 0) {
+      const owner = chainOwnerForInstance(parent, byId) || parent;
+      const simple = (owner.transforms || [])
+        .filter(t => t && t.enabled !== false)
+        .every(t => t.kind === 'repeat' || t.kind === 'displace');
+      if (simple) {
+        const off = instanceChainOffsetExpr(owner, fromInstanceIdx, {
+          paramValues, exprWithUm: dimExprStr,
+          baseCxExpr: parentPos.cxExpr, baseCyExpr: parentPos.cyExpr,
+          baseWExpr: parentPos.wExpr, baseHExpr: parentPos.hExpr,
+          components, parametricPos: positions,
+        });
+        if (off) { instDx = off.dxExpr; instDy = off.dyExpr; }
+      } else {
+        // Non-translation chain → bake the numeric centroid offset (eval the
+        // chain with unit-free exprs so evalExpr can resolve cos/sin).
+        const offN = instanceChainOffsetExpr(owner, fromInstanceIdx, {
+          paramValues, exprWithUm: (x) => `(${x})`,
+          baseCxExpr: String(Number.isFinite(parent.cx) ? parent.cx : 0),
+          baseCyExpr: String(Number.isFinite(parent.cy) ? parent.cy : 0),
+          baseWExpr: String(typeof parent.w === 'number' ? parent.w : 0),
+          baseHExpr: String(typeof parent.h === 'number' ? parent.h : 0),
+          components, parametricPos: positions,
+        });
+        if (offN) {
+          const ndx = evalExpr(offN.dxExpr, paramValues);
+          const ndy = evalExpr(offN.dyExpr, paramValues);
+          instDx = `${Number.isFinite(ndx) ? ndx : 0}um`;
+          instDy = `${Number.isFinite(ndy) ? ndy : 0}um`;
+        }
+      }
+    }
     // Solver: toComp.cx = fromAnchorWorld.x + dx - toAnchor.local.x
-    //                  = (parent.cx + fromOff.x) + dx - toOff.x
-    const cxExpr = `(${parentPos.cxExpr}) + (${fromOff.xOff}) + (${snap.dx}) - (${toOff.xOff})`;
-    const cyExpr = `(${parentPos.cyExpr}) + (${fromOff.yOff}) + (${snap.dy}) - (${toOff.yOff})`;
+    //                  = (parent.cx + instOff.x + fromOff.x) + dx - toOff.x
+    const cxExpr = `(${parentPos.cxExpr})${instDx ? ` + (${instDx})` : ''} + (${fromOff.xOff}) + (${snap.dx}) - (${toOff.xOff})`;
+    const cyExpr = `(${parentPos.cyExpr})${instDy ? ` + (${instDy})` : ''} + (${fromOff.yOff}) + (${snap.dy}) - (${toOff.yOff})`;
     const result = { cxExpr, cyExpr, wExpr: cDims.wExpr, hExpr: cDims.hExpr };
     positions[compId] = result;
     visiting.delete(compId);

@@ -503,7 +503,7 @@ const RULER_EDGE_LABEL = { T: 'top', B: 'bot', L: 'left', R: 'right' };
 // scan applied). clusterSet exclusion is drag-specific and happens at query
 // time. Each component owns a 99-slot sequence block (81 anchor pairs +
 // 9 h-edge + 9 v-edge candidates) reproducing the old enumeration order.
-export function buildAltDragTargetIndex(solved, paramValues, dimsByCompId) {
+export function buildAltDragTargetIndex(solved, paramValues, dimsByCompId, instances = null) {
   const recs = [];
   for (let k = 0; k < solved.length; k++) {
     const oc = solved[k];
@@ -532,6 +532,37 @@ export function buildAltDragTargetIndex(solved, paramValues, dimsByCompId) {
       r.oc.cx + r.ow / 2, r.oc.cy + r.oh / 2,
       r
     );
+  }
+  // Replica anchors (optional): when `instances` (the transform-expanded
+  // instance list) is provided, ALSO offer the 9 anchors of each replica
+  // (idx > 0) produced by a repeat/transform chain, so Alt-drag can snap
+  // ONTO a replicated copy — not just the base. The chosen instanceIdx is
+  // recorded on the candidate so the committed snap targets that instance and
+  // the solver/HFSS export add its parametric chain offset. Edge-pair
+  // candidates remain base-only for v1. Replica sequence blocks rank AFTER
+  // every base block, so a base anchor still wins an exact-distance tie
+  // (base/parent snapping is unchanged). instances=null ⇒ byte-identical to
+  // the base-only index (keeps the perf-equivalence oracle green).
+  if (instances && instances.length) {
+    const ocById = new Map(solved.map((c) => [c.id, c]));
+    let replicaBlock = solved.length;
+    for (const inst of instances) {
+      if (!inst || inst.idx === 0) continue;
+      const oc = ocById.get(inst.compId);
+      if (!oc || oc.consumedBy) continue;
+      const iw = inst.w, ih = inst.h;
+      if (!Number.isFinite(iw) || !Number.isFinite(ih) || iw <= 0 || ih <= 0) continue;
+      const irot = inst.rotation || 0;
+      for (let ai = 0; ai < ANCHORS.length; ai++) {
+        const lp = anchorLocalRotated(ANCHORS[ai], iw, ih, irot);
+        const x = inst.cx + lp.x, y = inst.cy + lp.y;
+        gridInsert(anchorGrid, x, y, x, y, {
+          x, y, compId: inst.compId, anchor: ANCHORS[ai], anchorIdx: ai,
+          ocIdx: replicaBlock, instanceIdx: inst.idx,
+        });
+      }
+      replicaBlock++;
+    }
   }
   return { anchorGrid, rectGrid, cellSize };
 }
@@ -579,7 +610,7 @@ export function findAltDragSnapCandidate(index, {
             kind: 'anchor',
             dist,
             dAnchor: da,
-            target: { x: pt.x, y: pt.y, compId: pt.compId, anchor: pt.anchor },
+            target: { x: pt.x, y: pt.y, compId: pt.compId, anchor: pt.anchor, instanceIdx: pt.instanceIdx || 0 },
           };
           const seq = pt.ocIdx * SEQ_BLOCK + pt.anchorIdx * 9 + dj;
           if (better(dist, seq)) { best = cand; bestSeq = seq; }
@@ -1063,8 +1094,8 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
   // alt-drag that's once per committed move, still far cheaper than the
   // old per-tick solved × 81 anchor-pair scan.
   const altDragTargetIndex = useMemo(
-    () => buildAltDragTargetIndex(solved, paramValues, dimsByCompId),
-    [solved, paramValues, dimsByCompId]
+    () => buildAltDragTargetIndex(solved, paramValues, dimsByCompId, transformInstances),
+    [solved, paramValues, dimsByCompId, transformInstances]
   );
 
   // Related components: anything snapped to or from the selected component, plus mirror partners
@@ -1427,7 +1458,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     } else if (drag && drag.kind === 'move' && moveSnapHover) {
       const line = moveSnapHover.kind === 'edge'
         ? `Alt-drag · release to snap ${moveSnapHover.dSide} edge to ${moveSnapHover.targetSide} edge of ${moveSnapHover.targetCompId}`
-        : `Alt-drag · release to snap to ${moveSnapHover.compId}.${moveSnapHover.anchor}`;
+        : `Alt-drag · release to snap to ${moveSnapHover.compId}${moveSnapHover.instanceIdx > 0 ? ` replica #${moveSnapHover.instanceIdx}` : ''}.${moveSnapHover.anchor}`;
       status = { kind: 'snap', line };
     } else if (drag && drag.kind === 'move' && altKey) {
       status = {
@@ -2829,14 +2860,23 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         const draggedHasIncoming = scene.snaps.some(s => s.to.compId === dragId);
         const targetHasIncoming  = scene.snaps.some(s => s.to.compId === targetCompId);
         let fromCompId, fromAnchor, toCompId, toAnchor, finalDx, finalDy;
+        // Replica target: the chosen instanceIdx is only meaningful when the
+        // replica ends up on the `from` (parent/reference) side — the solver
+        // and HFSS export add the parent's base→instance-k chain offset there.
+        // In the reverse direction the replica would become the CHILD, which
+        // can't be positioned AS instance k, so we fall back to its base anchor.
+        const targetInstanceIdx = target.kind === 'anchor' ? (target.instanceIdx || 0) : 0;
+        let fromInstanceIdx = 0;
         if (!draggedHasIncoming) {
           // Standard direction: target is the parent of the dragged comp.
           fromCompId = targetCompId;  fromAnchor = targetAnchor;
           toCompId   = dragId;         toAnchor   = draggedAnchor;
           finalDx = initDx; finalDy = initDy;
+          fromInstanceIdx = targetInstanceIdx;
         } else if (!targetHasIncoming) {
-          // Reverse so target becomes child. Flipping direction also
-          // flips the sign of the offset we computed.
+          // Reverse so target becomes child. Flipping direction also flips
+          // the sign of the offset we computed. (Replica idx dropped: the
+          // replica is the child now — base anchor only.)
           fromCompId = dragId;          fromAnchor = draggedAnchor;
           toCompId   = targetCompId;    toAnchor   = targetAnchor;
           finalDx = -initDx; finalDy = -initDy;
@@ -2874,7 +2914,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           },
           snaps: [...prev.snaps, {
             id: `snap_${Date.now()}`,
-            from: { compId: fromCompId, anchor: fromAnchor },
+            from: { compId: fromCompId, anchor: fromAnchor, ...(fromInstanceIdx > 0 ? { instanceIdx: fromInstanceIdx } : {}) },
             to:   { compId: toCompId,   anchor: toAnchor },
             dx: gapX, dy: gapY,
           }],
