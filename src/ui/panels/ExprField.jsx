@@ -96,7 +96,7 @@ export function ExprField({
     ? 'border-red-500 text-red-300 focus:border-red-400'
     : isParamRef
       ? 'border-amber-700/60 text-amber-200 focus:border-amber-400'
-      : 'border-slate-700 text-white focus:border-cyan-400';
+      : 'border-slate-700 text-slate-100 focus:border-cyan-400';
 
   const sz = SIZES[size] || SIZES.md;
   const effectiveTitle = isError

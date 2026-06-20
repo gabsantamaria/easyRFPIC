@@ -153,7 +153,7 @@ export function ParamRow({ name, p, onRename, onUpdateExpr, onCommitExpr, onUpda
             onCommit={onExprCommit}
             suggestions={suggestions}
             className={`w-full bg-slate-900 border rounded text-[11px] font-mono outline-none whitespace-pre-wrap break-words leading-tight px-1.5 py-0.5 ${
-              error ? 'border-red-500 text-red-300' : 'border-slate-700 text-white hover:border-slate-500 focus:border-cyan-400 focus:py-1'
+              error ? 'border-red-500 text-red-300' : 'border-slate-700 text-slate-100 hover:border-slate-500 focus:border-cyan-400 focus:py-1'
             }`}
             spellCheck={false}
             title={exprTooltip}

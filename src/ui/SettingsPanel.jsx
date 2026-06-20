@@ -187,7 +187,7 @@ function ToggleRow({ label, hint, checked, onChange }) {
         aria-checked={checked}
         role="switch"
       >
-        <span className={`absolute top-0.5 h-3 w-3 rounded-full bg-white transition-all ${checked ? 'left-3.5' : 'left-0.5'}`} />
+        <span className={`absolute top-0.5 h-3 w-3 rounded-full bg-slate-100 transition-all ${checked ? 'left-3.5' : 'left-0.5'}`} />
       </span>
     </button>
   );

@@ -123,7 +123,7 @@ function TransformRow({
                     ...(pivot === 'custom' && t.py == null ? { py: '0' } : {}),
                   });
                 }}
-                className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[11px] font-mono text-white outline-none focus:border-cyan-400"
+                className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[11px] font-mono text-slate-100 outline-none focus:border-cyan-400"
               >
                 <option value="C">C (center)</option>
                 <option value="N">N</option>
@@ -176,7 +176,7 @@ function TransformRow({
             <select
               value={t.axis || 'x'}
               onChange={(e) => onUpdate({ axis: e.target.value })}
-              className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[11px] font-mono text-white outline-none focus:border-orange-400"
+              className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[11px] font-mono text-slate-100 outline-none focus:border-orange-400"
             >
               <option value="x">x (flip x — vertical mirror line)</option>
               <option value="y">y (flip y — horizontal mirror line)</option>
@@ -187,7 +187,7 @@ function TransformRow({
             <select
               value={t.pivot || 'C'}
               onChange={(e) => onUpdate({ pivot: e.target.value })}
-              className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[11px] font-mono text-white outline-none focus:border-orange-400"
+              className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[11px] font-mono text-slate-100 outline-none focus:border-orange-400"
             >
               <option value="C">C (own center)</option>
               <option value="origin">world origin</option>
@@ -204,7 +204,7 @@ function TransformRow({
               <select
                 value={t.axis || 'x'}
                 onChange={(e) => onUpdate({ axis: e.target.value })}
-                className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[11px] font-mono text-white outline-none focus:border-orange-400"
+                className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[11px] font-mono text-slate-100 outline-none focus:border-orange-400"
               >
                 <option value="x">x (mirror along ±x)</option>
                 <option value="y">y (mirror along ±y)</option>

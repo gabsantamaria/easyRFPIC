@@ -4970,7 +4970,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             {polylineDraft.arcNext && cur && (
               <text
                 x={cur.x + screen(12)} y={-cur.y - screen(12)}
-                fontSize={screen(10)} fill="#22d3ee" fontFamily="monospace"
+                fontSize={screen(10)} fill="#0891b2" fontFamily="monospace"
               >arc 90°</text>
             )}
             {/* Axis-aligned guideline through the cursor */}

@@ -5510,7 +5510,7 @@ export default function App() {
               type="number" step="0.1" min="0.1"
               value={gridSize}
               onChange={(e) => setGridSize(Math.max(0.1, parseFloat(e.target.value) || 1))}
-              className="w-12 bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-xs text-white outline-none"
+              className="w-12 bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-xs text-slate-100 outline-none"
             />
             <button onClick={fitToView} className="flex items-center gap-1 px-2 py-1 rounded text-xs border border-slate-600 hover:bg-slate-800" title="Fit all to view (F)">
               <Maximize2 size={11} /> fit
@@ -6003,7 +6003,7 @@ export default function App() {
                     onChange={(e) => setParamSearch(e.target.value)}
                     onKeyDown={(e) => { if (e.key === 'Escape') { setParamSearch(''); e.target.blur(); } }}
                     placeholder="filter params (name or description)…"
-                    className="w-full bg-slate-900 border border-slate-700 rounded pl-6 pr-5 py-1 text-[11px] font-mono text-white outline-none focus:border-cyan-400 placeholder:text-slate-600"
+                    className="w-full bg-slate-900 border border-slate-700 rounded pl-6 pr-5 py-1 text-[11px] font-mono text-slate-100 outline-none focus:border-cyan-400 placeholder:text-slate-600"
                     spellCheck={false}
                   />
                   {paramSearch && (
@@ -6587,7 +6587,7 @@ export default function App() {
                             updateSnap(s.id, { dx: v });
                             commitExpr(v, prevDefault, 'µm', `Snap ${s.id} dx`);
                           }}
-                          className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-white outline-none focus:border-cyan-400 whitespace-pre-wrap break-words leading-tight"
+                          className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-slate-100 outline-none focus:border-cyan-400 whitespace-pre-wrap break-words leading-tight"
                           spellCheck={false}
                         />
                       </div>
@@ -6603,7 +6603,7 @@ export default function App() {
                             updateSnap(s.id, { dy: v });
                             commitExpr(v, prevDefault, 'µm', `Snap ${s.id} dy`);
                           }}
-                          className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-white outline-none focus:border-cyan-400 whitespace-pre-wrap break-words leading-tight"
+                          className="w-full bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-slate-100 outline-none focus:border-cyan-400 whitespace-pre-wrap break-words leading-tight"
                           spellCheck={false}
                         />
                       </div>
@@ -7300,7 +7300,7 @@ export default function App() {
                 )}
                 <div>
                   <label className="text-[10px] uppercase tracking-wider text-slate-500">Layer</label>
-                  <select value={selected.layer} onChange={(e) => updateComp(selected.id, { layer: e.target.value })} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-white outline-none">
+                  <select value={selected.layer} onChange={(e) => updateComp(selected.id, { layer: e.target.value })} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-slate-100 outline-none">
                     <option value="waveguide">waveguide</option>
                     <option value="electrode">electrode</option>
                     <option value="port">port</option>
@@ -7529,7 +7529,7 @@ export default function App() {
                         return { verts: resolvePolylineVertices(sel, byIdS, paramValues), sel };
                       };
                       const setVertices = (newVerts) => updateComp(selected.id, { vertices: newVerts });
-                      const inputCls = "bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-white outline-none focus:border-cyan-400";
+                      const inputCls = "bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-slate-100 outline-none focus:border-cyan-400";
                       // Expression input bound to one field of one vertex.
                       const vertExprInput = (idx, v, field, placeholder, unitForCreate = 'µm') => (
                         <DeferredTextInput
@@ -7824,7 +7824,7 @@ export default function App() {
                           updateComp(selected.id, { [key]: v });
                           commitExpr(v, prevDefault, unitForCreate, `Auto-created (${selected.id}.${key})`);
                         }}
-                        className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-white outline-none focus:border-cyan-400 whitespace-pre-wrap break-words leading-tight"
+                        className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-slate-100 outline-none focus:border-cyan-400 whitespace-pre-wrap break-words leading-tight"
                         spellCheck={false}
                         placeholder="0"
                       />
@@ -7844,11 +7844,11 @@ export default function App() {
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="text-[10px] uppercase tracking-wider text-slate-500">cx ({selectedHasIncoming ? 'solved' : 'free'})</label>
-                    <DeferredTextInput type="number" step="0.5" numeric value={selected.cx?.toFixed?.(2) ?? selected.cx} disabled={selectedHasIncoming} onCommit={(v) => updateComp(selected.id, { cx: v })} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-white outline-none focus:border-cyan-400 disabled:opacity-50" />
+                    <DeferredTextInput type="number" step="0.5" numeric value={selected.cx?.toFixed?.(2) ?? selected.cx} disabled={selectedHasIncoming} onCommit={(v) => updateComp(selected.id, { cx: v })} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-slate-100 outline-none focus:border-cyan-400 disabled:opacity-50" />
                   </div>
                   <div>
                     <label className="text-[10px] uppercase tracking-wider text-slate-500">cy ({selectedHasIncoming ? 'solved' : 'free'})</label>
-                    <DeferredTextInput type="number" step="0.5" numeric value={selected.cy?.toFixed?.(2) ?? selected.cy} disabled={selectedHasIncoming} onCommit={(v) => updateComp(selected.id, { cy: v })} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-white outline-none focus:border-cyan-400 disabled:opacity-50" />
+                    <DeferredTextInput type="number" step="0.5" numeric value={selected.cy?.toFixed?.(2) ?? selected.cy} disabled={selectedHasIncoming} onCommit={(v) => updateComp(selected.id, { cy: v })} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-slate-100 outline-none focus:border-cyan-400 disabled:opacity-50" />
                   </div>
                 </div>
 
@@ -7879,7 +7879,7 @@ export default function App() {
                             commitExpr(v, prevDefault, 'µm', `Auto-created (${selected.id}.${key})`);
                           }
                         }}
-                        className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-white outline-none focus:border-cyan-400 whitespace-pre-wrap break-words leading-tight disabled:opacity-50"
+                        className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-slate-100 outline-none focus:border-cyan-400 whitespace-pre-wrap break-words leading-tight disabled:opacity-50"
                         spellCheck={false}
                         placeholder="(none)"
                       />
@@ -7975,7 +7975,7 @@ export default function App() {
                           <DeferredTextInput
                             value={cfg.impedance ?? '50'}
                             onCommit={(v) => setLumped({ impedance: (v || '').trim() || '50' })}
-                            className="w-24 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-white outline-none focus:border-cyan-400"
+                            className="w-24 bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-slate-100 outline-none focus:border-cyan-400"
                           />
                           <p className="text-[9px] text-slate-500 mt-1 font-mono leading-snug">
                             HFSS will assign a lumped port with an

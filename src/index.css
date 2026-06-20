@@ -86,7 +86,7 @@
   --app-slate-200: #1e293b;  /* text */
   --app-slate-300: #475569;  /* muted text */
   --app-slate-400: #64748b;  /* more muted text */
-  --app-slate-500: #94a3b8;  /* mid / faint text */
+  --app-slate-500: #64748b;  /* muted text — dark enough to read on white */
   --app-slate-600: #cbd5e1;  /* subtle border */
   --app-slate-700: #d8dee7;  /* border / divider → light */
   --app-slate-800: #ffffff;  /* panel surface → white */
@@ -101,4 +101,22 @@
   --color-emerald-300: #047857;
   --color-amber-400: #b45309;
   --color-violet-300: #7c3aed;
+  /* Light accent TEXT tokens darkened so semantic accents (error red, param
+     amber, cell violet, snap cyan, mirror orange) stay legible on white. No
+     bg-/border- fills depend on these shades except cyan/orange-400 borders,
+     which only read better when darker on white. Paper-only — dark themes keep
+     the default vivid accents. */
+  --color-red-400: #dc2626;
+  --color-red-300: #b91c1c;
+  --color-red-200: #dc2626;
+  --color-amber-500: #b45309;
+  --color-amber-300: #b45309;
+  --color-amber-200: #b45309;
+  --color-emerald-200: #059669;
+  --color-emerald-100: #047857;
+  --color-violet-400: #7c3aed;
+  --color-violet-100: #6d28d9;
+  --color-cyan-200: #0e7490;
+  --color-cyan-100: #0e7490;
+  --color-orange-300: #c2410c;
 }
