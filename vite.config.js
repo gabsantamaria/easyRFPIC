@@ -35,4 +35,17 @@ export default defineConfig({
     __APP_VERSION__: JSON.stringify(resolveAppVersion()),
   },
   plugins: [react(), tailwindcss()],
+  server: {
+    // Honor the PORT env var. The Claude preview tool (and many PaaS hosts)
+    // assign a port by setting PORT and then point the browser at it — but
+    // Vite does NOT read PORT on its own. Without this it ignores the
+    // assignment, falls back to 5173, and silently drifts to 5174+ when that's
+    // taken (e.g. a stale dev server), leaving the preview browser pointed at a
+    // port nothing is listening on → a chrome-error blank page. When PORT is
+    // set we also use strictPort so Vite binds EXACTLY that port (failing
+    // loudly if it's busy) instead of drifting off it. Plain `npm run dev`
+    // (no PORT) keeps the usual 5173-with-auto-increment behavior.
+    port: process.env.PORT ? Number(process.env.PORT) : 5173,
+    strictPort: !!process.env.PORT,
+  },
 })
