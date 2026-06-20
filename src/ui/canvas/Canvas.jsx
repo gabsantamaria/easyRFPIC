@@ -768,7 +768,7 @@ export function buildBoolOverridesForInstance(b, bInst, bBaseCx, bBaseCy, compBy
 // commit semantics (commit on Enter/blur, Esc reverts) AND identifier-prefix
 // AUTOCOMPLETE of existing parameter names (`suggestions`) — same popover as the
 // PARAMS panel. Grows on focus to reveal long names/expressions.
-function DimEditField({ initial, color, baseW, growW, title, onCommit, suggestions }) {
+function DimEditField({ initial, color, baseW, growW, title, onCommit, suggestions, bg = 'rgba(15,23,42,0.97)' }) {
   const [focused, setFocused] = useState(false);
   return (
     <div style={{ width: `${focused ? growW : baseW}px`, transition: 'width 90ms ease-out' }}>
@@ -790,7 +790,7 @@ function DimEditField({ initial, color, baseW, growW, title, onCommit, suggestio
           lineHeight: 1.3,
           fontFamily: 'monospace',
           padding: '2px 5px',
-          background: 'rgba(15,23,42,0.97)',
+          background: bg,
           color,
           border: `1px solid ${color}`,
           borderRadius: '4px',
@@ -958,8 +958,14 @@ function EditableSnapDims({ svgRef, viewport, snaps, solved, transformInstances,
   const P = params || {};
   const LONE = /^[A-Za-z_][A-Za-z0-9_]*$/;
   const ACCENT = '#a78bfa', AMBER = '#fbbf24';  // violet snap accent (matches the read-only snap dims)
+  // Violet-tinted pill bg so snap-offset fields read as DISTINCT from the
+  // neutral-dark component-dimension (W/H) fields at a glance.
+  const SNAP_BG = 'rgba(49,27,93,0.95)';
   const paramNames = Object.keys(P);
   const byId = Object.fromEntries(solved.map((c) => [c.id, c]));
+  // Axis tag prefix (Δx / Δy) — parallels the "W"/"H" tags on the dimension
+  // fields, in the violet snap accent.
+  const tag = (t) => (<span style={{ fontSize: '10px', fontWeight: 700, fontFamily: 'monospace', color: ACCENT }}>{t}</span>);
 
   const setSnapDim = (snapId, key, expr, prevVal) => {
     updateScene((prev) => ({ ...prev, snaps: prev.snaps.map((s) => (s.id === snapId ? { ...s, [key]: expr } : s)) }));
@@ -975,7 +981,7 @@ function EditableSnapDims({ svgRef, viewport, snaps, solved, transformInstances,
       const pe = String(P[tr].expr ?? '');
       return (
         <>
-          <DimEditField key={`${snap.id}-${key}-n-${tr}`} initial={tr} color={AMBER} baseW={74} growW={176} suggestions={paramNames}
+          <DimEditField key={`${snap.id}-${key}-n-${tr}`} initial={tr} color={AMBER} baseW={74} growW={176} suggestions={paramNames} bg={SNAP_BG}
             title="Variable — type an EXISTING param to point this offset at it; a NEW name renames it scene-wide"
             onCommit={(nm) => {
               if (nm === tr) return;
@@ -983,14 +989,14 @@ function EditableSnapDims({ svgRef, viewport, snaps, solved, transformInstances,
               else setSnapDim(snap.id, key, nm, value);
             }} />
           <span style={{ color: '#64748b', fontFamily: 'monospace', fontSize: '11px' }}>=</span>
-          <DimEditField key={`${snap.id}-${key}-v-${tr}-${pe}`} initial={pe} color={ACCENT} baseW={64} growW={150} suggestions={paramNames}
+          <DimEditField key={`${snap.id}-${key}-v-${tr}-${pe}`} initial={pe} color={ACCENT} baseW={64} growW={150} suggestions={paramNames} bg={SNAP_BG}
             title={`Value of ${tr} (= ${Number.isFinite(value) ? value.toFixed(3) : '?'} µm)`}
             onCommit={(v) => { if (updateParamExpr) updateParamExpr(tr, v); if (commitExpr) commitExpr(v, '1', 'µm', `Auto-created (${tr})`, tr); }} />
         </>
       );
     }
     return (
-      <DimEditField key={`${snap.id}-${key}-e-${expr}`} initial={expr} color={ACCENT} baseW={84} growW={172} suggestions={paramNames}
+      <DimEditField key={`${snap.id}-${key}-e-${expr}`} initial={expr} color={ACCENT} baseW={84} growW={172} suggestions={paramNames} bg={SNAP_BG}
         title={`${key} = ${Number.isFinite(value) ? value.toFixed(3) : '?'} µm — edit the snap offset expression`}
         onCommit={(v) => setSnapDim(snap.id, key, v, value)} />
     );
@@ -1027,7 +1033,7 @@ function EditableSnapDims({ svgRef, viewport, snaps, solved, transformInstances,
       lines.push(<line key={`${s.id}-dxl`} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={ACCENT} strokeWidth={1.3} opacity={0.9} />);
       lines.push(<polyline key={`${s.id}-dxa`} points={head(a, b)} fill="none" stroke={ACCENT} strokeWidth={1.3} />);
       lines.push(<polyline key={`${s.id}-dxb`} points={head(b, a)} fill="none" stroke={ACCENT} strokeWidth={1.3} />);
-      labels.push(<div key={`${s.id}-dxf`} style={{ ...group, left: (a.x + b.x) / 2, top: a.y - 13, transform: 'translateX(-50%)' }}>{fields(s, 'dx', valDx)}</div>);
+      labels.push(<div key={`${s.id}-dxf`} style={{ ...group, left: (a.x + b.x) / 2, top: a.y - 13, transform: 'translateX(-50%)' }}>{tag('Δx')}{fields(s, 'dx', valDx)}</div>);
     }
     // dy leg: vertical at toW.x, from fromW.y to toW.y.
     if (Math.abs(toW.y - fromW.y) > 1e-6) {
@@ -1035,7 +1041,7 @@ function EditableSnapDims({ svgRef, viewport, snaps, solved, transformInstances,
       lines.push(<line key={`${s.id}-dyl`} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={ACCENT} strokeWidth={1.3} opacity={0.9} />);
       lines.push(<polyline key={`${s.id}-dya`} points={head(a, b)} fill="none" stroke={ACCENT} strokeWidth={1.3} />);
       lines.push(<polyline key={`${s.id}-dyb`} points={head(b, a)} fill="none" stroke={ACCENT} strokeWidth={1.3} />);
-      labels.push(<div key={`${s.id}-dyf`} style={{ ...group, left: a.x + 10, top: (a.y + b.y) / 2, transform: 'translateY(-50%)' }}>{fields(s, 'dy', valDy)}</div>);
+      labels.push(<div key={`${s.id}-dyf`} style={{ ...group, left: a.x + 10, top: (a.y + b.y) / 2, transform: 'translateY(-50%)' }}>{tag('Δy')}{fields(s, 'dy', valDy)}</div>);
     }
   }
   if (!lines.length && !labels.length) return null;
