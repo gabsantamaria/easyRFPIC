@@ -924,6 +924,130 @@ function EditableDimsOverlay({ svgRef, viewport, cSel, dd, params, updateScene, 
   );
 }
 
+// Editable snap-offset (dx / dy) overlay for the snaps that INVOLVE the
+// primary-selected component. For each such snap with a non-zero offset it draws
+// the violet dx (horizontal) and dy (vertical) dimension legs between the parent
+// anchor and the child anchor, each with an EDITABLE field: a lone-param offset
+// shows NAME + VALUE fields (rename / edit the param scene-wide), a
+// literal/expression offset shows one field editing the snap's dx/dy directly
+// (auto-creating any referenced param). Real DOM inputs in a screen-space portal
+// (constant size at every zoom, always editable), mirroring EditableDimsOverlay
+// — so unlike the read-only world-space overlay, small offsets stay editable at
+// any zoom. Replica snaps (from.instanceIdx>0) measure from the replica anchor.
+// Mounted with key=comp id.
+function EditableSnapDims({ svgRef, viewport, snaps, solved, transformInstances, paramValues, params, updateScene, commitExpr, renameParam, updateParamExpr }) {
+  const [, bump] = useState(0);
+  useEffect(() => {
+    const on = () => bump((t) => t + 1);
+    window.addEventListener('resize', on);
+    window.addEventListener('scroll', on, true);
+    return () => { window.removeEventListener('resize', on); window.removeEventListener('scroll', on, true); };
+  }, []);
+
+  const svg = svgRef.current;
+  if (!svg) return null;
+  const r = svg.getBoundingClientRect();
+  const vbX = viewport.x - viewport.w / 2;
+  const vbY = -(viewport.y + viewport.h / 2);
+  const scale = Math.min(r.width / viewport.w, r.height / viewport.h);
+  if (!Number.isFinite(scale) || scale <= 0) return null;
+  const offX = (r.width - viewport.w * scale) / 2;
+  const offY = (r.height - viewport.h * scale) / 2;
+  const px = (wx, wy) => ({ x: r.left + offX + (wx - vbX) * scale, y: r.top + offY + ((-wy) - vbY) * scale });
+
+  const P = params || {};
+  const LONE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+  const ACCENT = '#a78bfa', AMBER = '#fbbf24';  // violet snap accent (matches the read-only snap dims)
+  const paramNames = Object.keys(P);
+  const byId = Object.fromEntries(solved.map((c) => [c.id, c]));
+
+  const setSnapDim = (snapId, key, expr, prevVal) => {
+    updateScene((prev) => ({ ...prev, snaps: prev.snaps.map((s) => (s.id === snapId ? { ...s, [key]: expr } : s)) }));
+    if (commitExpr) commitExpr(expr, Number.isFinite(prevVal) ? String(prevVal) : '0', 'µm', `Auto-created (snap ${key})`);
+  };
+
+  // Editable field(s) for one snap axis (key = 'dx' | 'dy'), mirroring the W/H logic.
+  const fields = (snap, key, value) => {
+    const expr = String(snap[key] ?? '0');
+    const tr = expr.trim();
+    const isRef = LONE.test(tr) && !!P[tr];
+    if (isRef) {
+      const pe = String(P[tr].expr ?? '');
+      return (
+        <>
+          <DimEditField key={`${snap.id}-${key}-n-${tr}`} initial={tr} color={AMBER} baseW={74} growW={176} suggestions={paramNames}
+            title="Variable — type an EXISTING param to point this offset at it; a NEW name renames it scene-wide"
+            onCommit={(nm) => {
+              if (nm === tr) return;
+              if (LONE.test(nm) && !P[nm]) { if (renameParam) renameParam(tr, nm); }
+              else setSnapDim(snap.id, key, nm, value);
+            }} />
+          <span style={{ color: '#64748b', fontFamily: 'monospace', fontSize: '11px' }}>=</span>
+          <DimEditField key={`${snap.id}-${key}-v-${tr}-${pe}`} initial={pe} color={ACCENT} baseW={64} growW={150} suggestions={paramNames}
+            title={`Value of ${tr} (= ${Number.isFinite(value) ? value.toFixed(3) : '?'} µm)`}
+            onCommit={(v) => { if (updateParamExpr) updateParamExpr(tr, v); if (commitExpr) commitExpr(v, '1', 'µm', `Auto-created (${tr})`, tr); }} />
+        </>
+      );
+    }
+    return (
+      <DimEditField key={`${snap.id}-${key}-e-${expr}`} initial={expr} color={ACCENT} baseW={84} growW={172} suggestions={paramNames}
+        title={`${key} = ${Number.isFinite(value) ? value.toFixed(3) : '?'} µm — edit the snap offset expression`}
+        onCommit={(v) => setSnapDim(snap.id, key, v, value)} />
+    );
+  };
+
+  const group = { position: 'absolute', display: 'flex', alignItems: 'center', gap: '4px', pointerEvents: 'auto', whiteSpace: 'nowrap' };
+  const aw = 5;
+  // Arrowhead "V" at screen tip, pointing AWAY from the other endpoint.
+  const head = (tip, other) => {
+    const dx = tip.x - other.x, dy = tip.y - other.y;
+    const L = Math.hypot(dx, dy) || 1;
+    const ux = dx / L, uy = dy / L, pnx = -uy, pny = ux;
+    const bx = tip.x - ux * aw * 1.6, by = tip.y - uy * aw * 1.6;
+    return `${bx + pnx * aw},${by + pny * aw} ${tip.x},${tip.y} ${bx - pnx * aw},${by - pny * aw}`;
+  };
+  const lines = [];
+  const labels = [];
+
+  for (const s of snaps) {
+    const fromComp = byId[s.from.compId];
+    const toComp = byId[s.to.compId];
+    if (!fromComp || !toComp) continue;
+    let fromW = anchorWorld(fromComp, s.from.anchor, paramValues);
+    if (s.from.instanceIdx > 0) {
+      const ra = resolveInstanceAnchorNumeric(s.from.compId, s.from.anchor, s.from.instanceIdx, byId, transformInstances || [], paramValues);
+      if (ra && Number.isFinite(ra.x) && Number.isFinite(ra.y)) fromW = ra;
+    }
+    const toW = anchorWorld(toComp, s.to.anchor, paramValues);
+    const valDx = evalExpr(s.dx, paramValues);
+    const valDy = evalExpr(s.dy, paramValues);
+    // dx leg: horizontal at fromW.y, from fromW.x to toW.x.
+    if (Math.abs(toW.x - fromW.x) > 1e-6) {
+      const a = px(fromW.x, fromW.y), b = px(toW.x, fromW.y);
+      lines.push(<line key={`${s.id}-dxl`} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={ACCENT} strokeWidth={1.3} opacity={0.9} />);
+      lines.push(<polyline key={`${s.id}-dxa`} points={head(a, b)} fill="none" stroke={ACCENT} strokeWidth={1.3} />);
+      lines.push(<polyline key={`${s.id}-dxb`} points={head(b, a)} fill="none" stroke={ACCENT} strokeWidth={1.3} />);
+      labels.push(<div key={`${s.id}-dxf`} style={{ ...group, left: (a.x + b.x) / 2, top: a.y - 13, transform: 'translateX(-50%)' }}>{fields(s, 'dx', valDx)}</div>);
+    }
+    // dy leg: vertical at toW.x, from fromW.y to toW.y.
+    if (Math.abs(toW.y - fromW.y) > 1e-6) {
+      const a = px(toW.x, fromW.y), b = px(toW.x, toW.y);
+      lines.push(<line key={`${s.id}-dyl`} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={ACCENT} strokeWidth={1.3} opacity={0.9} />);
+      lines.push(<polyline key={`${s.id}-dya`} points={head(a, b)} fill="none" stroke={ACCENT} strokeWidth={1.3} />);
+      lines.push(<polyline key={`${s.id}-dyb`} points={head(b, a)} fill="none" stroke={ACCENT} strokeWidth={1.3} />);
+      labels.push(<div key={`${s.id}-dyf`} style={{ ...group, left: a.x + 10, top: (a.y + b.y) / 2, transform: 'translateY(-50%)' }}>{fields(s, 'dy', valDy)}</div>);
+    }
+  }
+  if (!lines.length && !labels.length) return null;
+  return createPortal(
+    <div style={{ position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 30 }}>
+      <svg style={{ position: 'fixed', inset: 0, width: '100vw', height: '100vh', pointerEvents: 'none', overflow: 'visible' }}>{lines}</svg>
+      {labels}
+    </div>,
+    document.body,
+  );
+}
+
 // Editable per-segment Δx/Δy overlay for the primary-selected polyline /
 // polyshape (open or closed). For every vertex PAIR whose later vertex is a
 // `rel` step, draws the right-triangle decomposition of the segment — a
@@ -4567,19 +4691,16 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           Style is engineering-drawing-like: extension lines from the
           geometry, an arrow line offset perpendicular, end arrows, and a
           centered label on a dark pill so it reads against any background. */}
-      {(showDimensions || (editDims && !rulerMode && selectedId)) && (() => {
-        // When the global overlay is OFF but a component is selected (the
-        // "Show dimensions on select" path), draw ONLY the snap-link dx/dy
-        // offsets that involve the selected component — its own W/H come from
-        // the cyan EditableDimsOverlay below. `selOnly` scopes that.
-        const selOnly = !showDimensions;
+      {showDimensions && (() => {
+        // Global read-only overlay (the "dimensions" toolbar toggle). The
+        // on-SELECT dimensions — editable W/H (EditableDimsOverlay) and editable
+        // snap dx/dy (EditableSnapDims) — are rendered in the editDims block.
         // Heuristic: an expression is "parameter-bound" iff it contains at
         // least one alphabetic identifier. Pure numerics like "20" are not.
         const hasParam = (expr) => typeof expr === 'string' && /[A-Za-z_]/.test(expr);
         const dims = [];
-        // Component widths and heights (full overlay only — the selected
-        // rect's W/H are handled by the editable cyan overlay below).
-        if (!selOnly) for (const c of solved) {
+        // Component widths and heights
+        for (const c of solved) {
           const { w, h } = dimsByCompId[c.id]; // [F2]
           if (!Number.isFinite(w) || !Number.isFinite(h)) continue;
           if (hasParam(c.w)) {
@@ -4606,9 +4727,6 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // Snap offsets (dx and dy) when parameter-bound. Drawn between the
         // two anchor points, projected to a single axis (X for dx, Y for dy).
         for (const s of scene.snaps) {
-          // editDims-only: restrict to snaps that involve the selected
-          // component (incoming = it's the child, or outgoing = it's the parent).
-          if (selOnly && s.to.compId !== selectedId && s.from.compId !== selectedId) continue;
           const fromComp = solved.find(cc => cc.id === s.from.compId);
           const toComp   = solved.find(cc => cc.id === s.to.compId);
           if (!fromComp || !toComp) continue;
@@ -4872,6 +4990,25 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           );
         }
         return null;
+      })()}
+
+      {/* Editable snap-offset (dx/dy) overlay for the snaps that involve the
+          selected component — rendered alongside the editable W/H overlay above
+          (any component kind, so long as it has a snap link). Suppressed while
+          the global read-only `showDimensions` overlay is on (that draws all
+          snap dims read-only) to avoid double-drawing the selection's snaps. */}
+      {editDims && !rulerMode && !showDimensions && selectedId && (() => {
+        const involving = scene.snaps.filter(s => s.to.compId === selectedId || s.from.compId === selectedId);
+        if (!involving.length) return null;
+        return (
+          <EditableSnapDims
+            key={`snapdims-${selectedId}`}
+            svgRef={svgRef} viewport={viewport} snaps={involving} solved={solved}
+            transformInstances={transformInstances} paramValues={paramValues} params={scene.params || {}}
+            updateScene={updateScene} commitExpr={commitExpr}
+            renameParam={renameParam} updateParamExpr={updateParamExpr}
+          />
+        );
       })()}
 
       {/* Lumped-port integration lines. Persistent (drawn regardless
