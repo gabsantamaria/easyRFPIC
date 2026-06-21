@@ -27,6 +27,10 @@ export function loadTwoLinePrefs() {
       freqStop: str(p.freqStop),
       freqPoints: str(p.freqPoints),
       cFperM: str(p.cFperM),
+      q3dThk: str(p.q3dThk),
+      q3dLen: str(p.q3dLen),
+      bundleQ3D: !!p.bundleQ3D,
+      q3dIds: Array.isArray(p.q3dIds) ? p.q3dIds.filter((x) => typeof x === 'string') : [],
     };
   } catch {
     return null;
@@ -45,6 +49,10 @@ export function saveTwoLinePrefs(prefs) {
       freqStop: p.freqStop || '',
       freqPoints: p.freqPoints || '',
       cFperM: p.cFperM || '',
+      q3dThk: p.q3dThk || '',
+      q3dLen: p.q3dLen || '',
+      bundleQ3D: !!p.bundleQ3D,
+      q3dIds: Array.isArray(p.q3dIds) ? p.q3dIds : [],
     }));
     return true;
   } catch {

@@ -60,7 +60,10 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
   // booleans/feeds; the user picks the LINE conductor).
   const conductorComps = useMemo(() => (scene.components || [])
     .filter((c) => c.layer === 'electrode' && c.kind !== 'boolean'), [scene]);
-  const [q3dPick, setQ3dPick] = useState(() => new Set());
+  // Restore last-picked conductors, filtered to those that still exist here.
+  const [q3dPick, setQ3dPick] = useState(() => new Set(
+    (prefs && Array.isArray(prefs.q3dIds) ? prefs.q3dIds : []).filter((id) => conductorComps.some((c) => c.id === id)),
+  ));
   const toggleQ3dPick = (id) => setQ3dPick((prev) => {
     const next = new Set(prev);
     if (next.has(id)) next.delete(id); else next.add(id);
@@ -68,7 +71,7 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
   });
   // When on (and conductors picked), the MAIN 2-line script also builds a Q3D
   // capacitance design in the same project that solves C → Z0.
-  const [bundleQ3D, setBundleQ3D] = useState(false);
+  const [bundleQ3D, setBundleQ3D] = useState(() => !!(prefs && prefs.bundleQ3D));
   // Thin-conductor thickness for Q3D: default to the stack's h_cond; if that's 0
   // (zero-thickness/superconductor sheet) the user must supply a value.
   const condThkResolved = useMemo(() => {
@@ -77,8 +80,8 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
     const v = evalExpr(cl.thickness, paramValues || {});
     return Number.isFinite(v) ? v : 0;
   }, [scene, paramValues]);
-  const [q3dThk, setQ3dThk] = useState(() => (condThkResolved > 0 ? String(condThkResolved) : ''));
-  const [q3dLen, setQ3dLen] = useState(''); // line physical length (µm); blank = geometry guess
+  const [q3dThk, setQ3dThk] = useState(() => (prefs && prefs.q3dThk ? prefs.q3dThk : (condThkResolved > 0 ? String(condThkResolved) : '')));
+  const [q3dLen, setQ3dLen] = useState(() => (prefs && prefs.q3dLen ? prefs.q3dLen : '')); // line physical length (µm); blank = geometry guess
   const thkNum = q3dThk.trim() === '' ? null : Number(q3dThk);
   const thkValid = thkNum != null && Number.isFinite(thkNum) && thkNum > 0;
   const lenNum = q3dLen.trim() === '' ? null : Number(q3dLen);
@@ -146,16 +149,24 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
   const cNum = cFperM.trim() === '' ? null : Number(cFperM);
   const cValid = cNum != null && Number.isFinite(cNum) && cNum > 0;
 
+  // Remember EVERY field for next time — called on any generate path (the main
+  // 2-line Generate and both Q3D buttons), so nothing the user typed is lost.
+  const persist = () => saveTwoLinePrefs({
+    lengthParam, l1, l2, separation, freqStart, freqStop, freqPoints, cFperM,
+    q3dThk, q3dLen, bundleQ3D, q3dIds: [...q3dPick],
+  });
+
   const generate = () => {
     if (!build.ok) return;
-    // Remember these field values for next time (last-used = last generated).
-    saveTwoLinePrefs({ lengthParam, l1, l2, separation, freqStart, freqStop, freqPoints, cFperM });
+    persist();
     const bundle = (bundleQ3D && q3dPick.size > 0 && thkValid)
       ? { conductorIds: [...q3dPick], ...q3dOpts() }
       : undefined;
     onGenerate(build.ok.scene, build.ok.portIndices, build.ok.dLMeters, cValid ? cNum : undefined, bundle);
     onClose();
   };
+  // Generate the separate Q3D script — also persist the current settings.
+  const generateQ3D = () => { persist(); onGenerateQ3D([...q3dPick], q3dOpts()); };
 
   const fieldCls = 'w-full px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-100 text-xs focus:outline-none focus:border-cyan-500';
   const labelCls = 'text-[11px] text-slate-400';
@@ -297,7 +308,7 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
                 </label>
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={() => onGenerateQ3D([...q3dPick], q3dOpts())}
+                    onClick={generateQ3D}
                     disabled={q3dPick.size === 0 || !thkValid}
                     className="px-2.5 py-1 rounded text-[11px] font-medium border border-slate-600 hover:bg-slate-800 text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed"
                     title="Generate a SEPARATE Q3D Extractor script: builds the selected conductor(s) as thin conductors + dielectric stack, assigns nets, runs a capacitance setup + frequency sweep, and reports C per length. Paste the resulting C (F/m) above. (Q3D COM differs from HFSS — validate in AEDT.)"

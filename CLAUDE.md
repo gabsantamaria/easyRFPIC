@@ -372,7 +372,10 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
   — when bundle is on it passes `q3d: { scene: normalizeScene(scene),
   conductorIds }` (the CANVAS single-line scene) so one script holds both
   designs. Generates from the BUILT scene (not the canvas scene) →
-  preview/download as `<base>_2line_hfss.py`. **Last-used field values persist**
+  preview/download as `<base>_2line_hfss.py`. **All last-used field values
+  persist** (lengthParam, L1/L2, separation, freq band, C, Q3D thickness/length,
+  the conductor selection, and the bundle toggle) — saved by a shared `persist()`
+  on EVERY generate path (main Generate AND both Q3D buttons), restored on open;
   in `localStorage`
   (`src/ui/twoLineSettings.js`, key `photonic_layout_two_line` — outside
   workspace prefixes, same isolation as the AI key/settings): saved on Generate,
