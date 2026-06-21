@@ -33,6 +33,15 @@ export const TL_L1 = 'tl_L1';
 export const TL_L2 = 'tl_L2';
 export const TL_DL = 'tl_dL';
 
+// Expand a number to a plain decimal string (no scientific exponent) so the
+// HFSS report-expression parser reads it unambiguously.
+function plainDecimal(x) {
+  if (!Number.isFinite(x)) return '0';
+  let s = x.toFixed(15);
+  if (s.indexOf('.') >= 0) s = s.replace(/0+$/, '').replace(/\.$/, '');
+  return s === '' || s === '-' ? '0' : s;
+}
+
 // The ordered list of HFSS Output Variables implementing the 2-line εeff/α
 // extraction, given the verified 4-port S-index map. Each entry is
 // { name, expr, note }; the exporter emits CreateOutputVariable in this order
@@ -40,12 +49,18 @@ export const TL_DL = 'tl_dL';
 // syntax: S(i,j) complex, functions re/im/abs/ln/sqrt, `pi`, and the reserved
 // sweep variable `Freq` (Hz).
 //   pi = { a1, a2, b1, b2 } — HFSS S-indices (a1<a2 line A input/output; b1<b2
-//   line B). dLVar = the HFSS variable name carrying Δl in µm (tl_dL).
-export function twoLineOutputVariables(pi, dLVar = TL_DL) {
+//   line B).
+//   dLMeters = Δl in METRES, baked as a numeric LITERAL. We do NOT reference the
+//   tl_dL design variable here: a length design variable (tl_dL = tl_L2 − tl_L1
+//   with both in µm) resolves to its SI value (metres) inside a report/output
+//   expression, so `tl_dL*1e-6` double-converts and inflates εeff by ~1e12 and
+//   α by ~1e6. A literal removes that unit ambiguity entirely (the 2-line method
+//   uses two FIXED lengths, so a literal is exact).
+export function twoLineOutputVariables(pi, dLMeters) {
   const { a1, a2, b1, b2 } = pi;
   const S = (i, j) => `S(${i},${j})`;
   return [
-    { name: 'tl_DeltaL_m', expr: `${dLVar}*1e-6`, note: 'Δl in metres (tracks tl_L2 − tl_L1)' },
+    { name: 'tl_DeltaL_m', expr: plainDecimal(dLMeters), note: 'Δl in metres (baked literal L2−L1)' },
     { name: 'tl_TwoPiF', expr: '2*pi*Freq', note: 'angular frequency ω (Freq is HFSS Hz)' },
     { name: 'tl_cc', expr: '2.99792458e8', note: 'speed of light, m/s' },
     // Line A wave-cascade T from its 2-port S-block (ports a1, a2).
@@ -321,7 +336,10 @@ export function buildTwoLineScene(scene, cfg) {
 
   const portIndices = { a1: 1, a2: 2, b1: 3, b2: 4 };
   const portNames = ports.map((c) => `LumpedPort_${c.id.replace(/[^A-Za-z0-9_]/g, '_')}`);
-  return { scene: out, portIndices, portNames, warnings };
+  // Δl in METRES for the in-HFSS εeff/α math — baked as a literal (see
+  // twoLineOutputVariables) so HFSS variable-unit handling can't double-convert.
+  const dLMeters = (evalExpr(TL_L2, pv) - evalExpr(TL_L1, pv)) * 1e-6;
+  return { scene: out, portIndices, portNames, dLMeters, warnings };
 }
 
 // Default line separation: keep the two lines well clear so the 2-ports don't

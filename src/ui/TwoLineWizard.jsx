@@ -91,7 +91,7 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate }) {
 
   const generate = () => {
     if (!build.ok) return;
-    onGenerate(build.ok.scene, build.ok.portIndices, build.ok.portNames);
+    onGenerate(build.ok.scene, build.ok.portIndices, build.ok.dLMeters);
     onClose();
   };
 

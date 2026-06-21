@@ -95,7 +95,7 @@ describe('twoLineExtractNumeric — recovers γ from synthetic ideal lines', () 
 
 // ---------------------------------------------------------------------------
 describe('twoLineOutputVariables — εeff/α expression list', () => {
-  const vars = twoLineOutputVariables({ a1: 1, a2: 2, b1: 3, b2: 4 });
+  const vars = twoLineOutputVariables({ a1: 1, a2: 2, b1: 3, b2: 4 }, 6e-4);
   const byName = Object.fromEntries(vars.map((v) => [v.name, v.expr]));
 
   it('references the correct S-indices for each line', () => {
@@ -109,20 +109,53 @@ describe('twoLineOutputVariables — εeff/α expression list', () => {
     expect(byName.tl_eeff).toContain('tl_gim*tl_gim-tl_gre*tl_gre');
   });
 
-  it('Δl variable tracks tl_L2 − tl_L1 in metres', () => {
-    expect(byName.tl_DeltaL_m).toBe(`${TL_DL}*1e-6`);
+  it('Δl is a baked numeric LITERAL in metres — NOT the unit-ambiguous tl_dL var', () => {
+    // tl_dL is an HFSS length variable → resolves to metres in report exprs;
+    // `tl_dL*1e-6` would double-convert (εeff×1e12). The literal avoids that.
+    expect(byName.tl_DeltaL_m).toBe('0.0006');
+    expect(byName.tl_DeltaL_m).not.toMatch(/tl_dL/);
+    expect(byName.tl_DeltaL_m).not.toMatch(/e-/i); // plain decimal, no exponent
   });
 
   it('is in dependency order (every referenced output var is defined earlier)', () => {
-    // The scene-level HFSS variables (tl_dL, tl_L1, tl_L2) are declared up front
-    // via set_var — pre-seed them; every OTHER tl_ reference must be an
-    // output variable defined by an earlier row.
-    const defined = new Set(['tl_dL', 'tl_L1', 'tl_L2']);
+    // No design-variable references remain in the output-var exprs now (Δl is a
+    // literal); every tl_ reference must be an output var defined by an earlier row.
+    const defined = new Set();
     for (const v of vars) {
       const refs = (v.expr.match(/tl_[A-Za-z0-9_]+/g) || []);
       for (const r of refs) expect(defined.has(r)).toBe(true);
       defined.add(v.name);
     }
+  });
+});
+
+describe('2-line Δl unit bug — εeff stays physical (~6, not ~1e12)', () => {
+  it('correct Δl in metres recovers εeff≈6.5; the old tl_dL*1e-6 double-convert blows up', () => {
+    // Synthetic ideal line, L1=300µm, L2=900µm (Δl=600µm=6e-4 m).
+    const C = (re, im = 0) => ({ re, im });
+    const mul = (a, b) => C(a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re);
+    const add = (a, b) => C(a.re + b.re, a.im + b.im);
+    const sub = (a, b) => C(a.re - b.re, a.im - b.im);
+    const div = (a, b) => { const d = b.re * b.re + b.im * b.im; return C((a.re * b.re + a.im * b.im) / d, (a.im * b.re - a.re * b.im) / d); };
+    const neg = (a) => C(-a.re, -a.im);
+    const cexp = (z) => { const e = Math.exp(z.re); return C(e * Math.cos(z.im), e * Math.sin(z.im)); };
+    const c = 2.99792458e8, f = 10e9, w = 2 * Math.PI * f, eeff = 6.5, Z0 = 45, Zref = 50, alpha = 12;
+    const beta = (w / c) * Math.sqrt(eeff), gamma = C(alpha, beta);
+    const lineS = (L) => {
+      const G = div(sub(C(Z0), C(Zref)), add(C(Z0), C(Zref)));
+      const e = cexp(neg(mul(gamma, C(L)))), e2 = mul(e, e);
+      const den = sub(C(1), mul(mul(G, G), e2));
+      const S11 = div(mul(G, sub(C(1), e2)), den);
+      const S21 = div(mul(sub(C(1), mul(G, G)), e), den);
+      return { S11, S21, S12: S21, S22: S11 };
+    };
+    const dL = 600e-6; // metres
+    const good = twoLineExtractNumeric(lineS(300e-6), lineS(900e-6), dL, f);
+    expect(good.eeff).toBeCloseTo(eeff - (alpha * c / w) ** 2, 2);
+    expect(good.alpha).toBeCloseTo(alpha, 2);
+    // The old bug (Δl off by 1e6) inflates εeff by ~1e12 — guard the magnitude.
+    const bug = twoLineExtractNumeric(lineS(300e-6), lineS(900e-6), dL * 1e-6, f);
+    expect(bug.eeff).toBeGreaterThan(1e11);
   });
 });
 
@@ -257,11 +290,15 @@ describe('buildTwoLineScene — auto-handles repeat-replica ports', () => {
 // ---------------------------------------------------------------------------
 describe('generateHfssNative options.twoLine — script emits the εeff/α math', () => {
   it('parses as Python and contains the output variables + reports', () => {
-    const { scene, portIndices } = buildTwoLineScene(makeLineScene(500), {
+    const { scene, portIndices, dLMeters } = buildTwoLineScene(makeLineScene(500), {
       lengthParam: 'Lc', l1: 300, l2: 900, freqStart: 1, freqStop: 40, freqPoints: 201,
     });
+    expect(dLMeters).toBeCloseTo(6e-4, 12);
     const pv = resolveParams(scene.params).values;
-    const py = generateHfssNative(scene, pv, { twoLine: { portIndices } });
+    const py = generateHfssNative(scene, pv, { twoLine: { portIndices, dLMeters } });
+    // Δl baked as a metres literal — never the unit-ambiguous tl_dL*1e-6.
+    expect(py).toContain('"tl_DeltaL_m", "0.0006"');
+    expect(py).not.toContain('tl_dL*1e-6');
 
     mkdirSync('tests/out', { recursive: true });
     writeFileSync('tests/out/two_line_hfss.py', py);

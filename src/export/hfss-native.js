@@ -4520,7 +4520,7 @@ except Exception as e:
     // propagation constant γ from the two lines' S-parameters, then εeff and α.
     // Solution context is Setup1:Sweep (a Discrete sweep, forced by the wizard).
     if (options && options.twoLine && options.twoLine.portIndices) {
-      const tlVars = twoLineOutputVariables(options.twoLine.portIndices);
+      const tlVars = twoLineOutputVariables(options.twoLine.portIndices, options.twoLine.dLMeters);
       const tlLines = tlVars.map(v =>
         `_tl_outvar(${JSON.stringify(v.name)}, ${JSON.stringify(v.expr)})  # ${ascii(v.note || '')}`
       ).join('\n');

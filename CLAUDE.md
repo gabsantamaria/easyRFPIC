@@ -282,17 +282,25 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
       pointing at the port) to the SAME replica index via a global registry;
       then `autoEnableFlankedPorts` enables a lumped port on every port-layer
       rect the detector flanks. Geometry POSITIONS bake numeric (the method uses
-      two FIXED lengths — exact); line-size exprs + `tl_L1/tl_L2/tl_dL` stay
-      live for the in-HFSS Δl. Rotate transforms are left intact + warned (rare
-      on the port path). The shared exporter/detector are UNTOUCHED.
-  - `twoLineOutputVariables(pi, dLVar='tl_dL')` — the ORDERED list of HFSS Output
+      two FIXED lengths — exact); line-size exprs stay live. Rotate transforms
+      are left intact + warned (rare on the port path). The shared
+      exporter/detector are UNTOUCHED. `buildTwoLineScene` returns `dLMeters`
+      (Δl in metres) alongside `portIndices` for the exporter.
+  - `twoLineOutputVariables(pi, dLMeters)` — the ORDERED list of HFSS Output
     Variables (dependency order; each `{name, expr, note}`) implementing the
     extraction: per-line wave-cascade T from its 2-port S-block (T11=−detS/S21,
     …), `M = T_B·T_A⁻¹`, eigenvalue `λ = (trM+√(trM²−4detM))/2 = e^∓γΔl`,
     `γ = −ln(λ)/Δl`. KEY simplification (no sign/branch `if()` needed in HFSS):
     εeff is EVEN in γ ⇒ `tl_eeff = (c/ω)²(im(γ)²−re(γ)²)`, and α is `abs(re(γ))`.
     Uses HFSS report syntax (`S(i,j)`, `re/im/abs/ln/sqrt`, `pi`, reserved `Freq`
-    in Hz). **Update this if the S-index convention or HFSS expr engine changes.**
+    in Hz). **UNITS (critical):** `tl_DeltaL_m` is a baked numeric LITERAL in
+    METRES — it does NOT reference the `tl_dL` design variable. A length design
+    variable resolves to its SI value (metres) inside a report/output
+    expression, so `tl_dL*1e-6` double-converts and inflated εeff by ~1e12 and α
+    by ~1e6 (a real bug we shipped and fixed). `Freq` resolving in Hz is
+    likewise assumed; if a future AEDT changes either, εeff/α scale by a clean
+    power of ten — check this row first. **Update this if the S-index convention
+    or HFSS expr engine changes.**
   - `twoLineExtractNumeric(SA, SB, dLmeters, fHz)` — full complex-arithmetic
     reference impl mirroring the exprs EXACTLY (for unit tests); verified to
     recover γ/α/εeff from synthetic ideal-line S-parameters.
