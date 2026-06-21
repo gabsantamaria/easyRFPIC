@@ -191,25 +191,28 @@ try:
     oDesign.Analyze("Setup1")
 except Exception as e:
     oDesktop.AddMessage("", "", 2, "Q3D Analyze failed (solve manually, then create the report from Results -> Matrix): " + str(e))
-# Raw conductor-to-conductor capacitance report (most robust).
+# Raw Maxwell C-matrix report (most robust). Off-diagonal C(netA,netB) is
+# NEGATIVE by Maxwell convention; |C(netA,netB)| is the mutual capacitance.
 try:
     oDesign.GetModule("ReportSetup").CreateReport("Capacitance", "Matrix", "Data Table",
         "Setup1 : LastAdaptive", ["Context:=", "Original"], [],
-        ["X Component:=", "Freq", "Y Component:=", ["C(${a},${b})"]], [])
+        ["X Component:=", "Freq", "Y Component:=", ["C(${a},${b})", "C(${a},${a})", "C(${b},${b})"]], [])
 except Exception as e:
     oDesktop.AddMessage("", "", 1, "Capacitance report skipped (create from Results -> Matrix): " + str(e))
-# Per-length: C(netA,netB) / physical length. The output variable is valid only
-# now (post-solve); if your release still rejects C(...) here, read C from the
-# 'Capacitance' report and divide by LINE_LENGTH_UM*1e-6 yourself.
+# Per-length LINE capacitance for Z0. The lumped port drives the strips
+# DIFFERENTIALLY, so the line C is the differential capacitance
+#   C_line = (C11 - C12)/2 = Cm + Cg/2   (NOT just |C12| = Cm),
+# which matters when the strips couple to ground/substrate (e.g. a wide gap).
+# Written symmetric-robust as ((C11+C22)/2 - C12)/2. Valid only post-solve.
 try:
     oDesign.GetModule("OutputVariable").CreateOutputVariable(
-        "C_per_m", "abs(C(${a},${b}))/${dec(lenM)}", "Setup1 : LastAdaptive", "Matrix", [])
+        "C_per_m", "((C(${a},${a})+C(${b},${b}))/2-C(${a},${b}))/2/${dec(lenM)}", "Setup1 : LastAdaptive", "Matrix", [])
     oDesign.GetModule("ReportSetup").CreateReport("C per length", "Matrix", "Data Table",
         "Setup1 : LastAdaptive", ["Context:=", "Original"], [],
         ["X Component:=", "Freq", "Y Component:=", ["C_per_m"]], [])
 except Exception as e:
     oDesktop.AddMessage("", "", 1, "C_per_m report skipped: " + str(e))
-oDesktop.AddMessage("", "", 0, "C per length = abs(C(${a},${b})) / (LINE_LENGTH_UM*1e-6). Read C from the 'Capacitance' report (or Results -> Matrix); paste C_per_m into the 2-line wizard.")`;
+oDesktop.AddMessage("", "", 0, "C per length (differential) = ((C(${a},${a})+C(${b},${b}))/2 - C(${a},${b})) / 2 / (LINE_LENGTH_UM*1e-6). NOT just |C12|. Paste C_per_m into the 2-line wizard.")`;
   }
 
   return `# ===== Nets (one signal net per conductor object) =====

@@ -439,10 +439,14 @@ describe('generateQ3DCapacitance — meander C extraction script', () => {
     expect(q).toContain('InsertSweep');
     expect(q).toContain('"1GHz"');
     expect(q).toContain('"50GHz"');
-    // Capacitance-per-length report (÷ physical length in metres).
+    // Capacitance-per-length report (÷ physical length in metres). The line C is
+    // the DIFFERENTIAL capacitance ((C11+C22)/2 − C12)/2, NOT just |C12| (the
+    // port drives the strips differentially; |C12| omits the to-ground term).
     expect(q).toContain('"C per length"');
     expect(q).toContain('C_per_m');
     expect(q).toContain('0.0005');                  // 500 µm → 5e-4 m
+    expect(q).not.toMatch(/abs\(C\(/);              // not |C12|
+    expect(q).toMatch(/\(\(C\(net_line_i0,net_line_i0\)\+C\(net_padL_i0,net_padL_i0\)\)\/2-C\(net_line_i0,net_padL_i0\)\)\/2/);
     // Q3D matrix quantities only exist post-solve → Analyze must precede the
     // reports/output var (else "'C' is not a function name").
     expect(q).toContain('"Capacitance"');           // raw C report
