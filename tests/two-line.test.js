@@ -118,12 +118,13 @@ describe('twoLineOutputVariables — εeff/α expression list', () => {
     expect(byName.tl_DeltaL_m).not.toMatch(/e-/i); // plain decimal, no exponent
   });
 
-  it('appends Z₀ = γ/(jωC) rows only when a per-length C is supplied', () => {
-    const noC = twoLineOutputVariables({ a1: 1, a2: 2, b1: 3, b2: 4 });
-    expect(noC.some((v) => v.name === 'tl_Z0_re')).toBe(false);
-    const withC = twoLineOutputVariables({ a1: 1, a2: 2, b1: 3, b2: 4 }, 6e-4, 1.6e-10);
-    const m = Object.fromEntries(withC.map((v) => [v.name, v.expr]));
-    expect(m.tl_C_F_per_m).toBe('0.00000000016'); // 1.6e-10 baked literal
+  it('appends Z₀ = γ/(jωC) rows only when includeZ0; they reference the C variable', () => {
+    const noZ0 = twoLineOutputVariables({ a1: 1, a2: 2, b1: 3, b2: 4 });
+    expect(noZ0.some((v) => v.name === 'tl_Z0_re')).toBe(false);
+    const withZ0 = twoLineOutputVariables({ a1: 1, a2: 2, b1: 3, b2: 4 }, 6e-4, true);
+    const m = Object.fromEntries(withZ0.map((v) => [v.name, v.expr]));
+    // C is a design variable (emitted via set_var by the exporter), NOT an output var.
+    expect(m.tl_C_F_per_m).toBeUndefined();
     expect(m.tl_Z0_re).toBe('tl_gim/(tl_TwoPiF*tl_C_F_per_m)'); // Re Z0 = β/(ωC)
     expect(m.tl_Z0_im).toBe('-tl_gre/(tl_TwoPiF*tl_C_F_per_m)'); // Im Z0 = -α/(ωC)
     expect(m.tl_Z0_mag).toContain('sqrt(tl_gre*tl_gre+tl_gim*tl_gim)');
@@ -374,18 +375,38 @@ describe('generateHfssNative options.twoLine — script emits the εeff/α math'
     expect(py).not.toContain('tl_eeff');
   });
 
-  it('with cFperM, emits the Z₀ output vars + Z0 report; without, none', () => {
+  it('with cFperM, emits the Z₀ vars (referencing the C set_var) + Z0 report; without, none', () => {
     const { scene, portIndices, dLMeters } = buildTwoLineScene(makeLineScene(500), {
       lengthParam: 'Lc', l1: 300, l2: 900,
     });
     const pv = resolveParams(scene.params).values;
     const withC = generateHfssNative(scene, pv, { twoLine: { portIndices, dLMeters, cFperM: 1.6e-10 } });
     expect(withC).toContain('tl_Z0_re');
-    expect(withC).toContain('"tl_C_F_per_m", "0.00000000016"');
+    expect(withC).toContain('set_var("tl_C_F_per_m", "0.00000000016")'); // editable design var
     expect(withC).toContain('"Z0 vs Freq"');
     const noC = generateHfssNative(scene, pv, { twoLine: { portIndices, dLMeters } });
     expect(noC).not.toContain('tl_Z0_re');
     expect(noC).not.toContain('"Z0 vs Freq"');
+  });
+
+  it('bundled q3d: appends a Q3D design in the same project + C placeholder; parses', () => {
+    const single = makeLineScene(500);
+    const { scene, portIndices, dLMeters } = buildTwoLineScene(single, {
+      lengthParam: 'Lc', l1: 300, l2: 900,
+    });
+    const pv = resolveParams(scene.params).values;
+    const py = generateHfssNative(scene, pv, {
+      twoLine: { portIndices, dLMeters, q3d: { scene: single, conductorIds: ['line'] } },
+    });
+    expect(py).toContain('InsertDesign("HFSS"');            // the 2-line design
+    expect(py).toContain('InsertDesign("Q3D Extractor"');   // bundled in same project
+    expect(py).toContain('set_var("tl_C_F_per_m"');         // placeholder, Q3D sets it
+    expect(py).toContain('tl_Z0_re');                       // Z0 still emitted
+    expect(py).toContain('AutoIdentifyNets');
+    expect(py).toMatch(/SetActiveDesign\("Layout"\)/);      // leaves HFSS design active
+    mkdirSync('tests/out', { recursive: true });
+    writeFileSync('tests/out/two_line_q3d.py', py);
+    execSync('python3 -c "import ast; ast.parse(open(\'tests/out/two_line_q3d.py\').read())"');
   });
 });
 

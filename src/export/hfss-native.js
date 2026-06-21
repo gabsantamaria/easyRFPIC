@@ -22,6 +22,7 @@ import { shapeInstanceToRing } from '../geometry/rings.js';
 import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/racetrack.js';
 import { instanceChainOffsetExpr, chainOwnerForInstance } from '../scene/instance-positions.js';
 import { twoLineOutputVariables } from '../scene/twoLine.js';
+import { generateQ3DCombinedBlock } from './q3d.js';
 import {
   resolvePolylineVertices, polylineIsTapered,
   tessellateArcFrom, catmullRomTessellate,
@@ -4521,12 +4522,20 @@ except Exception as e:
     // Solution context is Setup1:Sweep (a Discrete sweep, forced by the wizard).
     if (options && options.twoLine && options.twoLine.portIndices) {
       const tlCforM = options.twoLine.cFperM;
-      const tlHasZ0 = Number.isFinite(tlCforM) && tlCforM > 0;
-      const tlVars = twoLineOutputVariables(options.twoLine.portIndices, options.twoLine.dLMeters, tlCforM);
+      const tlQ3D = options.twoLine.q3d || null;
+      // Z0 is included when a manual C is given OR a bundled Q3D will supply it.
+      const tlHasZ0 = (Number.isFinite(tlCforM) && tlCforM > 0) || !!tlQ3D;
+      // Plain-decimal (no exponent) format for the C set_var value.
+      const _fmtC = (x) => { if (!Number.isFinite(x) || x <= 0) return '0.0000000001'; let s = x.toFixed(15); if (s.indexOf('.') >= 0) s = s.replace(/0+$/, '').replace(/\.$/, ''); return s || '0.0000000001'; };
+      const tlCInit = (Number.isFinite(tlCforM) && tlCforM > 0) ? _fmtC(tlCforM) : '0.0000000001';
+      const tlVars = twoLineOutputVariables(options.twoLine.portIndices, options.twoLine.dLMeters, tlHasZ0);
       const tlLines = tlVars.map(v =>
         `_tl_outvar(${JSON.stringify(v.name)}, ${JSON.stringify(v.expr)})  # ${ascii(v.note || '')}`
       ).join('\n');
-      // Optional Z0 report when a per-length C was supplied.
+      // Per-length C as an editable HFSS design variable (F/m, unitless number).
+      // Manual value if supplied, else a placeholder for the Q3D step to set.
+      const tlCVar = tlHasZ0 ? `set_var("tl_C_F_per_m", "${tlCInit}")  # F/m (edit, or set from the Q3D capacitance solve)\n` : '';
+      // Optional Z0 report.
       const tlZ0Report = tlHasZ0 ? `
 try:
     oModule.CreateReport("Z0 vs Freq", "Modal Solution Data", "Rectangular Plot", "Setup1 : Sweep",
@@ -4535,6 +4544,21 @@ try:
 except Exception as e:
     oDesktop.AddMessage("", "", 1, "CreateReport Z0 failed: " + str(e))
 ` : '';
+      // Optional bundled Q3D capacitance design (same project). Built from the
+      // SINGLE-line scene the wizard passes (C/length is a one-line quantity).
+      let tlQ3DBlock = '';
+      if (tlQ3D && tlQ3D.scene && Array.isArray(tlQ3D.conductorIds) && tlQ3D.conductorIds.length) {
+        try {
+          tlQ3DBlock = generateQ3DCombinedBlock(tlQ3D.scene, null, {
+            conductorIds: tlQ3D.conductorIds,
+            designName: 'q3d_cap',
+            hfssDesignName: 'Layout',
+            cVarName: 'tl_C_F_per_m',
+          });
+        } catch (e) {
+          tlQ3DBlock = `\n# Q3D capacitance block skipped: ${ascii(e.message)}\n`;
+        }
+      }
       code += `
 # ===== 2-line method (Marks 1991): eeff / alpha output variables + reports =====
 # Effective permittivity (tl_eeff) and attenuation (tl_alpha_dB_per_m / _Np_per_m)
@@ -4544,13 +4568,14 @@ except Exception as e:
 # alpha = |Re gamma|. Line A = ports 1,2; line B = ports 3,4. DeltaL is a baked
 # metres literal (NOT the tl_dL design var, which resolves to metres in report
 # exprs and would double-convert).${tlHasZ0 ? `
-# Z0 = gamma/(j*w*C) is ALSO emitted (per-length C supplied): Re(Z0)=beta/(wC),
-# Im(Z0)=-alpha/(wC). C is electrostatic so Z0 is kinetic-inductance-correct.` : ''}
+# Z0 = gamma/(j*w*C) is ALSO emitted, referencing the design variable
+# tl_C_F_per_m (F/m): Re(Z0)=beta/(wC), Im(Z0)=-alpha/(wC). C is electrostatic so
+# Z0 is kinetic-inductance-correct. Set tl_C_F_per_m below${tlQ3DBlock ? ' (the bundled Q3D design solves it — see the block after the reports)' : ' (edit it / from a Q3D capacitance solve)'}.` : ''}
 # Assumes the report expression engine evaluates Freq in Hz (HFSS 2023). After
 # you Analyze Setup1:Sweep, the reports below populate. PHASE-AMBIGUITY: valid
 # only while beta*DeltaL < pi over the band (pick L2-L1 small enough); alpha is
 # unaffected by the branch cut.
-oModule = oDesign.GetModule("OutputVariable")
+${tlCVar}oModule = oDesign.GetModule("OutputVariable")
 def _tl_outvar(name, expr):
     try:
         oModule.CreateOutputVariable(name, expr, "Setup1 : Sweep", "Modal Solution Data", [])
@@ -4588,7 +4613,7 @@ def _tl_extract_csv():
     except Exception as e:
         oDesktop.AddMessage("", "", 2, "Two-line CSV fallback failed: " + str(e))
 # _tl_extract_csv()   # <- uncomment AFTER solving if the in-HFSS reports are empty
-`;
+${tlQ3DBlock}`;
     }
     code += `
 oProject.Save()

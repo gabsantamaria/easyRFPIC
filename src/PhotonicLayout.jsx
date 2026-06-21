@@ -5000,12 +5000,16 @@ export default function App() {
   // at L1 and L2, 4 lumped ports) + the verified S-index map. Generate the
   // native HFSS script directly from that scene with the εeff/α output-variable
   // block enabled — NOT from the current canvas scene.
-  const handleExportTwoLine = async (builtScene, portIndices, dLMeters, cFperM) => {
+  const handleExportTwoLine = async (builtScene, portIndices, dLMeters, cFperM, q3dConductorIds) => {
     let content;
     try {
       const normalized = normalizeScene(builtScene);
       const pv = resolveParams(normalized.params || {}).values;
-      content = generateHfssNative(normalized, pv, { twoLine: { portIndices, dLMeters, cFperM } });
+      // Bundled Q3D builds the SINGLE-line (canvas) scene, not the 2-line scene.
+      const q3d = (Array.isArray(q3dConductorIds) && q3dConductorIds.length)
+        ? { scene: normalizeScene(scene), conductorIds: q3dConductorIds }
+        : undefined;
+      content = generateHfssNative(normalized, pv, { twoLine: { portIndices, dLMeters, cFperM, q3d } });
     } catch (e) {
       console.error('Two-line generator error:', e);
       await alertDialog('Error generating 2-line script: ' + e.message, 'Export error');

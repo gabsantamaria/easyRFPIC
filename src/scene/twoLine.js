@@ -56,12 +56,13 @@ function plainDecimal(x) {
 //   expression, so `tl_dL*1e-6` double-converts and inflates εeff by ~1e12 and
 //   α by ~1e6. A literal removes that unit ambiguity entirely (the 2-line method
 //   uses two FIXED lengths, so a literal is exact).
-//   cFperM (optional) = per-length capacitance C in F/m (Q3D ÷ physical length,
-//   quasi-TEM / freq-flat). When > 0, appends the characteristic impedance
-//   Z0 = γ/(jωC): Re(Z0)=β/(ωC), Im(Z0)=−α/(ωC), |Z0|=|γ|/(ωC). Sign-free, like
-//   εeff. C is electrostatic ⇒ unaffected by kinetic inductance, so Z0 comes out
-//   kinetic-inductance-correct (γ carries L_kin). Baked as a literal too.
-export function twoLineOutputVariables(pi, dLMeters, cFperM) {
+//   includeZ0 (optional bool) — when true, appends the characteristic impedance
+//   Z0 = γ/(jωC): Re(Z0)=β/(ωC), Im(Z0)=−α/(ωC), |Z0|=|γ|/(ωC). Sign-free like
+//   εeff. These reference the HFSS DESIGN VARIABLE `tl_C_F_per_m` (the caller
+//   emits a set_var for it) so C is editable in HFSS / settable from a Q3D
+//   capacitance solve. C is electrostatic ⇒ unaffected by kinetic inductance,
+//   so Z0 is kinetic-inductance-correct (γ carries L_kin).
+export function twoLineOutputVariables(pi, dLMeters, includeZ0) {
   const { a1, a2, b1, b2 } = pi;
   const S = (i, j) => `S(${i},${j})`;
   const rows = [
@@ -104,12 +105,12 @@ export function twoLineOutputVariables(pi, dLMeters, cFperM) {
     { name: 'tl_alpha_dB_per_m', expr: '8.685889638*abs(tl_gre)', note: 'attenuation α (dB/m)' },
     { name: 'tl_eeff', expr: '(tl_cc/tl_TwoPiF)*(tl_cc/tl_TwoPiF)*(tl_gim*tl_gim-tl_gre*tl_gre)', note: 'effective permittivity εeff = (c/ω)²(β²−α²) = Re[-(γc/ω)²]' },
   ];
-  // Characteristic impedance Z0 = γ/(jωC), appended only when a per-length C is
-  // supplied (e.g. from a Q3D capacitance ÷ physical length). C is a baked
-  // literal in F/m; the impedance pieces are sign-free like εeff.
-  if (Number.isFinite(cFperM) && cFperM > 0) {
+  // Characteristic impedance Z0 = γ/(jωC), appended only when requested. The
+  // rows reference the HFSS design variable `tl_C_F_per_m` (F/m) — emitted as a
+  // set_var by the caller, editable in HFSS / settable from a Q3D solve. The
+  // impedance pieces are sign-free like εeff.
+  if (includeZ0) {
     rows.push(
-      { name: 'tl_C_F_per_m', expr: plainDecimal(cFperM), note: 'per-length capacitance C (F/m) — Q3D ÷ physical length (quasi-TEM, freq-flat)' },
       { name: 'tl_Z0_re', expr: 'tl_gim/(tl_TwoPiF*tl_C_F_per_m)', note: 'Re Z0 = β/(ωC)  [Z0 = γ/(jωC)]' },
       { name: 'tl_Z0_im', expr: '-tl_gre/(tl_TwoPiF*tl_C_F_per_m)', note: 'Im Z0 = -α/(ωC)' },
       { name: 'tl_Z0_mag', expr: 'sqrt(tl_gre*tl_gre+tl_gim*tl_gim)/(tl_TwoPiF*tl_C_F_per_m)', note: '|Z0| = |γ|/(ωC)' },

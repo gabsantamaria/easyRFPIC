@@ -315,22 +315,31 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
     recover γ/α/εeff from synthetic ideal-line S-parameters.
   - `findLumpedPortOrder(solved, pv)` — replicates the exporter's port filter
     (`hfss-native.js`) over the solved list to discover the port order.
-- **Z₀ (optional, `cFperM`)**: `twoLineOutputVariables(pi, dLMeters, cFperM)`
-  appends `tl_C_F_per_m` (baked F/m literal) + `tl_Z0_re/_im/_mag` when a
-  per-length capacitance is supplied: `Z0 = γ/(jωC)` ⇒ Re=β/(ωC), Im=−α/(ωC),
-  sign-free like εeff. C is electrostatic ⇒ kinetic-inductance-correct. The
-  2-line method gives γ ONLY (εeff fixes √(LC); Z₀ needs L/C) — so Z₀ requires
-  an independent C. For a MEANDER there's no cross-section, so C comes from a
-  full-3-D Q3D solve (see below).
+- **Z₀ (optional, `includeZ0`)**: `twoLineOutputVariables(pi, dLMeters, includeZ0)`
+  appends `tl_Z0_re/_im/_mag` referencing the HFSS DESIGN VARIABLE `tl_C_F_per_m`
+  (the exporter emits a `set_var` for it — editable in HFSS / settable from a Q3D
+  solve): `Z0 = γ/(jωC)` ⇒ Re=β/(ωC), Im=−α/(ωC), sign-free like εeff. C is
+  electrostatic ⇒ kinetic-inductance-correct. The 2-line method gives γ ONLY
+  (εeff fixes √(LC); Z₀ needs L/C) — so Z₀ requires an independent C. For a
+  MEANDER there's no cross-section, so C comes from a full-3-D Q3D solve (below).
 - **Exporter hook**: `generateHfssNative(scene, pv, { twoLine: { portIndices,
-  dLMeters, cFperM } })` emits, before `oProject.Save()` (non-append branch), an
-  `OutputVariable` block (`_tl_outvar` → `CreateOutputVariable(.., "Setup1 :
-  Sweep", "Modal Solution Data")`) + `ReportSetup` `CreateReport`s ("eeff vs
-  Freq", "alpha vs Freq", and "Z0 vs Freq" when `cFperM`), plus a COMMENTED
-  IronPython post-solve CSV fallback. No `twoLine` option → byte-identical.
-- **Q3D capacitance (`src/export/q3d.js`, `generateQ3DCapacitance(scene, pv,
-  {conductorIds, designName})`)**: a SEPARATE, self-contained Q3D Extractor
-  script for the meander Z₀ route. Builds ONLY the SELECTED line conductor(s)
+  dLMeters, cFperM, q3d } })` emits, before `oProject.Save()` (non-append
+  branch), an `OutputVariable` block + `ReportSetup` `CreateReport`s ("eeff vs
+  Freq", "alpha vs Freq", and "Z0 vs Freq" when Z₀ is on), plus a COMMENTED
+  IronPython CSV fallback. Z₀ is on when `cFperM>0` OR `q3d` is present; it emits
+  `set_var("tl_C_F_per_m", <manual C | placeholder>)`. `q3d = { scene,
+  conductorIds }` appends a Q3D capacitance design IN THE SAME PROJECT (via
+  `generateQ3DCombinedBlock`) built from the SINGLE-line scene — so one script
+  builds both designs. No `twoLine` option → byte-identical.
+- **Q3D capacitance (`src/export/q3d.js`)**: `generateQ3DCapacitance(scene, pv,
+  {conductorIds, designName})` = a SEPARATE Q3D script (own project);
+  `generateQ3DCombinedBlock(scene, pv, {conductorIds, hfssDesignName, cVarName})`
+  = a Python block that adds a Q3D design to the EXISTING 2-line project (own
+  `q3d_*` modeler helpers; reuses the project's materials) and, after solving,
+  reports C_line + suggested C/length (with a COMMENTED auto-transfer that sets
+  `tl_C_F_per_m` on the HFSS design — off by default so a mis-parsed matrix
+  can't silently corrupt Z₀). Both share `buildQ3DBody`. Builds ONLY the
+  SELECTED line conductor(s)
   (each transform instance → its own covered sheet via `shapeInstanceToRing`, at
   the conductor mid-Z) + the dielectric stack boxes over the footprint, calls
   `AutoIdentifyNets`, inserts a capacitance setup. Feeds/launches are EXCLUDED
@@ -349,11 +358,14 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
   green "4 ports verified" + warnings, computes the βΔl phase-ambiguity guidance
   (`εeff_max = (c/(2·f_max·Δl))²`; amber if < 5), and gates Generate. Also a
   "Characteristic impedance Z₀ (optional)" block: a C-per-length (F/m) field
-  (→ `cFperM`, enables the Z₀ output vars) + a conductor checkbox picker and a
-  "Generate Q3D capacitance script" button (`onGenerateQ3D(conductorIds)` →
-  `handleExportQ3DCap` → `generateQ3DCapacitance` → `<base>_q3d_cap.py`). Wired in
-  `PhotonicLayout.jsx`: `handleExportTwoLine(builtScene, portIndices, dLMeters,
-  cFperM)` generates the script from the BUILT scene (not the canvas scene) →
+  (→ `cFperM`, enables the Z₀ output vars) + a conductor checkbox picker, a
+  "Bundle Q3D into the main script" checkbox, and a "Separate Q3D script" button
+  (`onGenerateQ3D(conductorIds)` → `handleExportQ3DCap` → `generateQ3DCapacitance`
+  → `<base>_q3d_cap.py`). Wired in `PhotonicLayout.jsx`:
+  `handleExportTwoLine(builtScene, portIndices, dLMeters, cFperM, q3dConductorIds)`
+  — when bundle is on it passes `q3d: { scene: normalizeScene(scene),
+  conductorIds }` (the CANVAS single-line scene) so one script holds both
+  designs. Generates from the BUILT scene (not the canvas scene) →
   preview/download as `<base>_2line_hfss.py`. **Last-used field values persist**
   in `localStorage`
   (`src/ui/twoLineSettings.js`, key `photonic_layout_two_line` — outside

@@ -65,6 +65,9 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
     if (next.has(id)) next.delete(id); else next.add(id);
     return next;
   });
+  // When on (and conductors picked), the MAIN 2-line script also builds a Q3D
+  // capacitance design in the same project that solves C → Z0.
+  const [bundleQ3D, setBundleQ3D] = useState(false);
 
   // When the user CHANGES the length param, re-seed L1/L2 from its current
   // value. Detect a REAL change against the previous value (a ref) rather than
@@ -125,7 +128,8 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
     if (!build.ok) return;
     // Remember these field values for next time (last-used = last generated).
     saveTwoLinePrefs({ lengthParam, l1, l2, separation, freqStart, freqStop, freqPoints, cFperM });
-    onGenerate(build.ok.scene, build.ok.portIndices, build.ok.dLMeters, cValid ? cNum : undefined);
+    const bundleIds = (bundleQ3D && q3dPick.size > 0) ? [...q3dPick] : undefined;
+    onGenerate(build.ok.scene, build.ok.portIndices, build.ok.dLMeters, cValid ? cNum : undefined, bundleIds);
     onClose();
   };
 
@@ -246,14 +250,24 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
                     </label>
                   ))}
                 </div>
-                <button
-                  onClick={() => onGenerateQ3D([...q3dPick])}
-                  disabled={q3dPick.size === 0}
-                  className="px-2.5 py-1 rounded text-[11px] font-medium border border-slate-600 hover:bg-slate-800 text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed"
-                  title="Generate a separate Q3D Extractor script that builds the selected conductor(s) + dielectric stack and solves the capacitance matrix. Divide the conductor-to-conductor C by the line's physical length → paste C (F/m) above. (Q3D COM differs from HFSS — validate in AEDT.)"
-                >
-                  Generate Q3D capacitance script…
-                </button>
+                <label className="flex items-center gap-2 text-[11px] text-slate-300 cursor-pointer">
+                  <input type="checkbox" checked={bundleQ3D} disabled={q3dPick.size === 0}
+                    onChange={(e) => setBundleQ3D(e.target.checked)} />
+                  <span>Bundle the Q3D design into the main 2-line script (one project)</span>
+                </label>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => onGenerateQ3D([...q3dPick])}
+                    disabled={q3dPick.size === 0}
+                    className="px-2.5 py-1 rounded text-[11px] font-medium border border-slate-600 hover:bg-slate-800 text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                    title="Generate a SEPARATE Q3D Extractor script that builds the selected conductor(s) + dielectric stack and solves the capacitance matrix. Divide the conductor-to-conductor C by the line's physical length → paste C (F/m) above. (Q3D COM differs from HFSS — validate in AEDT.)"
+                  >
+                    Separate Q3D script…
+                  </button>
+                  {bundleQ3D && q3dPick.size > 0 && (
+                    <span className="text-[11px] text-cyan-400">↑ also built into the main script on Generate</span>
+                  )}
+                </div>
               </div>
             )}
           </div>
