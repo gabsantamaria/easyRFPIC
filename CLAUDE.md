@@ -322,7 +322,13 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
   (`εeff_max = (c/(2·f_max·Δl))²`; amber if < 5), and gates Generate. Wired in
   `PhotonicLayout.jsx`: `handleExportTwoLine(builtScene, portIndices)` generates
   the script from the BUILT scene (not the canvas scene) → preview/download as
-  `<base>_2line_hfss.py`.
+  `<base>_2line_hfss.py`. **Last-used field values persist** in `localStorage`
+  (`src/ui/twoLineSettings.js`, key `photonic_layout_two_line` — outside
+  workspace prefixes, same isolation as the AI key/settings): saved on Generate,
+  restored on open. A saved lengthParam absent from the current design falls
+  back to the first param; the L1/L2 re-seed-on-param-change is gated by a
+  prev-value ref (NOT a mount-count flag) so it survives StrictMode's
+  double-invoked mount effect and doesn't clobber restored values.
 - **Phase-ambiguity caveat (v1)**: β is unwrapped only while βΔl < π over the
   band — pick L2−L1 small enough. α and εeff-from-α are unaffected by the branch.
 

@@ -13,9 +13,10 @@
 //
 // Everything parametric stays parametric: tl_L1/tl_L2/tl_dL are real HFSS
 // variables, so the user can sweep the lengths in HFSS afterward.
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Ruler, X as XIcon, AlertTriangle, Check, Download } from 'lucide-react';
 import { buildTwoLineScene } from '../scene/twoLine.js';
+import { loadTwoLinePrefs, saveTwoLinePrefs } from './twoLineSettings.js';
 
 const C_LIGHT = 2.99792458e8;
 
@@ -33,18 +34,32 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate }) {
     .filter((n) => !n.startsWith('_comp_'))
     .sort((a, b) => a.localeCompare(b)), [scene]);
 
-  const [lengthParam, setLengthParam] = useState(() => paramNames[0] || '');
-  const curLen = Number(paramValues?.[lengthParam]);
-  const [l1, setL1] = useState(() => (Number.isFinite(curLen) && curLen > 0 ? String(Math.round(curLen)) : '1000'));
-  const [l2, setL2] = useState(() => (Number.isFinite(curLen) && curLen > 0 ? String(Math.round(curLen * 2)) : '2000'));
-  const [separation, setSeparation] = useState(''); // blank = auto
-  const sim = scene.simSetup || {};
-  const [freqStart, setFreqStart] = useState(() => String(sim.sweepStart ?? '1'));
-  const [freqStop, setFreqStop] = useState(() => String(sim.sweepStop ?? '40'));
-  const [freqPoints, setFreqPoints] = useState(() => String(sim.sweepPoints ?? '201'));
+  // Last-used field values (localStorage). Loaded once on mount — the wizard
+  // remounts on every open, so this restores what was last GENERATED. A saved
+  // lengthParam that no longer exists in this design falls back to the first.
+  const prefs = useMemo(() => loadTwoLinePrefs(), []);
+  const savedParamOk = prefs && prefs.lengthParam && paramNames.includes(prefs.lengthParam);
 
-  // When the length param changes, re-seed L1/L2 from its current value.
+  const [lengthParam, setLengthParam] = useState(() => (savedParamOk ? prefs.lengthParam : (paramNames[0] || '')));
+  const curLen = Number(paramValues?.[lengthParam]);
+  const defL1 = Number.isFinite(curLen) && curLen > 0 ? String(Math.round(curLen)) : '1000';
+  const defL2 = Number.isFinite(curLen) && curLen > 0 ? String(Math.round(curLen * 2)) : '2000';
+  const [l1, setL1] = useState(() => (prefs && prefs.l1 ? prefs.l1 : defL1));
+  const [l2, setL2] = useState(() => (prefs && prefs.l2 ? prefs.l2 : defL2));
+  const [separation, setSeparation] = useState(() => (prefs ? prefs.separation : '')); // blank = auto
+  const sim = scene.simSetup || {};
+  const [freqStart, setFreqStart] = useState(() => (prefs && prefs.freqStart ? prefs.freqStart : String(sim.sweepStart ?? '1')));
+  const [freqStop, setFreqStop] = useState(() => (prefs && prefs.freqStop ? prefs.freqStop : String(sim.sweepStop ?? '40')));
+  const [freqPoints, setFreqPoints] = useState(() => (prefs && prefs.freqPoints ? prefs.freqPoints : String(sim.sweepPoints ?? '201')));
+
+  // When the user CHANGES the length param, re-seed L1/L2 from its current
+  // value. Detect a REAL change against the previous value (a ref) rather than
+  // mount count — so restored last-used L1/L2 survive, and StrictMode's
+  // double-invoked mount effect doesn't clobber them.
+  const prevLenRef = useRef(lengthParam);
   useEffect(() => {
+    if (lengthParam === prevLenRef.current) return;
+    prevLenRef.current = lengthParam;
     const v = Number(paramValues?.[lengthParam]);
     if (Number.isFinite(v) && v > 0) { setL1(String(Math.round(v))); setL2(String(Math.round(v * 2))); }
   }, [lengthParam]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -91,6 +106,8 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate }) {
 
   const generate = () => {
     if (!build.ok) return;
+    // Remember these field values for next time (last-used = last generated).
+    saveTwoLinePrefs({ lengthParam, l1, l2, separation, freqStart, freqStop, freqPoints });
     onGenerate(build.ok.scene, build.ok.portIndices, build.ok.dLMeters);
     onClose();
   };
