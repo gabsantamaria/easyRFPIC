@@ -4551,6 +4551,11 @@ except Exception as e:
         try {
           tlQ3DBlock = generateQ3DCombinedBlock(tlQ3D.scene, null, {
             conductorIds: tlQ3D.conductorIds,
+            thicknessUm: tlQ3D.thicknessUm,
+            lengthUm: tlQ3D.lengthUm,
+            freqStartGHz: tlQ3D.freqStartGHz,
+            freqStopGHz: tlQ3D.freqStopGHz,
+            freqPoints: tlQ3D.freqPoints,
             designName: 'q3d_cap',
             hfssDesignName: 'Layout',
             cVarName: 'tl_C_F_per_m',

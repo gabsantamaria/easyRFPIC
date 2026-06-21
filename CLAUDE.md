@@ -332,14 +332,20 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
   `generateQ3DCombinedBlock`) built from the SINGLE-line scene — so one script
   builds both designs. No `twoLine` option → byte-identical.
 - **Q3D capacitance (`src/export/q3d.js`)**: `generateQ3DCapacitance(scene, pv,
-  {conductorIds, designName})` = a SEPARATE Q3D script (own project);
-  `generateQ3DCombinedBlock(scene, pv, {conductorIds, hfssDesignName, cVarName})`
-  = a Python block that adds a Q3D design to the EXISTING 2-line project (own
-  `q3d_*` modeler helpers; reuses the project's materials) and, after solving,
-  reports C_line + suggested C/length (with a COMMENTED auto-transfer that sets
-  `tl_C_F_per_m` on the HFSS design — off by default so a mis-parsed matrix
-  can't silently corrupt Z₀). Both share `buildQ3DBody`. Builds ONLY the
-  SELECTED line conductor(s)
+  {conductorIds, thicknessUm, lengthUm, freqStartGHz, freqStopGHz, freqPoints,
+  designName})` = a SEPARATE Q3D script (own project);
+  `generateQ3DCombinedBlock(...)` = a Python block adding a Q3D design to the
+  EXISTING 2-line project (own `q3d_*` helpers; reuses the project's materials),
+  with a COMMENTED auto-transfer that sets `tl_C_F_per_m` on the HFSS design
+  (off by default so a mis-parsed matrix can't silently corrupt Z₀). Both share
+  `buildQ3DBody`. Conductors are **THIN CONDUCTORS** — a covered sheet swept up
+  (`SweepAlongVector`) by `thicknessUm` (= `h_cond`, or a wizard-supplied value
+  when `h_cond=0`). Each conductor object gets its own **signal net**
+  (`AssignSignalNet`). Emits a capacitance setup + a **frequency sweep**
+  (`InsertSweep`, same band as the 2-line wizard) + a **C-per-length** report
+  (`C_per_m = |C(netA,netB)| / lengthMeters`, `lengthUm` = supplied or a
+  geometry best-effort — VERIFY for meanders) + a full C-matrix table. Builds
+  ONLY the SELECTED line conductor(s)
   (each transform instance → its own covered sheet via `shapeInstanceToRing`, at
   the conductor mid-Z) + the dielectric stack boxes over the footprint, calls
   `AutoIdentifyNets`, inserts a capacitance setup. Feeds/launches are EXCLUDED

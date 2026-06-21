@@ -5000,14 +5000,14 @@ export default function App() {
   // at L1 and L2, 4 lumped ports) + the verified S-index map. Generate the
   // native HFSS script directly from that scene with the εeff/α output-variable
   // block enabled — NOT from the current canvas scene.
-  const handleExportTwoLine = async (builtScene, portIndices, dLMeters, cFperM, q3dConductorIds) => {
+  const handleExportTwoLine = async (builtScene, portIndices, dLMeters, cFperM, bundle) => {
     let content;
     try {
       const normalized = normalizeScene(builtScene);
       const pv = resolveParams(normalized.params || {}).values;
       // Bundled Q3D builds the SINGLE-line (canvas) scene, not the 2-line scene.
-      const q3d = (Array.isArray(q3dConductorIds) && q3dConductorIds.length)
-        ? { scene: normalizeScene(scene), conductorIds: q3dConductorIds }
+      const q3d = (bundle && Array.isArray(bundle.conductorIds) && bundle.conductorIds.length)
+        ? { scene: normalizeScene(scene), ...bundle }
         : undefined;
       content = generateHfssNative(normalized, pv, { twoLine: { portIndices, dLMeters, cFperM, q3d } });
     } catch (e) {
@@ -5023,10 +5023,10 @@ export default function App() {
   // Q3D capacitance script for the meander Z₀ route: build ONLY the selected
   // line conductor(s) + dielectric stack, solve C; the user divides by physical
   // length and pastes C into the wizard.
-  const handleExportQ3DCap = async (conductorIds) => {
+  const handleExportQ3DCap = async (conductorIds, q3dOpts = {}) => {
     let content;
     try {
-      content = generateQ3DCapacitance(normalizeScene(scene), paramValues, { conductorIds, designName: designFileBase() });
+      content = generateQ3DCapacitance(normalizeScene(scene), paramValues, { conductorIds, ...q3dOpts, designName: designFileBase() });
     } catch (e) {
       console.error('Q3D generator error:', e);
       await alertDialog('Error generating Q3D script: ' + e.message, 'Export error');

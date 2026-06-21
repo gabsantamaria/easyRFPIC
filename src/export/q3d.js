@@ -2,25 +2,24 @@
 //
 // For a MEANDERED (non-uniform) line there's no uniform cross-section, so the
 // per-length capacitance C can't come from Q2D. But the FULL 3-D folded
-// geometry solves in Q3D Extractor: read the capacitance between the two line
-// conductors, divide by the line's PHYSICAL length → C (F/m), then Z0 = γ/(jωC)
-// (γ from the 2-line method). C is electrostatic ⇒ unaffected by kinetic
-// inductance ⇒ Z0 is kinetic-inductance-correct.
+// geometry solves in Q3D Extractor: read C between the two line conductors,
+// divide by the line's PHYSICAL length → C (F/m), then Z0 = γ/(jωC) (γ from the
+// 2-line method). C is electrostatic ⇒ kinetic-inductance-correct.
 //
-// This module emits the Q3D geometry two ways:
-//   * generateQ3DCapacitance  — a standalone Q3D script (own project + design).
-//   * generateQ3DCombinedBlock — a Python block that adds a Q3D design to the
-//     SAME project as the 2-line HFSS script, so one file builds both. The
-//     conductor-to-conductor C is reported (and a commented auto-transfer sets
-//     the HFSS `tl_C_F_per_m` design variable → Z0). The block builds the
-//     SINGLE line (C/length is a one-line quantity), not the doubled 2-line scene.
+// Modeling:
+//   * Conductors are THIN CONDUCTORS — a covered sheet swept up by the
+//     conductor thickness (h_cond, or a wizard-supplied value when h_cond=0).
+//   * Each conductor object is assigned its own SIGNAL NET.
+//   * A capacitance setup + a frequency SWEEP (same band as the 2-line wizard).
+//   * A "C per length" report (|C(netA,netB)| / physical length) + full C matrix.
 //
-// Only the SELECTED line conductor(s) are emitted — the feed/launch is excluded
-// on purpose (it bridges the conductors across the port gap and would short the
-// nets in an electrostatic solve). The Q3D-specific COM (AutoIdentifyNets,
-// Matrix setup, ExportMatrixData) is NOT validated in this repo — wrapped in
-// try/except; expect per-AEDT-release tweaks. The geometry uses the same proven
-// modeler calls as the HFSS/GDS exporters.
+// Two emitters: generateQ3DCapacitance (standalone script, own project) and
+// generateQ3DCombinedBlock (a block appended to the 2-line HFSS script so one
+// file builds both designs). Only the SELECTED line conductor(s) are emitted —
+// feeds excluded (they'd short the nets electrostatically). The Q3D-specific COM
+// (nets / setup / sweep / reports / export) is NOT validated in this repo —
+// wrapped in try/except; expect per-AEDT-release tweaks. Geometry uses the
+// proven modeler calls.
 import { normalizeScene, migrateStackCoplanarGroups } from '../scene/schema.js';
 import { resolveParams, evalExpr } from '../scene/params.js';
 import { solveLayout } from '../scene/solver.js';
@@ -29,10 +28,9 @@ import { shapeInstanceToRing } from '../geometry/rings.js';
 
 const ascii = (s) => String(s ?? '').replace(/[^\x00-\x7F]/g, '?');
 const num = (v) => (Number.isFinite(v) ? (Math.round(v * 1e6) / 1e6) : 0);
+// Plain decimal (no exponent) for literals the Q3D expr engine reads.
+const dec = (x) => { if (!Number.isFinite(x)) return '0'; let s = x.toFixed(18); if (s.indexOf('.') >= 0) s = s.replace(/0+$/, '').replace(/\.$/, ''); return s || '0'; };
 
-// Group-aware numeric Z walk (mirrors hfss-native's layerZ / pyaedt's
-// numericLayerZ): substrates below the device datum go negative; coplanar-group
-// members share zBottom and the group advances past its cladding top.
 function computeLayerZ(stack, pv) {
   const layers = migrateStackCoplanarGroups(stack || []);
   const thk = (l) => { const v = evalExpr(l.thickness, pv); return Number.isFinite(v) ? Math.abs(v) : 0; };
@@ -58,10 +56,9 @@ function computeLayerZ(stack, pv) {
   return { zBottom, zTop };
 }
 
-// Shared geometry/material body. boxFn/polyFn are the Python helper names the
-// emitted blocks call (so the standalone and the embedded-in-HFSS variants can
-// use differently-named helpers without clashing).
-function buildQ3DBody(scene, paramValues, opts, boxFn, polyFn) {
+// Shared geometry/material body. boxFn/polyFn/sweepFn are Python helper names the
+// emitted blocks call. opts: { conductorIds, thicknessUm }.
+function buildQ3DBody(scene, paramValues, opts, boxFn, polyFn, sweepFn) {
   const src = normalizeScene(scene);
   const pv = paramValues || resolveParams(src.params || {}).values;
   const solved = solveLayout(src.components, src.snaps, pv);
@@ -74,14 +71,18 @@ function buildQ3DBody(scene, paramValues, opts, boxFn, polyFn) {
 
   const condLayer = stack.find((l) => l.role === 'conductor');
   const condMat = (condLayer && condLayer.material) || 'gold';
-  const condZBot = condLayer ? (zBottom[condLayer.id] ?? 0) : 0;
-  const condZTop = condLayer ? (zTop[condLayer.id] ?? 0) : 0;
-  const condZ = num((condZBot + condZTop) / 2);
+  const hCond = condLayer ? (evalExpr(condLayer.thickness, pv) || 0) : 0;
+  // Thin-conductor thickness: explicit opt → else h_cond → else fallback.
+  let effThk = Number.isFinite(opts.thicknessUm) && opts.thicknessUm > 0 ? opts.thicknessUm
+    : (hCond > 0 ? hCond : 0.1);
+  effThk = num(effThk);
+  // Sit the swept conductor on the conductor layer's bottom.
+  const condZBot = num(condLayer ? (zBottom[condLayer.id] ?? 0) : 0);
 
   const condObjs = [];
   const condBlocks = [];
   let bb = { xMin: Infinity, xMax: -Infinity, yMin: Infinity, yMax: -Infinity };
-  let lineLengthUm = 0; // best-effort: max single-conductor extent
+  let lineLengthUm = 0;
   for (const c of condComps) {
     const insts = expandTransforms([c], pv);
     insts.forEach((inst, k) => {
@@ -93,11 +94,12 @@ function buildQ3DBody(scene, paramValues, opts, boxFn, polyFn) {
       const name = `${c.id}_i${k}`.replace(/[^A-Za-z0-9_]/g, '_');
       condObjs.push(name);
       const pts = [...ring, ring[0]].map(([x, y]) =>
-        `["NAME:PLPoint", "X:=", "${num(x)}um", "Y:=", "${num(y)}um", "Z:=", "${condZ}um"]`
+        `["NAME:PLPoint", "X:=", "${num(x)}um", "Y:=", "${num(y)}um", "Z:=", "${condZBot}um"]`
       ).join(',\n          ');
       const segs = ring.map((_, j) =>
         `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", ${j}, "NoOfPoints:=", 2]`
       ).join(',\n          ');
+      // Covered sheet ...
       condBlocks.push(`${polyFn}(
     ["NAME:PolylineParameters",
      "IsPolylineCovered:=", True, "IsPolylineClosed:=", True,
@@ -112,7 +114,8 @@ function buildQ3DBody(scene, paramValues, opts, boxFn, polyFn) {
      "Name:=", "${name}", "Flags:=", "", "Color:=", "(218 165 32)",
      "Transparency:=", 0.0, "PartCoordinateSystem:=", "Global",
      "MaterialValue:=", "\\"${ascii(condMat)}\\"", "SolveInside:=", False],
-    "${name}")`);
+    "${name}")
+${sweepFn}("${name}", "${effThk}um")  # thin conductor: sweep sheet up by thickness`);
     });
   }
   if (!Number.isFinite(bb.xMin)) throw new Error('Selected conductors have no resolvable geometry.');
@@ -144,14 +147,13 @@ function buildQ3DBody(scene, paramValues, opts, boxFn, polyFn) {
   const STD = new Set(['vacuum', 'air', 'copper', 'gold', 'aluminum', 'silicon', 'silicon_dioxide', 'silicon_nitride', 'FR4_epoxy', 'polyimide', 'Pec', 'Teflon_based']);
   const CUSTOM = { lithium_tantalate: [41.4, 1, 0, 0.001], lithium_niobate: [28.0, 1, 0, 0.001] };
   const usedMats = new Set([condMat, ...stack.filter((l) => l.role !== 'conductor').map((l) => l.material)]);
-  const matNames = [...usedMats].filter((m) => m && !STD.has(m));
-  const matDefs = matNames.map((m) => {
+  const matDefs = [...usedMats].filter((m) => m && !STD.has(m)).map((m) => {
     const p = CUSTOM[m] || [4.0, 1, 0, 0.001];
     return `define_material("${ascii(m)}", ${p[0]}, ${p[1]}, ${p[2]}, ${p[3]})`;
   }).join('\n');
 
   const fAdaptGHz = (() => { const f = evalExpr(src.simSetup?.fnominal ?? '4', pv); return Number.isFinite(f) && f > 0 ? f : 4; })();
-  return { matDefs, dielBlocks, condBlocks, condObjs, fAdaptGHz, lineLengthUm: num(lineLengthUm) };
+  return { matDefs, dielBlocks, condBlocks, condObjs, fAdaptGHz, lineLengthUm: num(lineLengthUm), effThk };
 }
 
 const CAP_SETUP = (fGHz) => `["NAME:Setup1",
@@ -160,23 +162,79 @@ const CAP_SETUP = (fGHz) => `["NAME:Setup1",
           "PerError:=", 1, "PerRefine:=", 30, "AutoIncreaseSolutionOrder:=", True,
           "SolutionOrder:=", "High", "Solver Type:=", "Iterative"]]`;
 
+// Nets + setup + frequency sweep + C-per-length reports (top-level statements,
+// shared by both emitters). Each conductor object → its own signal net; C per
+// length = |C(netA,netB)| / lengthMeters across the swept band.
+function q3dNetsSetupReports({ condObjs, fAdaptGHz, lengthUm, sweep }) {
+  const nets = condObjs.map((o) => `q3d_signal_net("net_${o}", "${o}")`).join('\n');
+  const lenM = (Number.isFinite(lengthUm) && lengthUm > 0) ? lengthUm * 1e-6 : 1e-3;
+  const s = sweep || {};
+  const startG = Number.isFinite(s.startGHz) ? s.startGHz : 1;
+  const stopG = Number.isFinite(s.stopGHz) ? s.stopGHz : 40;
+  const pts = (Number.isFinite(s.points) && s.points >= 1) ? Math.round(s.points) : 201;
+  // C-per-length report (only when there are >=2 nets to pair).
+  let perLen = '# (need >=2 conductor nets for a conductor-to-conductor C/length)';
+  if (condObjs.length >= 2) {
+    const a = `net_${condObjs[0]}`, b = `net_${condObjs[1]}`;
+    perLen = `# Per-length capacitance: |C(${a},${b})| / line length.
+# LINE_LENGTH_UM is a best-effort geometry guess — VERIFY it equals your line's
+# PHYSICAL (unfolded) length, especially for a meander.
+LINE_LENGTH_UM = ${dec(lengthUm)}
+try:
+    oOut = oDesign.GetModule("OutputVariable")
+    oOut.CreateOutputVariable("C_per_m", "abs(C(${a},${b}))/${dec(lenM)}", "Setup1 : Sweep1", "Matrix", [])
+except Exception as e:
+    oDesktop.AddMessage("", "", 1, "C_per_m output var failed: " + str(e))
+try:
+    oRep = oDesign.GetModule("ReportSetup")
+    oRep.CreateReport("C per length", "Matrix", "Rectangular Plot", "Setup1 : Sweep1",
+        ["Context:=", "Original"], ["Freq:=", ["All"]],
+        ["X Component:=", "Freq", "Y Component:=", ["C_per_m"]], [])
+    oRep.CreateReport("C matrix", "Matrix", "Data Table", "Setup1 : Sweep1",
+        ["Context:=", "Original"], ["Freq:=", ["All"]],
+        ["X Component:=", "Freq", "Y Component:=", ["C(${a},${b})", "C(${a},${a})", "C(${b},${b})"]], [])
+except Exception as e:
+    oDesktop.AddMessage("", "", 1, "C reports failed (create from GUI: Results -> Create Report -> Matrix): " + str(e))`;
+  }
+  return `# ===== Nets (one signal net per conductor object) =====
+oBnd = oDesign.GetModule("BoundarySetup")
+def q3d_signal_net(net, obj):
+    try:
+        oBnd.AssignSignalNet(["NAME:" + net, "Objects:=", [obj]])
+    except Exception as e:
+        oDesktop.AddMessage("", "", 1, "AssignSignalNet " + net + " failed: " + str(e))
+${nets}
+
+# ===== Capacitance setup + frequency sweep (same band as the 2-line wizard) =====
+oAna = oDesign.GetModule("AnalysisSetup")
+try:
+    oAna.InsertSetup("Matrix", ${CAP_SETUP(fAdaptGHz)})
+except Exception as e:
+    oDesktop.AddMessage("", "", 2, "InsertSetup(Matrix) failed: " + str(e))
+try:
+    oAna.InsertSweep("Setup1",
+        ["NAME:Sweep1", "IsEnabled:=", True, "RangeType:=", "LinearCount",
+         "RangeStart:=", "${startG}GHz", "RangeEnd:=", "${stopG}GHz", "RangeCount:=", ${pts},
+         "Type:=", "Interpolating", "SaveFields:=", False])
+except Exception as e:
+    oDesktop.AddMessage("", "", 1, "InsertSweep failed (add a sweep from the GUI): " + str(e))
+
+# ===== Capacitance-per-length reports =====
+${perLen}`;
+}
+
 // Standalone Q3D capacitance script (own project + design).
 export function generateQ3DCapacitance(scene, paramValues, opts = {}) {
-  const body = buildQ3DBody(scene, paramValues, opts, 'safe_create_box', 'safe_create_polyline');
+  const body = buildQ3DBody(scene, paramValues, opts, 'safe_create_box', 'safe_create_polyline', 'safe_sweep_z');
   const design = (opts.designName || 'q3d_cap').replace(/[^A-Za-z0-9_]/g, '_');
+  const sweep = { startGHz: opts.freqStartGHz, stopGHz: opts.freqStopGHz, points: opts.freqPoints };
   const code = `# -*- coding: utf-8 -*-
 # Auto-generated Q3D Extractor capacitance script (AEDT: Tools -> Run Script).
-# Goal: per-length capacitance C of a MEANDERED line for Z0 = gamma/(j*w*C).
-# Builds ONLY the selected line conductor(s): ${body.condObjs.length} object(s).
-# (Feeds/launches excluded — they short the nets in an electrostatic solve.)
-#
-# AFTER SOLVING: Results -> Solution Data -> Matrix (Capacitance). Take the
-# conductor-to-conductor C, divide by the line's PHYSICAL (unfolded) length in
-# metres, paste that C (F/m) into the 2-line wizard "C per length" field.
-# Best-effort length guess from geometry: LINE_LENGTH_UM = ${body.lineLengthUm} um (VERIFY).
-#
-# CAVEAT: AutoIdentifyNets / setup / export COM are Q3D-specific and NOT
-# validated here — fix in the GUI if one errors (the geometry is correct).
+# Per-length capacitance C of a MEANDERED line for Z0 = gamma/(j*w*C).
+# Builds ONLY the selected line conductor(s) as THIN CONDUCTORS (thickness
+# ${body.effThk} um): ${body.condObjs.length} object(s). Feeds excluded.
+# CAVEAT: Q3D net/setup/sweep/report COM is not validated here — fix in the GUI
+# if a call errors (the geometry is correct).
 import ScriptEnv
 ScriptEnv.Initialize("Ansoft.ElectronicsDesktop")
 oDesktop.RestoreWindow()
@@ -206,6 +264,15 @@ def safe_create_polyline(pp, attr, name):
         oEditor.CreatePolyline(pp, attr)
     except Exception as e:
         oDesktop.AddMessage("", "", 1, "CreatePolyline " + name + " failed: " + str(e))
+def safe_sweep_z(name, dz):
+    try:
+        oEditor.SweepAlongVector(
+            ["NAME:Selections", "Selections:=", name, "NewPartsModelFlag:=", "Model"],
+            ["NAME:VectorSweepParameters", "DraftAngle:=", "0deg", "DraftType:=", "Round",
+             "CheckFaceFaceIntersection:=", False,
+             "SweepVectorX:=", "0um", "SweepVectorY:=", "0um", "SweepVectorZ:=", dz])
+    except Exception as e:
+        oDesktop.AddMessage("", "", 1, "Sweep " + name + " failed: " + str(e))
 def define_material(name, eps_r, mu_r, sigma, tand):
     try:
         oProject.GetDefinitionManager().AddMaterial(
@@ -221,101 +288,83 @@ ${body.matDefs || '# (all materials are AEDT built-ins)'}
 # ===== Dielectric stack =====
 ${body.dielBlocks.join('\n') || '# (no dielectric layers)'}
 
-# ===== Line conductor(s) =====
+# ===== Line conductor(s) — thin conductors (${body.effThk} um) =====
 ${body.condBlocks.join('\n')}
 
-# ===== Nets + capacitance setup =====
-try:
-    oDesign.GetModule("BoundarySetup").AutoIdentifyNets()
-except Exception as e:
-    oDesktop.AddMessage("", "", 2, "AutoIdentifyNets failed (assign nets manually): " + str(e))
-try:
-    oDesign.GetModule("AnalysisSetup").InsertSetup("Matrix", ${CAP_SETUP(body.fAdaptGHz)})
-except Exception as e:
-    oDesktop.AddMessage("", "", 2, "InsertSetup(Matrix) failed (create a Cap setup manually): " + str(e))
+${q3dNetsSetupReports({ condObjs: body.condObjs, fAdaptGHz: body.fAdaptGHz, lengthUm: opts.lengthUm ?? body.lineLengthUm, sweep })}
 
 oProject.Save()
-oDesktop.AddMessage("", "", 0, "Q3D capacitance model built. Analyze Setup1, read the C matrix; C_line / physical_length (m) -> 2-line wizard.")
+oDesktop.AddMessage("", "", 0, "Q3D capacitance model built. Analyze Setup1, then read 'C per length' (verify LINE_LENGTH_UM) -> paste C (F/m) into the 2-line wizard.")
 `;
   return ascii(code);
 }
 
-// A Python block that adds a Q3D design to the EXISTING 2-line project (so one
-// script builds both). Reuses the project's already-defined materials; defines
-// its own q3d_* modeler helpers to avoid clashing with the HFSS script's. After
-// solving it reports C_line and the suggested C (F/m); a commented auto-transfer
-// sets the HFSS `${'${cVar}'}` design variable on `hfssDesignName`.
+// A Python block adding a Q3D design to the EXISTING 2-line project (one file
+// builds both). Defines its own q3d_* helpers; reuses the project's materials.
 export function generateQ3DCombinedBlock(scene, paramValues, opts = {}) {
-  const body = buildQ3DBody(scene, paramValues, opts, 'q3d_box', 'q3d_poly');
+  const body = buildQ3DBody(scene, paramValues, opts, 'q3d_box', 'q3d_poly', 'q3d_sweep');
   const design = (opts.designName || 'q3d_cap').replace(/[^A-Za-z0-9_]/g, '_');
   const hfss = (opts.hfssDesignName || 'Layout').replace(/[^A-Za-z0-9_]/g, '_');
   const cVar = (opts.cVarName || 'tl_C_F_per_m');
+  const sweep = { startGHz: opts.freqStartGHz, stopGHz: opts.freqStopGHz, points: opts.freqPoints };
   const code = `
 # ===== Q3D capacitance design (same project) — for Z0 = gamma/(j*w*C) =====
-# Adds a Q3D Extractor design that solves the per-length capacitance C of the
-# SINGLE line (only the selected conductor(s); feeds excluded so they don't
-# short the nets). After it solves, read C_line from the matrix and set the HFSS
-# variable "${cVar}" = C_line / (LINE_LENGTH_UM*1e-6) on design "${hfss}" — then
-# the Z0 reports populate. (Q3D COM is not validated here; fix in GUI if needed.)
-LINE_LENGTH_UM = ${body.lineLengthUm}   # <-- VERIFY: line PHYSICAL (unfolded) length in um
+# Adds a Q3D Extractor design solving the per-length C of the SINGLE line (only
+# the selected conductor(s) as THIN CONDUCTORS, ${body.effThk} um; feeds excluded).
+# After it solves, read 'C per length' and set the HFSS variable "${cVar}" on
+# design "${hfss}" (or uncomment the auto-transfer). Q3D COM not validated here.
 try:
     oProject.InsertDesign("Q3D Extractor", "${design}", "", "")
     oDesign = oProject.SetActiveDesign("${design}")
     oEditor = oDesign.SetActiveEditor("3D Modeler")
     oEditor.SetModelUnits(["NAME:Units Parameter", "Units:=", "um", "Rescale:=", True])
-
-    def _q3d_del(name):
-        try:
-            oEditor.Delete(["NAME:Selections", "Selections:=", name])
-        except:
-            pass
-    def q3d_box(bp, attr, name):
-        _q3d_del(name)
-        try:
-            oEditor.CreateBox(bp, attr)
-        except Exception as e:
-            oDesktop.AddMessage("", "", 1, "Q3D CreateBox " + name + " failed: " + str(e))
-    def q3d_poly(pp, attr, name):
-        _q3d_del(name)
-        try:
-            oEditor.CreatePolyline(pp, attr)
-        except Exception as e:
-            oDesktop.AddMessage("", "", 1, "Q3D CreatePolyline " + name + " failed: " + str(e))
-
-    # Dielectric stack (materials already defined at project level by the HFSS design)
-${body.dielBlocks.map((b) => '    ' + b.replace(/\n/g, '\n    ')).join('\n')}
-    # Line conductor(s)
-${body.condBlocks.map((b) => '    ' + b.replace(/\n/g, '\n    ')).join('\n')}
-
-    try:
-        oDesign.GetModule("BoundarySetup").AutoIdentifyNets()
-    except Exception as e:
-        oDesktop.AddMessage("", "", 2, "Q3D AutoIdentifyNets failed: " + str(e))
-    try:
-        oDesign.GetModule("AnalysisSetup").InsertSetup("Matrix", ${CAP_SETUP(body.fAdaptGHz)})
-    except Exception as e:
-        oDesktop.AddMessage("", "", 2, "Q3D InsertSetup failed: " + str(e))
-
-    oProject.Save()
-    oDesktop.AddMessage("", "", 0, "Q3D design '${design}' built. Analyze it, read C_line (Results -> Matrix), then set ${cVar} = C_line/(LINE_LENGTH_UM*1e-6) on design '${hfss}'.")
 except Exception as e:
-    oDesktop.AddMessage("", "", 2, "Q3D design build failed: " + str(e))
+    oDesktop.AddMessage("", "", 2, "Q3D design create failed: " + str(e))
+
+def _q3d_del(name):
+    try:
+        oEditor.Delete(["NAME:Selections", "Selections:=", name])
+    except:
+        pass
+def q3d_box(bp, attr, name):
+    _q3d_del(name)
+    try:
+        oEditor.CreateBox(bp, attr)
+    except Exception as e:
+        oDesktop.AddMessage("", "", 1, "Q3D CreateBox " + name + " failed: " + str(e))
+def q3d_poly(pp, attr, name):
+    _q3d_del(name)
+    try:
+        oEditor.CreatePolyline(pp, attr)
+    except Exception as e:
+        oDesktop.AddMessage("", "", 1, "Q3D CreatePolyline " + name + " failed: " + str(e))
+def q3d_sweep(name, dz):
+    try:
+        oEditor.SweepAlongVector(
+            ["NAME:Selections", "Selections:=", name, "NewPartsModelFlag:=", "Model"],
+            ["NAME:VectorSweepParameters", "DraftAngle:=", "0deg", "DraftType:=", "Round",
+             "CheckFaceFaceIntersection:=", False,
+             "SweepVectorX:=", "0um", "SweepVectorY:=", "0um", "SweepVectorZ:=", dz])
+    except Exception as e:
+        oDesktop.AddMessage("", "", 1, "Q3D Sweep " + name + " failed: " + str(e))
+
+# Dielectric stack (materials already defined at project level by the HFSS design)
+${body.dielBlocks.join('\n')}
+# Line conductor(s) — thin conductors
+${body.condBlocks.join('\n')}
+
+${q3dNetsSetupReports({ condObjs: body.condObjs, fAdaptGHz: body.fAdaptGHz, lengthUm: opts.lengthUm ?? body.lineLengthUm, sweep })}
+
+oProject.Save()
+oDesktop.AddMessage("", "", 0, "Q3D design '${design}' built. Analyze it, read 'C per length' (verify LINE_LENGTH_UM), set ${cVar} on design '${hfss}'.")
 
 # --- Optional AUTO-TRANSFER (uncomment after verifying the matrix read in your
 #     AEDT release; a wrong read would silently corrupt Z0, so it's off by default) ---
 # try:
-#     oDesign = oProject.SetActiveDesign("${design}")
 #     oDesign.Analyze("Setup1")
-#     import os
-#     _cf = os.path.join(oProject.GetPath(), "${design}_C.txt")
-#     oDesign.ExportMatrixData(_cf, "C", "", "Setup1 : LastAdaptive", "Original",
-#         "ohm", "nH", "fF", "mSie", ${body.fAdaptGHz}000000000, "Maxwell", 0, False, 5, 99)
-#     # parse _cf, take the conductor-to-conductor C in fF -> Farads:
-#     C_line = 0.0  # <-- set from the parsed matrix (Farads)
-#     C_per_m = C_line / (LINE_LENGTH_UM * 1e-6)
+#     # ... read C_per_m from the solution, then: ...
 #     oDesign = oProject.SetActiveDesign("${hfss}")
-#     set_var("${cVar}", str(C_per_m))
-#     oDesktop.AddMessage("", "", 0, "Set ${cVar} = " + str(C_per_m) + " F/m")
+#     set_var("${cVar}", str(C_per_m_value))
 # except Exception as e:
 #     oDesktop.AddMessage("", "", 2, "Auto-transfer failed: " + str(e))
 oDesign = oProject.SetActiveDesign("${hfss}")

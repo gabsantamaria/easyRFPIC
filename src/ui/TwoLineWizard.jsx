@@ -16,6 +16,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Ruler, X as XIcon, AlertTriangle, Check, Download } from 'lucide-react';
 import { buildTwoLineScene } from '../scene/twoLine.js';
+import { evalExpr } from '../scene/params.js';
 import { loadTwoLinePrefs, saveTwoLinePrefs } from './twoLineSettings.js';
 
 const C_LIGHT = 2.99792458e8;
@@ -68,6 +69,27 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
   // When on (and conductors picked), the MAIN 2-line script also builds a Q3D
   // capacitance design in the same project that solves C → Z0.
   const [bundleQ3D, setBundleQ3D] = useState(false);
+  // Thin-conductor thickness for Q3D: default to the stack's h_cond; if that's 0
+  // (zero-thickness/superconductor sheet) the user must supply a value.
+  const condThkResolved = useMemo(() => {
+    const cl = (scene.stack || []).find((l) => l.role === 'conductor');
+    if (!cl) return 0;
+    const v = evalExpr(cl.thickness, paramValues || {});
+    return Number.isFinite(v) ? v : 0;
+  }, [scene, paramValues]);
+  const [q3dThk, setQ3dThk] = useState(() => (condThkResolved > 0 ? String(condThkResolved) : ''));
+  const [q3dLen, setQ3dLen] = useState(''); // line physical length (µm); blank = geometry guess
+  const thkNum = q3dThk.trim() === '' ? null : Number(q3dThk);
+  const thkValid = thkNum != null && Number.isFinite(thkNum) && thkNum > 0;
+  const lenNum = q3dLen.trim() === '' ? null : Number(q3dLen);
+  // Options bundle passed to the Q3D generators (thickness, optional length, band).
+  const q3dOpts = () => ({
+    thicknessUm: thkValid ? thkNum : undefined,
+    lengthUm: (lenNum != null && Number.isFinite(lenNum) && lenNum > 0) ? lenNum : undefined,
+    freqStartGHz: freqStart.trim() === '' ? undefined : Number(freqStart),
+    freqStopGHz: freqStop.trim() === '' ? undefined : Number(freqStop),
+    freqPoints: freqPoints.trim() === '' ? undefined : Number(freqPoints),
+  });
 
   // When the user CHANGES the length param, re-seed L1/L2 from its current
   // value. Detect a REAL change against the previous value (a ref) rather than
@@ -128,8 +150,10 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
     if (!build.ok) return;
     // Remember these field values for next time (last-used = last generated).
     saveTwoLinePrefs({ lengthParam, l1, l2, separation, freqStart, freqStop, freqPoints, cFperM });
-    const bundleIds = (bundleQ3D && q3dPick.size > 0) ? [...q3dPick] : undefined;
-    onGenerate(build.ok.scene, build.ok.portIndices, build.ok.dLMeters, cValid ? cNum : undefined, bundleIds);
+    const bundle = (bundleQ3D && q3dPick.size > 0 && thkValid)
+      ? { conductorIds: [...q3dPick], ...q3dOpts() }
+      : undefined;
+    onGenerate(build.ok.scene, build.ok.portIndices, build.ok.dLMeters, cValid ? cNum : undefined, bundle);
     onClose();
   };
 
@@ -250,17 +274,33 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
                     </label>
                   ))}
                 </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className={labelCls}>Conductor thickness (µm)</label>
+                    <input className={fieldCls} value={q3dThk}
+                      placeholder={condThkResolved > 0 ? `h_cond = ${condThkResolved}` : 'required (h_cond = 0)'}
+                      onChange={(e) => setQ3dThk(e.target.value)} />
+                  </div>
+                  <div className="space-y-1">
+                    <label className={labelCls}>Line physical length (µm)</label>
+                    <input className={fieldCls} value={q3dLen} placeholder="auto (geometry) — set unfolded length"
+                      onChange={(e) => setQ3dLen(e.target.value)} />
+                  </div>
+                </div>
+                {q3dPick.size > 0 && !thkValid && (
+                  <p className="text-[11px] text-amber-400">Set a conductor thickness (µm) — it's a thin conductor of this height ({condThkResolved > 0 ? 'defaults to h_cond' : 'h_cond is 0, so required'}).</p>
+                )}
                 <label className="flex items-center gap-2 text-[11px] text-slate-300 cursor-pointer">
-                  <input type="checkbox" checked={bundleQ3D} disabled={q3dPick.size === 0}
+                  <input type="checkbox" checked={bundleQ3D} disabled={q3dPick.size === 0 || !thkValid}
                     onChange={(e) => setBundleQ3D(e.target.checked)} />
                   <span>Bundle the Q3D design into the main 2-line script (one project)</span>
                 </label>
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={() => onGenerateQ3D([...q3dPick])}
-                    disabled={q3dPick.size === 0}
+                    onClick={() => onGenerateQ3D([...q3dPick], q3dOpts())}
+                    disabled={q3dPick.size === 0 || !thkValid}
                     className="px-2.5 py-1 rounded text-[11px] font-medium border border-slate-600 hover:bg-slate-800 text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed"
-                    title="Generate a SEPARATE Q3D Extractor script that builds the selected conductor(s) + dielectric stack and solves the capacitance matrix. Divide the conductor-to-conductor C by the line's physical length → paste C (F/m) above. (Q3D COM differs from HFSS — validate in AEDT.)"
+                    title="Generate a SEPARATE Q3D Extractor script: builds the selected conductor(s) as thin conductors + dielectric stack, assigns nets, runs a capacitance setup + frequency sweep, and reports C per length. Paste the resulting C (F/m) above. (Q3D COM differs from HFSS — validate in AEDT.)"
                   >
                     Separate Q3D script…
                   </button>

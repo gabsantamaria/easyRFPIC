@@ -396,13 +396,15 @@ describe('generateHfssNative options.twoLine — script emits the εeff/α math'
     });
     const pv = resolveParams(scene.params).values;
     const py = generateHfssNative(scene, pv, {
-      twoLine: { portIndices, dLMeters, q3d: { scene: single, conductorIds: ['line'] } },
+      twoLine: { portIndices, dLMeters, q3d: { scene: single, conductorIds: ['line'], thicknessUm: 0.2, freqStartGHz: 1, freqStopGHz: 40, freqPoints: 101 } },
     });
     expect(py).toContain('InsertDesign("HFSS"');            // the 2-line design
     expect(py).toContain('InsertDesign("Q3D Extractor"');   // bundled in same project
     expect(py).toContain('set_var("tl_C_F_per_m"');         // placeholder, Q3D sets it
     expect(py).toContain('tl_Z0_re');                       // Z0 still emitted
-    expect(py).toContain('AutoIdentifyNets');
+    expect(py).toContain('AssignSignalNet');                // explicit nets
+    expect(py).toContain('SweepAlongVector');               // thin conductors
+    expect(py).toContain('InsertSweep');                    // freq sweep
     expect(py).toMatch(/SetActiveDesign\("Layout"\)/);      // leaves HFSS design active
     mkdirSync('tests/out', { recursive: true });
     writeFileSync('tests/out/two_line_q3d.py', py);
@@ -416,18 +418,41 @@ describe('generateHfssNative options.twoLine — script emits the εeff/α math'
 // separate Q3D script for the SELECTED line conductor(s); the user divides
 // conductor-to-conductor C by physical length and feeds it back as cFperM.
 describe('generateQ3DCapacitance — meander C extraction script', () => {
-  it('builds a Q3D design with the selected conductor (instances) + dielectrics; parses as Python', () => {
+  it('builds a Q3D design: thin conductors, nets, sweep, C-per-length; parses as Python', () => {
     const scene = makeLineScene(500);
     const pv = resolveParams(scene.params).values;
-    const q = generateQ3DCapacitance(scene, pv, { conductorIds: ['line'], designName: 'mtl' });
+    const q = generateQ3DCapacitance(scene, pv, {
+      conductorIds: ['line', 'padL'], thicknessUm: 0.2, lengthUm: 500, // 2 conductors → C between nets
+      freqStartGHz: 1, freqStopGHz: 50, freqPoints: 201, designName: 'mtl',
+    });
     expect(q).toContain('InsertDesign("Q3D Extractor"');
-    expect(q).toContain('AutoIdentifyNets');
-    expect(q).toContain('line_i0');           // a conductor instance object
-    expect(q).toMatch(/diel_/);               // dielectric stack boxes
+    expect(q).toContain('line_i0');                 // a conductor instance object
+    expect(q).toMatch(/diel_/);                     // dielectric stack boxes
+    // Thin conductor = swept sheet of the given thickness.
+    expect(q).toContain('SweepAlongVector');
+    expect(q).toContain('"0.2um"');
+    // Explicit signal nets (one per conductor object).
+    expect(q).toContain('AssignSignalNet');
+    expect(q).toContain('net_line_i0');
+    // Capacitance setup + frequency sweep matching the band.
     expect(q).toContain('InsertSetup("Matrix"');
+    expect(q).toContain('InsertSweep');
+    expect(q).toContain('"1GHz"');
+    expect(q).toContain('"50GHz"');
+    // Capacitance-per-length report (÷ physical length in metres).
+    expect(q).toContain('"C per length"');
+    expect(q).toContain('C_per_m');
+    expect(q).toContain('0.0005');                  // 500 µm → 5e-4 m
     mkdirSync('tests/out', { recursive: true });
     writeFileSync('tests/out/q3d_cap.py', q);
     execSync('python3 -c "import ast; ast.parse(open(\'tests/out/q3d_cap.py\').read())"');
+  });
+
+  it('falls back to h_cond for thickness when none supplied', () => {
+    const scene = makeLineScene(500); // default stack h_cond = 0.8
+    const pv = resolveParams(scene.params).values;
+    const q = generateQ3DCapacitance(scene, pv, { conductorIds: ['line'] });
+    expect(q).toContain('"0.8um"'); // swept by h_cond
   });
 
   it('throws when no conductor is selected', () => {
