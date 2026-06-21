@@ -101,6 +101,123 @@ export function findLumpedPortOrder(solved, paramValues) {
   return out;
 }
 
+// --- Replica flattening (wizard-only) --------------------------------------
+// Real single-line designs frequently place their two ports by putting a
+// `repeat` (or `displace`) transform on ONE port component, and likewise build
+// the feed/launch at each end by repeating a boolean. The lumped-port exporter
+// emits one port per port COMPONENT at its base position — it does NOT turn a
+// repeat replica into a second port, and the port-adjacency detector can't see
+// a flanker that exists only as a repeated boolean (its operands live at the
+// base position only). So a "single line with two ports" built via a repeat
+// would yield just ONE detectable port.
+//
+// flattenReplicas materializes every translation replica (repeat/displace) into
+// a distinct STATIC component — and, crucially, replicates a boolean's whole
+// operand cluster so the punch-hole feed exists at each end as real geometry.
+// Cross-cluster references (a punch clone's `cloneOf` pointing at the port in a
+// different cluster) are remapped to the SAME replica index via a global
+// registry, so the detector's clone/sameBbox match works at every replica.
+// Rotate transforms are left intact (a warning is emitted) — they're rare on
+// the port path and not needed for the 2-line method.
+
+// Per-instance translation offsets for a repeat/displace transform chain
+// (mirrors expandTransforms' translation behaviour). Returns { offs, hasRot }.
+function translationOffsets(transforms, pv) {
+  let offs = [{ dx: 0, dy: 0 }];
+  let hasRot = false;
+  for (const t of (transforms || [])) {
+    if (t.enabled === false) continue;
+    if (t.kind === 'displace') {
+      const dx = evalExpr(t.dx, pv) || 0, dy = evalExpr(t.dy, pv) || 0;
+      offs = offs.map((o) => ({ dx: o.dx + dx, dy: o.dy + dy }));
+    } else if (t.kind === 'repeat') {
+      const n = Math.max(0, Math.round(evalExpr(t.n, pv) || 0));
+      const dx = evalExpr(t.dx, pv) || 0, dy = evalExpr(t.dy, pv) || 0;
+      const inc = t.includeOriginal !== false;
+      const out = [];
+      for (const o of offs) for (let i = (inc ? 0 : 1); i <= n; i++) out.push({ dx: o.dx + i * dx, dy: o.dy + i * dy });
+      offs = out;
+    } else if (t.kind === 'rotate') {
+      hasRot = true;
+    }
+  }
+  return { offs, hasRot };
+}
+
+// A boolean's consumed operand subtree (the cluster that moves together).
+function clusterOf(c, byId, acc = []) {
+  if (acc.some((m) => m.id === c.id)) return acc;
+  acc.push(c);
+  if (Array.isArray(c.operandIds)) for (const oid of c.operandIds) { const o = byId[oid]; if (o) clusterOf(o, byId, acc); }
+  return acc;
+}
+
+// Flatten translation replicas of every top-level component (and its boolean
+// cluster) into distinct static components. `components` should be SOLVED
+// (resolved cx/cy) so baked positions account for any snap chain. Returns
+// { components, warnings }.
+function flattenReplicas(components, pv) {
+  const byId = Object.fromEntries(components.map((c) => [c.id, c]));
+  const tops = components.filter((c) => !c.consumedBy); // operands ride their boolean
+  const info = [];
+  const idK = {}; // id -> number of instances (for cross-cluster index match)
+  for (const c of tops) {
+    const { offs, hasRot } = translationOffsets(c.transforms, pv);
+    const members = clusterOf(c, byId);
+    const useOffs = hasRot ? [{ dx: 0, dy: 0 }] : offs;
+    info.push({ root: c, members, offs: useOffs, hasRot });
+    for (const m of members) idK[m.id] = useOffs.length;
+  }
+  const newId = (id, k) => (k > 0 && idK[id] !== undefined ? `${id}__r${k}` : id);
+  // Remap an id reference to the SAME replica index (falls back to base if the
+  // referenced component has fewer replicas than k).
+  const remapRef = (id, k) => {
+    if (idK[id] === undefined) return id;
+    return newId(id, k < idK[id] ? k : 0);
+  };
+  const out = [];
+  const warnings = [];
+  for (const { root, members, offs, hasRot } of info) {
+    if (hasRot && offs.length >= 1 && (root.transforms || []).some((t) => t.kind !== 'rotate' && t.enabled !== false)) {
+      warnings.push(`${root.id}: has a rotate transform — its replicas were not auto-expanded for port detection.`);
+    } else if (hasRot) {
+      warnings.push(`${root.id}: rotate transform left intact (not auto-expanded).`);
+    }
+    offs.forEach((o, k) => {
+      for (const m of members) {
+        out.push({
+          ...m,
+          id: newId(m.id, k),
+          cx: (Number.isFinite(m.cx) ? m.cx : 0) + o.dx,
+          cy: (Number.isFinite(m.cy) ? m.cy : 0) + o.dy,
+          transforms: hasRot ? m.transforms : [],
+          consumedBy: m.consumedBy ? remapRef(m.consumedBy, k) : m.consumedBy,
+          cloneOf: m.cloneOf ? remapRef(m.cloneOf, k) : m.cloneOf,
+          operandIds: Array.isArray(m.operandIds) ? m.operandIds.map((id) => remapRef(id, k)) : m.operandIds,
+        });
+      }
+    });
+  }
+  return { components: out, warnings };
+}
+
+// Auto-enable a lumped port on every port-layer rect that the adjacency
+// detector flanks (preserving any user-set impedance). Returns a new component
+// list. Designers draw on the `port` layer to declare a port; the separate
+// "enable lumped port" flag is easy to miss, so the wizard infers it.
+function autoEnableFlankedPorts(components, snaps, pv) {
+  const solved = solveLayout(components, snaps, pv);
+  const dir = {};
+  for (const c of solved) {
+    if (c.layer !== 'port' || c.kind !== 'rect') continue;
+    const det = detectPortIntegrationLine(c, solved, pv);
+    if (det.direction) dir[c.id] = true;
+  }
+  return components.map((c) => (c.layer === 'port' && c.kind === 'rect' && dir[c.id])
+    ? { ...c, lumpedPort: { enabled: true, impedance: (c.lumpedPort && c.lumpedPort.impedance) || '50' } }
+    : c);
+}
+
 // Build the combined two-line scene + verified port map.
 // cfg: {
 //   lengthParam,        // scene param that controls the line length
@@ -158,17 +275,32 @@ export function buildTwoLineScene(scene, cfg) {
   if (cfg.freqPoints != null) sim.sweepPoints = String(cfg.freqPoints);
   combined.simSetup = sim;
 
-  const out = normalizeScene(combined);
+  let out = normalizeScene(combined);
+
+  // Materialize translation replicas (repeat/displace) into static geometry so
+  // ports built via a repeat — and the boolean feeds that flank them — become
+  // distinct, detectable components; then auto-enable every flanked port-layer
+  // rect. Solve FIRST so baked positions account for the snap chain. Geometry
+  // POSITIONS bake numeric (the 2-line method uses two FIXED lengths, so this
+  // is exact); line-size expressions and the tl_L1/tl_L2/tl_dL params stay live
+  // for the in-HFSS Δl math.
+  const pv = resolveParams(out.params || {}).values;
+  const preSolved = solveLayout(out.components, out.snaps, pv);
+  const { components: flatComps, warnings: flatWarn } = flattenReplicas(preSolved, pv);
+  warnings.push(...flatWarn);
+  const enabledComps = autoEnableFlankedPorts(flatComps, [], pv);
+  out = normalizeScene({ ...out, components: enabledComps, snaps: [], groups: [], mirrors: [] });
 
   // Verify the 4-port contract before trusting the S-indices.
-  const pv = resolveParams(out.params || {}).values;
   const solved = solveLayout(out.components, out.snaps, pv);
   const ports = findLumpedPortOrder(solved, pv);
   if (ports.length !== 4) {
+    const portRects = out.components.filter((c) => c.layer === 'port' && c.kind === 'rect').length;
+    const hint = portRects === 0
+      ? 'No port-layer rectangles were found. Draw a port at each end of the line (a rect on the "port" layer flanked by the conductor/electrode).'
+      : `Found ${portRects} port-layer rect(s), but only ${ports.length} resolved to a valid lumped port. Each port must sit between two electrodes (or in a punched gap) so an integration line can be drawn across it.`;
     throw new Error(
-      `Expected exactly 4 lumped ports (2 per line) but found ${ports.length}. ` +
-      'Each line end needs a port-layer rectangle with its lumped port enabled and a valid integration line. ' +
-      'Fix the single-line design (enable both ports) and try again.'
+      `Expected exactly 4 lumped ports (2 per line) but found ${ports.length}. ${hint}`
     );
   }
   const inst = (c) => c.cellInstance && c.cellInstance.inst;

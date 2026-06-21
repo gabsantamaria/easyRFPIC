@@ -269,6 +269,22 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
     grouped (A,A,B,B) in solved order, all equal reference impedance — else
     throws a user-facing Error. Returns `{ scene, portIndices:{a1,a2,b1,b2},
     portNames, warnings }`.
+    - **Replica flattening + port auto-enable (wizard-only)**: real single-line
+      designs place their two ports by REPEATING one port component (and the
+      boolean feed that flanks it), and often leave the lumped-port flag off.
+      The exporter emits one port per port COMPONENT at its base, and the
+      adjacency detector can't see a flanker that exists only as a repeated
+      boolean — so a repeat-built "line with two ports" would yield ONE
+      detectable port. So buildTwoLineScene SOLVES the combined scene, then
+      `flattenReplicas` materializes every translation replica (repeat/displace)
+      — including a boolean's whole operand cluster — into distinct STATIC
+      components, remapping cross-cluster refs (a punch clone's `cloneOf`
+      pointing at the port) to the SAME replica index via a global registry;
+      then `autoEnableFlankedPorts` enables a lumped port on every port-layer
+      rect the detector flanks. Geometry POSITIONS bake numeric (the method uses
+      two FIXED lengths — exact); line-size exprs + `tl_L1/tl_L2/tl_dL` stay
+      live for the in-HFSS Δl. Rotate transforms are left intact + warned (rare
+      on the port path). The shared exporter/detector are UNTOUCHED.
   - `twoLineOutputVariables(pi, dLVar='tl_dL')` — the ORDERED list of HFSS Output
     Variables (dependency order; each `{name, expr, note}`) implementing the
     extraction: per-line wave-cascade T from its 2-port S-block (T11=−detS/S21,
@@ -427,8 +443,10 @@ npx vitest run
 #                                       parametricity, update-from-master, workspace storage round-trip
 #   tests/two-line.test.js            — 2-line method (Marks 1991): twoLineExtractNumeric recovers
 #                                       γ/α/εeff from synthetic lines; buildTwoLineScene 4-port (A,A,B,B)
-#                                       ordering + parametric L1/L2 + error gates; generateHfssNative
-#                                       options.twoLine emits output vars + reports + parses as Python
+#                                       ordering + parametric L1/L2 + error gates; replica flattening +
+#                                       port auto-enable (repeat-replica + punch-cluster cross-cloneOf);
+#                                       generateHfssNative options.twoLine emits output vars + reports
+#                                       + parses as Python
 #   tests/canvas-perf-helpers.test.js — uniform-grid spatial index + anchor-snap / alt-drag index
 #                                       EQUIVALENCE vs the old full-scan oracles (probe sweeps +
 #                                       seeded fuzz), boolean-operand cells, tie-order preservation

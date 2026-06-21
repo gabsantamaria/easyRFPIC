@@ -185,6 +185,76 @@ describe('buildTwoLineScene — 4-port two-line design', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Real single-line designs place their two ports by REPEATING one port
+// component (and the feed that flanks it), and often leave the lumped-port flag
+// off. The wizard must materialize the replicas into distinct ports and
+// auto-enable flanked port rects. Two structures exercised:
+//   (1) repeat-replica ports flanked by repeated plain electrodes;
+//   (2) a port sitting in a PUNCH gap whose feed boolean is itself repeated
+//       (the cross-cluster cloneOf case).
+describe('buildTwoLineScene — auto-handles repeat-replica ports', () => {
+  // (1) port + W/E flankers, all repeated by L; lumped port NOT pre-enabled.
+  function repeatPortScene(L = 200) {
+    const comp = (id, extra) => ({ id, kind: 'rect', cutouts: [], transforms: [], ...extra });
+    const rep = () => [{ id: 'rp', kind: 'repeat', enabled: true, n: '1', dx: 'L', dy: '0', includeOriginal: true }];
+    const components = [
+      comp('p', { layer: 'port', cx: 0, cy: 0, w: '4', h: '4', transforms: rep() }),
+      comp('wE', { layer: 'electrode', cx: -7, cy: 0, w: '10', h: '4', transforms: rep() }),
+      comp('eE', { layer: 'electrode', cx: 7, cy: 0, w: '10', h: '4', transforms: rep() }),
+    ];
+    return normalizeScene({
+      params: { ...paramsForStack(defaults.stack), L: { expr: String(L), unit: 'µm', desc: 'length' } },
+      components, snaps: [], mirrors: [], groups: [], booleans: [],
+      stack: defaults.stack, stackName: defaults.stackName, simSetup: defaults.simSetup,
+    });
+  }
+
+  it('expands repeat replicas + auto-enables → 4 ports grouped A,A,B,B', () => {
+    const { scene, portIndices } = buildTwoLineScene(repeatPortScene(200), {
+      lengthParam: 'L', l1: 200, l2: 600, freqStart: 1, freqStop: 40, freqPoints: 101,
+    });
+    expect(portIndices).toEqual({ a1: 1, a2: 2, b1: 3, b2: 4 });
+    const ports = scene.components.filter((c) => c.layer === 'port' && c.lumpedPort && c.lumpedPort.enabled);
+    expect(ports).toHaveLength(4);
+    const insts = ports.map((c) => c.cellInstance && c.cellInstance.inst);
+    expect(insts.filter((i) => i === 'lineA')).toHaveLength(2);
+    expect(insts.filter((i) => i === 'lineB')).toHaveLength(2);
+    const pv = resolveParams(scene.params).values;
+    const py = generateHfssNative(scene, pv, { twoLine: { portIndices } });
+    expect((py.match(/AssignLumpedPort/g) || []).length).toBe(4);
+  });
+
+  // (2) the user's structure: port in a punched gap, feed boolean repeated.
+  function punchPortScene(L = 200) {
+    const comp = (id, extra) => ({ id, kind: 'rect', cutouts: [], transforms: [], ...extra });
+    const rep = (id) => [{ id, kind: 'repeat', enabled: true, n: '1', dx: 'L', dy: '0', includeOriginal: true }];
+    const components = [
+      comp('bar', { layer: 'electrode', cx: 0, cy: 0, w: '8', h: '40', consumedBy: 'pn' }),
+      comp('toolClone', { layer: 'electrode', cx: 0, cy: 0, w: '8', h: '8', consumedBy: 'pn', cloneOf: 'prt' }),
+      comp('prt', { layer: 'port', cx: 0, cy: 0, w: '8', h: '8', transforms: rep('rp1') }),
+      { id: 'pn', kind: 'boolean', op: 'punch', operandIds: ['bar', 'toolClone'], layer: 'electrode',
+        cx: 0, cy: 0, w: '0', h: '0', cutouts: [], label: '', transforms: rep('rp2') },
+    ];
+    return normalizeScene({
+      params: { ...paramsForStack(defaults.stack), L: { expr: String(L), unit: 'µm', desc: 'length' } },
+      components, snaps: [], mirrors: [], groups: [], booleans: [],
+      stack: defaults.stack, stackName: defaults.stackName, simSetup: defaults.simSetup,
+    });
+  }
+
+  it('punch-gap port with a repeated feed boolean → 4 ports (cross-cluster cloneOf)', () => {
+    const { scene, portIndices } = buildTwoLineScene(punchPortScene(200), {
+      lengthParam: 'L', l1: 200, l2: 600, freqStart: 1, freqStop: 40, freqPoints: 101,
+    });
+    const ports = scene.components.filter((c) => c.layer === 'port' && c.lumpedPort && c.lumpedPort.enabled);
+    expect(ports).toHaveLength(4);
+    const pv = resolveParams(scene.params).values;
+    const py = generateHfssNative(scene, pv, { twoLine: { portIndices } });
+    expect((py.match(/AssignLumpedPort/g) || []).length).toBe(4);
+  });
+});
+
+// ---------------------------------------------------------------------------
 describe('generateHfssNative options.twoLine — script emits the εeff/α math', () => {
   it('parses as Python and contains the output variables + reports', () => {
     const { scene, portIndices } = buildTwoLineScene(makeLineScene(500), {
