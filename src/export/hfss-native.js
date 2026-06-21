@@ -4520,17 +4520,32 @@ except Exception as e:
     // propagation constant γ from the two lines' S-parameters, then εeff and α.
     // Solution context is Setup1:Sweep (a Discrete sweep, forced by the wizard).
     if (options && options.twoLine && options.twoLine.portIndices) {
-      const tlVars = twoLineOutputVariables(options.twoLine.portIndices, options.twoLine.dLMeters);
+      const tlCforM = options.twoLine.cFperM;
+      const tlHasZ0 = Number.isFinite(tlCforM) && tlCforM > 0;
+      const tlVars = twoLineOutputVariables(options.twoLine.portIndices, options.twoLine.dLMeters, tlCforM);
       const tlLines = tlVars.map(v =>
         `_tl_outvar(${JSON.stringify(v.name)}, ${JSON.stringify(v.expr)})  # ${ascii(v.note || '')}`
       ).join('\n');
+      // Optional Z0 report when a per-length C was supplied.
+      const tlZ0Report = tlHasZ0 ? `
+try:
+    oModule.CreateReport("Z0 vs Freq", "Modal Solution Data", "Rectangular Plot", "Setup1 : Sweep",
+        ["Domain:=", "Sweep"], ["Freq:=", ["All"]],
+        ["X Component:=", "Freq", "Y Component:=", ["tl_Z0_re", "tl_Z0_mag"]], [])
+except Exception as e:
+    oDesktop.AddMessage("", "", 1, "CreateReport Z0 failed: " + str(e))
+` : '';
       code += `
 # ===== 2-line method (Marks 1991): eeff / alpha output variables + reports =====
 # Effective permittivity (tl_eeff) and attenuation (tl_alpha_dB_per_m / _Np_per_m)
 # are extracted IN HFSS from the two lines' S-parameters: build each line's
 # wave-cascade T from its 2-port S-block, M = T_B * T_A^-1, eigenvalue
 # lambda = e^∓(gamma*DeltaL), gamma = -ln(lambda)/DeltaL; eeff = (c/w)^2*(beta^2 - alpha^2),
-# alpha = |Re gamma|. Line A = ports 1,2; line B = ports 3,4. DeltaL = tl_dL (um).
+# alpha = |Re gamma|. Line A = ports 1,2; line B = ports 3,4. DeltaL is a baked
+# metres literal (NOT the tl_dL design var, which resolves to metres in report
+# exprs and would double-convert).${tlHasZ0 ? `
+# Z0 = gamma/(j*w*C) is ALSO emitted (per-length C supplied): Re(Z0)=beta/(wC),
+# Im(Z0)=-alpha/(wC). C is electrostatic so Z0 is kinetic-inductance-correct.` : ''}
 # Assumes the report expression engine evaluates Freq in Hz (HFSS 2023). After
 # you Analyze Setup1:Sweep, the reports below populate. PHASE-AMBIGUITY: valid
 # only while beta*DeltaL < pi over the band (pick L2-L1 small enough); alpha is
@@ -4556,7 +4571,7 @@ try:
         ["X Component:=", "Freq", "Y Component:=", ["tl_alpha_dB_per_m"]], [])
 except Exception as e:
     oDesktop.AddMessage("", "", 1, "CreateReport alpha failed: " + str(e))
-
+${tlZ0Report}
 # --- OPTIONAL post-solve fallback (guaranteed math in pure Python) ----------
 # If the eeff/alpha report traces come up empty (an older expression engine that
 # rejects complex ln/sqrt), SOLVE the design first, then uncomment the call at

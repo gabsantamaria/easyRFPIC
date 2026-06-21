@@ -27,7 +27,7 @@ export function TwoLineWizard(props) {
   return <TwoLineWizardInner {...props} />;
 }
 
-function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate }) {
+function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerateQ3D }) {
   // Candidate length params: everything the user authored, minus the synthetic
   // per-component position/size params (_comp_*). Sorted for stable display.
   const paramNames = useMemo(() => Object.keys(scene.params || {})
@@ -51,6 +51,20 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate }) {
   const [freqStart, setFreqStart] = useState(() => (prefs && prefs.freqStart ? prefs.freqStart : String(sim.sweepStart ?? '1')));
   const [freqStop, setFreqStop] = useState(() => (prefs && prefs.freqStop ? prefs.freqStop : String(sim.sweepStop ?? '40')));
   const [freqPoints, setFreqPoints] = useState(() => (prefs && prefs.freqPoints ? prefs.freqPoints : String(sim.sweepPoints ?? '201')));
+  // Optional per-length capacitance C (F/m) → enables Z0 = γ/(jωC) output.
+  // Get it from a Q3D capacitance ÷ physical length (button below).
+  const [cFperM, setCFperM] = useState(() => (prefs && prefs.cFperM ? prefs.cFperM : ''));
+
+  // Conductor components selectable for the Q3D capacitance run (exclude
+  // booleans/feeds; the user picks the LINE conductor).
+  const conductorComps = useMemo(() => (scene.components || [])
+    .filter((c) => c.layer === 'electrode' && c.kind !== 'boolean'), [scene]);
+  const [q3dPick, setQ3dPick] = useState(() => new Set());
+  const toggleQ3dPick = (id) => setQ3dPick((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
 
   // When the user CHANGES the length param, re-seed L1/L2 from its current
   // value. Detect a REAL change against the previous value (a ref) rather than
@@ -104,11 +118,14 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate }) {
     return { dL_um, eeffMax, risky: eeffMax < 5 };
   }, [l1, l2, freqStop]);
 
+  const cNum = cFperM.trim() === '' ? null : Number(cFperM);
+  const cValid = cNum != null && Number.isFinite(cNum) && cNum > 0;
+
   const generate = () => {
     if (!build.ok) return;
     // Remember these field values for next time (last-used = last generated).
-    saveTwoLinePrefs({ lengthParam, l1, l2, separation, freqStart, freqStop, freqPoints });
-    onGenerate(build.ok.scene, build.ok.portIndices, build.ok.dLMeters);
+    saveTwoLinePrefs({ lengthParam, l1, l2, separation, freqStart, freqStop, freqPoints, cFperM });
+    onGenerate(build.ok.scene, build.ok.portIndices, build.ok.dLMeters, cValid ? cNum : undefined);
     onClose();
   };
 
@@ -189,6 +206,56 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate }) {
               <label className={labelCls}>points</label>
               <input className={fieldCls} value={freqPoints} onChange={(e) => setFreqPoints(e.target.value)} />
             </div>
+          </div>
+
+          {/* Characteristic impedance Z0 (optional) */}
+          <div className="rounded border border-slate-800 px-3 py-2 space-y-2" style={{ background: 'rgba(30,41,59,0.5)' }}>
+            <p className="text-[10px] uppercase tracking-wider text-slate-500">Characteristic impedance Z₀ (optional)</p>
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              The 2-line method gives γ (→ εeff, α) only — Z₀ needs the per-length capacitance.
+              Enter <span className="font-mono">C</span> in F/m and the script also emits
+              <span className="font-mono text-slate-300"> Z₀ = γ/(jωC)</span> (kinetic-inductance-correct). Get C from a
+              Q3D capacitance ÷ the line's physical length.
+            </p>
+            <div className="space-y-1">
+              <label className={labelCls}>C per length (F/m)</label>
+              <input className={fieldCls} value={cFperM} placeholder="e.g. 1.6e-10 (leave blank to skip Z₀)" onChange={(e) => setCFperM(e.target.value)} />
+            </div>
+            {cFperM.trim() !== '' && !cValid && (
+              <p className="text-[11px] text-red-400">C must be a positive number in F/m (e.g. 1.6e-10).</p>
+            )}
+            {cValid && (
+              <p className="text-[11px] text-emerald-400">Z₀ output variables + report will be included.</p>
+            )}
+
+            {/* Q3D capacitance helper: pick the line conductor(s) → generate Q3D script */}
+            {onGenerateQ3D && (
+              <div className="pt-1 border-t border-slate-800 space-y-1.5">
+                <p className="text-[11px] text-slate-400">
+                  Don't have C yet? Pick the <span className="text-slate-200">line conductor(s)</span> (not the feeds) and
+                  generate a Q3D script to solve it:
+                </p>
+                <div className="max-h-24 overflow-y-auto rounded border border-slate-800 bg-slate-900/40 px-2 py-1 space-y-0.5">
+                  {conductorComps.length === 0 ? (
+                    <p className="text-[11px] text-slate-500">No conductor components found.</p>
+                  ) : conductorComps.map((c) => (
+                    <label key={c.id} className="flex items-center gap-2 text-[11px] text-slate-300 cursor-pointer">
+                      <input type="checkbox" checked={q3dPick.has(c.id)} onChange={() => toggleQ3dPick(c.id)} />
+                      <span className="font-mono">{c.id}</span>
+                      {c.label && c.label !== c.id && <span className="text-slate-500">({c.label})</span>}
+                    </label>
+                  ))}
+                </div>
+                <button
+                  onClick={() => onGenerateQ3D([...q3dPick])}
+                  disabled={q3dPick.size === 0}
+                  className="px-2.5 py-1 rounded text-[11px] font-medium border border-slate-600 hover:bg-slate-800 text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                  title="Generate a separate Q3D Extractor script that builds the selected conductor(s) + dielectric stack and solves the capacitance matrix. Divide the conductor-to-conductor C by the line's physical length → paste C (F/m) above. (Q3D COM differs from HFSS — validate in AEDT.)"
+                >
+                  Generate Q3D capacitance script…
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Phase-ambiguity guidance */}

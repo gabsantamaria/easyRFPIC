@@ -26,6 +26,7 @@ export function loadTwoLinePrefs() {
       freqStart: str(p.freqStart),
       freqStop: str(p.freqStop),
       freqPoints: str(p.freqPoints),
+      cFperM: str(p.cFperM),
     };
   } catch {
     return null;
@@ -43,6 +44,7 @@ export function saveTwoLinePrefs(prefs) {
       freqStart: p.freqStart || '',
       freqStop: p.freqStop || '',
       freqPoints: p.freqPoints || '',
+      cFperM: p.cFperM || '',
     }));
     return true;
   } catch {

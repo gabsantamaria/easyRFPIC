@@ -315,23 +315,47 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
     recover γ/α/εeff from synthetic ideal-line S-parameters.
   - `findLumpedPortOrder(solved, pv)` — replicates the exporter's port filter
     (`hfss-native.js`) over the solved list to discover the port order.
-- **Exporter hook**: `generateHfssNative(scene, pv, { twoLine: { portIndices } })`
-  emits, before `oProject.Save()` (inside the non-append branch), an
-  `OutputVariable` block (`_tl_outvar` helper → `CreateOutputVariable(..,
-  "Setup1 : Sweep", "Modal Solution Data")` per row) + two `ReportSetup`
-  `CreateReport`s ("eeff vs Freq", "alpha vs Freq"), plus a COMMENTED IronPython
-  post-solve CSV fallback (`_tl_extract_csv`) in case an older expr engine
-  rejects complex `ln`/`sqrt`. No `twoLine` option → byte-identical to before.
+- **Z₀ (optional, `cFperM`)**: `twoLineOutputVariables(pi, dLMeters, cFperM)`
+  appends `tl_C_F_per_m` (baked F/m literal) + `tl_Z0_re/_im/_mag` when a
+  per-length capacitance is supplied: `Z0 = γ/(jωC)` ⇒ Re=β/(ωC), Im=−α/(ωC),
+  sign-free like εeff. C is electrostatic ⇒ kinetic-inductance-correct. The
+  2-line method gives γ ONLY (εeff fixes √(LC); Z₀ needs L/C) — so Z₀ requires
+  an independent C. For a MEANDER there's no cross-section, so C comes from a
+  full-3-D Q3D solve (see below).
+- **Exporter hook**: `generateHfssNative(scene, pv, { twoLine: { portIndices,
+  dLMeters, cFperM } })` emits, before `oProject.Save()` (non-append branch), an
+  `OutputVariable` block (`_tl_outvar` → `CreateOutputVariable(.., "Setup1 :
+  Sweep", "Modal Solution Data")`) + `ReportSetup` `CreateReport`s ("eeff vs
+  Freq", "alpha vs Freq", and "Z0 vs Freq" when `cFperM`), plus a COMMENTED
+  IronPython post-solve CSV fallback. No `twoLine` option → byte-identical.
+- **Q3D capacitance (`src/export/q3d.js`, `generateQ3DCapacitance(scene, pv,
+  {conductorIds, designName})`)**: a SEPARATE, self-contained Q3D Extractor
+  script for the meander Z₀ route. Builds ONLY the SELECTED line conductor(s)
+  (each transform instance → its own covered sheet via `shapeInstanceToRing`, at
+  the conductor mid-Z) + the dielectric stack boxes over the footprint, calls
+  `AutoIdentifyNets`, inserts a capacitance setup. Feeds/launches are EXCLUDED
+  on purpose (they bridge the conductors across the port gap → would short the
+  nets electrostatically). The user solves, reads the conductor-to-conductor C,
+  ÷ physical length → pastes C (F/m) back into the wizard. Geometry uses the
+  proven modeler calls; the Q3D-specific COM (AutoIdentifyNets / Matrix setup /
+  ExportMatrixData) is NOT validated in-repo (try/except + messages; expect
+  per-release tweaks). Stack-Z via a local group-aware `computeLayerZ` mirroring
+  `layerZ`.
 - **`src/ui/TwoLineWizard.jsx`** — dialog (mount-on-open wrapper like
   `AiAssistantDialog`): length-param dropdown (user params, live values, sorted,
   `_comp_*` hidden), L1/L2 (re-seeded from the param's current value on
   change), separation (blank = auto), freq band (seeded from `simSetup`). LIVE
   runs `buildTwoLineScene` in a memo — surfaces the port-contract error or a
   green "4 ports verified" + warnings, computes the βΔl phase-ambiguity guidance
-  (`εeff_max = (c/(2·f_max·Δl))²`; amber if < 5), and gates Generate. Wired in
-  `PhotonicLayout.jsx`: `handleExportTwoLine(builtScene, portIndices)` generates
-  the script from the BUILT scene (not the canvas scene) → preview/download as
-  `<base>_2line_hfss.py`. **Last-used field values persist** in `localStorage`
+  (`εeff_max = (c/(2·f_max·Δl))²`; amber if < 5), and gates Generate. Also a
+  "Characteristic impedance Z₀ (optional)" block: a C-per-length (F/m) field
+  (→ `cFperM`, enables the Z₀ output vars) + a conductor checkbox picker and a
+  "Generate Q3D capacitance script" button (`onGenerateQ3D(conductorIds)` →
+  `handleExportQ3DCap` → `generateQ3DCapacitance` → `<base>_q3d_cap.py`). Wired in
+  `PhotonicLayout.jsx`: `handleExportTwoLine(builtScene, portIndices, dLMeters,
+  cFperM)` generates the script from the BUILT scene (not the canvas scene) →
+  preview/download as `<base>_2line_hfss.py`. **Last-used field values persist**
+  in `localStorage`
   (`src/ui/twoLineSettings.js`, key `photonic_layout_two_line` — outside
   workspace prefixes, same isolation as the AI key/settings): saved on Generate,
   restored on open. A saved lengthParam absent from the current design falls
@@ -468,8 +492,9 @@ npx vitest run
 #                                       γ/α/εeff from synthetic lines; buildTwoLineScene 4-port (A,A,B,B)
 #                                       ordering + parametric L1/L2 + error gates; replica flattening +
 #                                       port auto-enable (repeat-replica + punch-cluster cross-cloneOf);
-#                                       generateHfssNative options.twoLine emits output vars + reports
-#                                       + parses as Python
+#                                       stack-param preservation (h_cond=0 stays a sheet); Δl/C baked
+#                                       literals; Z0 = γ/(jωC) output vars gated on cFperM;
+#                                       generateQ3DCapacitance meander-C script; options.twoLine parses
 #   tests/canvas-perf-helpers.test.js — uniform-grid spatial index + anchor-snap / alt-drag index
 #                                       EQUIVALENCE vs the old full-scan oracles (probe sweeps +
 #                                       seeded fuzz), boolean-operand cells, tie-order preservation

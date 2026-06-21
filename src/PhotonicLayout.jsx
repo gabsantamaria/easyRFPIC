@@ -12,6 +12,7 @@ import { solveLayout, applyMirrors, resolveBooleanBboxes, validateSnapGraph } fr
 import { generateGDS, viaGdsLayerMap } from './export/gds.js';
 import { generatePyAEDT } from './export/pyaedt.js';
 import { generateHfssNative } from './export/hfss-native.js';
+import { generateQ3DCapacitance } from './export/q3d.js';
 import { generateGdsfactory } from './export/gdsfactory.js';
 import { generateSvgFromElement, generatePdfFromElement } from './export/figure.js';
 import { defaultStack, normalizeScene, makeDefaultScene, makeBlankScene, paramsForStack, migrateStackCoplanarGroups } from './scene/schema.js';
@@ -4999,12 +5000,12 @@ export default function App() {
   // at L1 and L2, 4 lumped ports) + the verified S-index map. Generate the
   // native HFSS script directly from that scene with the εeff/α output-variable
   // block enabled — NOT from the current canvas scene.
-  const handleExportTwoLine = async (builtScene, portIndices, dLMeters) => {
+  const handleExportTwoLine = async (builtScene, portIndices, dLMeters, cFperM) => {
     let content;
     try {
       const normalized = normalizeScene(builtScene);
       const pv = resolveParams(normalized.params || {}).values;
-      content = generateHfssNative(normalized, pv, { twoLine: { portIndices, dLMeters } });
+      content = generateHfssNative(normalized, pv, { twoLine: { portIndices, dLMeters, cFperM } });
     } catch (e) {
       console.error('Two-line generator error:', e);
       await alertDialog('Error generating 2-line script: ' + e.message, 'Export error');
@@ -5012,6 +5013,23 @@ export default function App() {
     }
     if (!content) { await alertDialog('Failed to generate 2-line script.', 'Export error'); return; }
     const filename = `${exportFileBase()}_2line_hfss.py`;
+    const ok = downloadFile(filename, content);
+    setExportPreview({ filename, content, downloaded: ok });
+  };
+  // Q3D capacitance script for the meander Z₀ route: build ONLY the selected
+  // line conductor(s) + dielectric stack, solve C; the user divides by physical
+  // length and pastes C into the wizard.
+  const handleExportQ3DCap = async (conductorIds) => {
+    let content;
+    try {
+      content = generateQ3DCapacitance(normalizeScene(scene), paramValues, { conductorIds, designName: designFileBase() });
+    } catch (e) {
+      console.error('Q3D generator error:', e);
+      await alertDialog('Error generating Q3D script: ' + e.message, 'Export error');
+      return;
+    }
+    if (!content) { await alertDialog('Failed to generate Q3D script.', 'Export error'); return; }
+    const filename = `${exportFileBase()}_q3d_cap.py`;
     const ok = downloadFile(filename, content);
     setExportPreview({ filename, content, downloaded: ok });
   };
@@ -8211,6 +8229,7 @@ export default function App() {
         scene={scene}
         paramValues={paramValues}
         onGenerate={handleExportTwoLine}
+        onGenerateQ3D={handleExportQ3DCap}
       />
 
       {/* Modal dialog (confirm/prompt/alert) */}

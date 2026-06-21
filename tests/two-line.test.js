@@ -15,6 +15,7 @@ import {
   TL_L1, TL_L2, TL_DL,
 } from '../src/scene/twoLine.js';
 import { generateHfssNative } from '../src/export/hfss-native.js';
+import { generateQ3DCapacitance } from '../src/export/q3d.js';
 import { makeDefaultScene, normalizeScene, paramsForStack } from '../src/scene/schema.js';
 import { resolveParams, evalExpr } from '../src/scene/params.js';
 import { solveLayout } from '../src/scene/solver.js';
@@ -115,6 +116,17 @@ describe('twoLineOutputVariables — εeff/α expression list', () => {
     expect(byName.tl_DeltaL_m).toBe('0.0006');
     expect(byName.tl_DeltaL_m).not.toMatch(/tl_dL/);
     expect(byName.tl_DeltaL_m).not.toMatch(/e-/i); // plain decimal, no exponent
+  });
+
+  it('appends Z₀ = γ/(jωC) rows only when a per-length C is supplied', () => {
+    const noC = twoLineOutputVariables({ a1: 1, a2: 2, b1: 3, b2: 4 });
+    expect(noC.some((v) => v.name === 'tl_Z0_re')).toBe(false);
+    const withC = twoLineOutputVariables({ a1: 1, a2: 2, b1: 3, b2: 4 }, 6e-4, 1.6e-10);
+    const m = Object.fromEntries(withC.map((v) => [v.name, v.expr]));
+    expect(m.tl_C_F_per_m).toBe('0.00000000016'); // 1.6e-10 baked literal
+    expect(m.tl_Z0_re).toBe('tl_gim/(tl_TwoPiF*tl_C_F_per_m)'); // Re Z0 = β/(ωC)
+    expect(m.tl_Z0_im).toBe('-tl_gre/(tl_TwoPiF*tl_C_F_per_m)'); // Im Z0 = -α/(ωC)
+    expect(m.tl_Z0_mag).toContain('sqrt(tl_gre*tl_gre+tl_gim*tl_gim)');
   });
 
   it('is in dependency order (every referenced output var is defined earlier)', () => {
@@ -360,5 +372,45 @@ describe('generateHfssNative options.twoLine — script emits the εeff/α math'
     const py = generateHfssNative(scene, pv);
     expect(py).not.toContain('CreateOutputVariable');
     expect(py).not.toContain('tl_eeff');
+  });
+
+  it('with cFperM, emits the Z₀ output vars + Z0 report; without, none', () => {
+    const { scene, portIndices, dLMeters } = buildTwoLineScene(makeLineScene(500), {
+      lengthParam: 'Lc', l1: 300, l2: 900,
+    });
+    const pv = resolveParams(scene.params).values;
+    const withC = generateHfssNative(scene, pv, { twoLine: { portIndices, dLMeters, cFperM: 1.6e-10 } });
+    expect(withC).toContain('tl_Z0_re');
+    expect(withC).toContain('"tl_C_F_per_m", "0.00000000016"');
+    expect(withC).toContain('"Z0 vs Freq"');
+    const noC = generateHfssNative(scene, pv, { twoLine: { portIndices, dLMeters } });
+    expect(noC).not.toContain('tl_Z0_re');
+    expect(noC).not.toContain('"Z0 vs Freq"');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Meander Z₀ route: per-length C comes from a full-3-D Q3D solve of the line
+// conductors (no uniform cross-section exists for a meander). The wizard emits a
+// separate Q3D script for the SELECTED line conductor(s); the user divides
+// conductor-to-conductor C by physical length and feeds it back as cFperM.
+describe('generateQ3DCapacitance — meander C extraction script', () => {
+  it('builds a Q3D design with the selected conductor (instances) + dielectrics; parses as Python', () => {
+    const scene = makeLineScene(500);
+    const pv = resolveParams(scene.params).values;
+    const q = generateQ3DCapacitance(scene, pv, { conductorIds: ['line'], designName: 'mtl' });
+    expect(q).toContain('InsertDesign("Q3D Extractor"');
+    expect(q).toContain('AutoIdentifyNets');
+    expect(q).toContain('line_i0');           // a conductor instance object
+    expect(q).toMatch(/diel_/);               // dielectric stack boxes
+    expect(q).toContain('InsertSetup("Matrix"');
+    mkdirSync('tests/out', { recursive: true });
+    writeFileSync('tests/out/q3d_cap.py', q);
+    execSync('python3 -c "import ast; ast.parse(open(\'tests/out/q3d_cap.py\').read())"');
+  });
+
+  it('throws when no conductor is selected', () => {
+    expect(() => generateQ3DCapacitance(makeLineScene(500), resolveParams(makeLineScene(500).params).values, { conductorIds: [] }))
+      .toThrow(/at least one line conductor/i);
   });
 });

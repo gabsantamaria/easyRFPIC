@@ -56,10 +56,15 @@ function plainDecimal(x) {
 //   expression, so `tl_dL*1e-6` double-converts and inflates εeff by ~1e12 and
 //   α by ~1e6. A literal removes that unit ambiguity entirely (the 2-line method
 //   uses two FIXED lengths, so a literal is exact).
-export function twoLineOutputVariables(pi, dLMeters) {
+//   cFperM (optional) = per-length capacitance C in F/m (Q3D ÷ physical length,
+//   quasi-TEM / freq-flat). When > 0, appends the characteristic impedance
+//   Z0 = γ/(jωC): Re(Z0)=β/(ωC), Im(Z0)=−α/(ωC), |Z0|=|γ|/(ωC). Sign-free, like
+//   εeff. C is electrostatic ⇒ unaffected by kinetic inductance, so Z0 comes out
+//   kinetic-inductance-correct (γ carries L_kin). Baked as a literal too.
+export function twoLineOutputVariables(pi, dLMeters, cFperM) {
   const { a1, a2, b1, b2 } = pi;
   const S = (i, j) => `S(${i},${j})`;
-  return [
+  const rows = [
     { name: 'tl_DeltaL_m', expr: plainDecimal(dLMeters), note: 'Δl in metres (baked literal L2−L1)' },
     { name: 'tl_TwoPiF', expr: '2*pi*Freq', note: 'angular frequency ω (Freq is HFSS Hz)' },
     { name: 'tl_cc', expr: '2.99792458e8', note: 'speed of light, m/s' },
@@ -99,6 +104,18 @@ export function twoLineOutputVariables(pi, dLMeters) {
     { name: 'tl_alpha_dB_per_m', expr: '8.685889638*abs(tl_gre)', note: 'attenuation α (dB/m)' },
     { name: 'tl_eeff', expr: '(tl_cc/tl_TwoPiF)*(tl_cc/tl_TwoPiF)*(tl_gim*tl_gim-tl_gre*tl_gre)', note: 'effective permittivity εeff = (c/ω)²(β²−α²) = Re[-(γc/ω)²]' },
   ];
+  // Characteristic impedance Z0 = γ/(jωC), appended only when a per-length C is
+  // supplied (e.g. from a Q3D capacitance ÷ physical length). C is a baked
+  // literal in F/m; the impedance pieces are sign-free like εeff.
+  if (Number.isFinite(cFperM) && cFperM > 0) {
+    rows.push(
+      { name: 'tl_C_F_per_m', expr: plainDecimal(cFperM), note: 'per-length capacitance C (F/m) — Q3D ÷ physical length (quasi-TEM, freq-flat)' },
+      { name: 'tl_Z0_re', expr: 'tl_gim/(tl_TwoPiF*tl_C_F_per_m)', note: 'Re Z0 = β/(ωC)  [Z0 = γ/(jωC)]' },
+      { name: 'tl_Z0_im', expr: '-tl_gre/(tl_TwoPiF*tl_C_F_per_m)', note: 'Im Z0 = -α/(ωC)' },
+      { name: 'tl_Z0_mag', expr: 'sqrt(tl_gre*tl_gre+tl_gim*tl_gim)/(tl_TwoPiF*tl_C_F_per_m)', note: '|Z0| = |γ|/(ωC)' },
+    );
+  }
+  return rows;
 }
 
 // Replicate the exporter's lumped-port filter (hfss-native.js:4291-4297) over a
