@@ -269,6 +269,14 @@ export function buildTwoLineScene(scene, cfg) {
   const combined = {
     ...src,
     params: {
+      // PRESERVE the original design's params FIRST — especially the stack
+      // thickness params (h_cond, h_wg, h_si, …) that no component expression
+      // references, so the cell closure (instA/instB.params) does NOT carry
+      // them. Without this they'd be dropped and normalizeScene would re-inject
+      // STACK DEFAULTS (e.g. h_cond=0.8), silently overriding a design's
+      // h_cond=0 — which both shows the wrong thickness AND skips the
+      // zero-thickness conductor → 2-D impedance-sheet path.
+      ...src.params,
       [TL_L1]: { expr: numExpr(cfg.l1), unit: 'µm', desc: '2-line method: short line length' },
       [TL_L2]: { expr: numExpr(cfg.l2), unit: 'µm', desc: '2-line method: long line length' },
       [TL_DL]: { expr: `${TL_L2} - ${TL_L1}`, unit: 'µm', desc: '2-line method: Δl = L2 − L1' },

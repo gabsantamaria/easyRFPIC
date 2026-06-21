@@ -269,6 +269,15 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
     grouped (A,A,B,B) in solved order, all equal reference impedance — else
     throws a user-facing Error. Returns `{ scene, portIndices:{a1,a2,b1,b2},
     portNames, warnings }`.
+    - **Preserves the design's params** (`...src.params` FIRST in the combined
+      params): the cell closure only captures params referenced by component
+      EXPRESSIONS, so stack thickness params (h_cond, h_wg, …) that nothing
+      references aren't in instA/instB.params. Dropping them let normalizeScene
+      re-inject STACK DEFAULTS — silently turning a design's `h_cond=0` into
+      `0.8`, which both showed the wrong thickness AND skipped the
+      zero-thickness conductor → 2-D impedance-sheet path (the `PEC_sheets`
+      near-PEC boundary, R=0.001). Always merge `src.params` under the tl_/cell
+      params.
     - **Replica flattening + port auto-enable (wizard-only)**: real single-line
       designs place their two ports by REPEATING one port component (and the
       boolean feed that flanks it), and often leave the lumped-port flag off.

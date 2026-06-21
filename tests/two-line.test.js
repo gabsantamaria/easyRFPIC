@@ -288,6 +288,40 @@ describe('buildTwoLineScene — auto-handles repeat-replica ports', () => {
 });
 
 // ---------------------------------------------------------------------------
+// The cell closure only captures params referenced by component EXPRESSIONS, so
+// stack thickness params (h_cond, h_wg, …) that nothing references would be
+// dropped — and normalizeScene would then re-inject STACK DEFAULTS, silently
+// overriding a design's h_cond=0 with 0.8. That both shows the wrong thickness
+// AND skips the zero-thickness conductor → 2-D impedance-sheet path.
+describe('buildTwoLineScene — preserves the design stack params', () => {
+  it('keeps h_cond=0 (not the stack default) → conductor stays a 2-D impedance sheet', () => {
+    const base = makeLineScene(500);
+    const scene = normalizeScene({
+      ...base,
+      params: { ...base.params, h_cond: { expr: '0', unit: 'µm', desc: 'conductor thickness' } },
+    });
+    const { scene: built, portIndices, dLMeters } = buildTwoLineScene(scene, {
+      lengthParam: 'Lc', l1: 300, l2: 900,
+    });
+    const pv = resolveParams(built.params).values;
+    expect(pv.h_cond).toBe(0); // NOT re-defaulted to 0.8
+    const py = generateHfssNative(built, pv, { twoLine: { portIndices, dLMeters } });
+    expect(py).toMatch(/set_var\("h_cond", "0(\.0)?um"\)/); // zero, not 0.8um
+    expect(py).toContain('PEC_sheets'); // zero-thickness sheet impedance boundary
+  });
+
+  it('keeps a non-default stack value (h_wg) instead of the stack default', () => {
+    const base = makeLineScene(500);
+    const scene = normalizeScene({
+      ...base,
+      params: { ...base.params, h_wg: { expr: '0.7363', unit: 'µm', desc: 'wg height' } },
+    });
+    const { scene: built } = buildTwoLineScene(scene, { lengthParam: 'Lc', l1: 300, l2: 900 });
+    expect(resolveParams(built.params).values.h_wg).toBeCloseTo(0.7363, 6);
+  });
+});
+
+// ---------------------------------------------------------------------------
 describe('generateHfssNative options.twoLine — script emits the εeff/α math', () => {
   it('parses as Python and contains the output variables + reports', () => {
     const { scene, portIndices, dLMeters } = buildTwoLineScene(makeLineScene(500), {
