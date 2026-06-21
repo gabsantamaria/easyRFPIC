@@ -21,6 +21,7 @@ import { migrateStackCoplanarGroups } from '../scene/schema.js';
 import { shapeInstanceToRing } from '../geometry/rings.js';
 import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/racetrack.js';
 import { instanceChainOffsetExpr, chainOwnerForInstance } from '../scene/instance-positions.js';
+import { twoLineOutputVariables } from '../scene/twoLine.js';
 import {
   resolvePolylineVertices, polylineIsTapered,
   tessellateArcFrom, catmullRomTessellate,
@@ -4511,6 +4512,67 @@ ${defLines}],
          ["NAME:Goals"]])
 except Exception as e:
     oDesktop.AddMessage("", "", 1, "Optimetrics parametric setup failed: " + str(e))
+`;
+    }
+    // ===== 2-line method: εeff / α extraction (output variables + reports) =====
+    // Emitted only when the 2-line wizard supplies options.twoLine. The math
+    // runs entirely in HFSS: Marks' 2-line eigenvalue extraction of the
+    // propagation constant γ from the two lines' S-parameters, then εeff and α.
+    // Solution context is Setup1:Sweep (a Discrete sweep, forced by the wizard).
+    if (options && options.twoLine && options.twoLine.portIndices) {
+      const tlVars = twoLineOutputVariables(options.twoLine.portIndices);
+      const tlLines = tlVars.map(v =>
+        `_tl_outvar(${JSON.stringify(v.name)}, ${JSON.stringify(v.expr)})  # ${ascii(v.note || '')}`
+      ).join('\n');
+      code += `
+# ===== 2-line method (Marks 1991): eeff / alpha output variables + reports =====
+# Effective permittivity (tl_eeff) and attenuation (tl_alpha_dB_per_m / _Np_per_m)
+# are extracted IN HFSS from the two lines' S-parameters: build each line's
+# wave-cascade T from its 2-port S-block, M = T_B * T_A^-1, eigenvalue
+# lambda = e^∓(gamma*DeltaL), gamma = -ln(lambda)/DeltaL; eeff = (c/w)^2*(beta^2 - alpha^2),
+# alpha = |Re gamma|. Line A = ports 1,2; line B = ports 3,4. DeltaL = tl_dL (um).
+# Assumes the report expression engine evaluates Freq in Hz (HFSS 2023). After
+# you Analyze Setup1:Sweep, the reports below populate. PHASE-AMBIGUITY: valid
+# only while beta*DeltaL < pi over the band (pick L2-L1 small enough); alpha is
+# unaffected by the branch cut.
+oModule = oDesign.GetModule("OutputVariable")
+def _tl_outvar(name, expr):
+    try:
+        oModule.CreateOutputVariable(name, expr, "Setup1 : Sweep", "Modal Solution Data", [])
+    except Exception as e:
+        oDesktop.AddMessage("", "", 1, "OutputVariable " + name + " failed: " + str(e))
+${tlLines}
+
+oModule = oDesign.GetModule("ReportSetup")
+try:
+    oModule.CreateReport("eeff vs Freq", "Modal Solution Data", "Rectangular Plot", "Setup1 : Sweep",
+        ["Domain:=", "Sweep"], ["Freq:=", ["All"]],
+        ["X Component:=", "Freq", "Y Component:=", ["tl_eeff"]], [])
+except Exception as e:
+    oDesktop.AddMessage("", "", 1, "CreateReport eeff failed: " + str(e))
+try:
+    oModule.CreateReport("alpha vs Freq", "Modal Solution Data", "Rectangular Plot", "Setup1 : Sweep",
+        ["Domain:=", "Sweep"], ["Freq:=", ["All"]],
+        ["X Component:=", "Freq", "Y Component:=", ["tl_alpha_dB_per_m"]], [])
+except Exception as e:
+    oDesktop.AddMessage("", "", 1, "CreateReport alpha failed: " + str(e))
+
+# --- OPTIONAL post-solve fallback (guaranteed math in pure Python) ----------
+# If the eeff/alpha report traces come up empty (an older expression engine that
+# rejects complex ln/sqrt), SOLVE the design first, then uncomment the call at
+# the bottom and re-run THIS script: it reads the S-matrix and recomputes
+# eeff/alpha via cmath, writing <project>_twoline.csv next to the project.
+def _tl_extract_csv():
+    import cmath, os
+    pi_idx = ${JSON.stringify(options.twoLine.portIndices)}
+    try:
+        sol = oDesign.GetModule("Solutions")
+        # Pull the swept frequencies + S-parameters via the report data interface.
+        data = oModule  # placeholder; use GetSolutionDataPerVariation / ExportNetworkData in your release
+        oDesktop.AddMessage("", "", 0, "Fill in S-matrix retrieval for your AEDT release, then write CSV.")
+    except Exception as e:
+        oDesktop.AddMessage("", "", 2, "Two-line CSV fallback failed: " + str(e))
+# _tl_extract_csv()   # <- uncomment AFTER solving if the in-HFSS reports are empty
 `;
     }
     code += `

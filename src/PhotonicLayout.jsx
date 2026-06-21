@@ -74,6 +74,7 @@ import { DropdownMenu } from './ui/DropdownMenu.jsx';
 import { ModalDialog } from './ui/ModalDialog.jsx';
 import { HelpTutorial } from './ui/HelpTutorial.jsx';
 import { AiAssistantDialog } from './ui/AiAssistantDialog.jsx';
+import { TwoLineWizard } from './ui/TwoLineWizard.jsx';
 import { SettingsPanel } from './ui/SettingsPanel.jsx';
 import { DEFAULT_SETTINGS, loadSettings, saveSettings, buildSettingsExport, parseSettingsImport } from './ui/settings.js';
 import { resolveCanvasTheme, applyThemeAttr } from './ui/theme.js';
@@ -332,6 +333,9 @@ export default function App() {
   // AI geometry assistant dialog (✨ header button): natural-language /
   // sketch input → Claude → validated parametric fragment insert.
   const [showAiAssistant, setShowAiAssistant] = useState(false);
+  // 2-line method wizard (Marks 1991): stamp the line at two lengths and
+  // emit a native HFSS script that extracts εeff/α in HFSS.
+  const [showTwoLineWizard, setShowTwoLineWizard] = useState(false);
   // Reference to the canvas <svg> element. Used by the figure exporter
   // to clone the live DOM (so SVG/PDF figures include rulers, dimension
   // overlays, mirror axes, replications — everything the user sees on
@@ -4991,6 +4995,26 @@ export default function App() {
     // still drives the generated script's behavior, just not the name).
     return handleExport(`${exportFileBase()}_hfss.py`, generateHfssNative, { appendToActive });
   };
+  // 2-line method: the wizard hands us the BUILT two-line scene (line stamped
+  // at L1 and L2, 4 lumped ports) + the verified S-index map. Generate the
+  // native HFSS script directly from that scene with the εeff/α output-variable
+  // block enabled — NOT from the current canvas scene.
+  const handleExportTwoLine = async (builtScene, portIndices) => {
+    let content;
+    try {
+      const normalized = normalizeScene(builtScene);
+      const pv = resolveParams(normalized.params || {}).values;
+      content = generateHfssNative(normalized, pv, { twoLine: { portIndices } });
+    } catch (e) {
+      console.error('Two-line generator error:', e);
+      await alertDialog('Error generating 2-line script: ' + e.message, 'Export error');
+      return;
+    }
+    if (!content) { await alertDialog('Failed to generate 2-line script.', 'Export error'); return; }
+    const filename = `${exportFileBase()}_2line_hfss.py`;
+    const ok = downloadFile(filename, content);
+    setExportPreview({ filename, content, downloaded: ok });
+  };
   // gdsfactory export: a parametric @gf.cell function. The design name
   // (project only — NOT the versioned filename) is passed through so the
   // function and output .gds use a stable identifier.
@@ -5412,6 +5436,7 @@ export default function App() {
               items={[
                 { label: 'pyAEDT (basic)', icon: Download, onClick: handleExportPyAEDT, hint: 'layout.py', title: 'External Python with pyaedt installed (run from terminal: python layout.py). Basic export — numeric positions, single-conductor assumptions. For full parametric fidelity use HFSS native.' },
                 { label: 'HFSS native', icon: Download, onClick: handleExportHfssNative, hint: 'layout_hfss.py', title: 'Native HFSS COM script (run inside HFSS via Tools -> Run Script)' },
+                { label: '2-line method (εeff & α)', icon: Ruler, onClick: () => setShowTwoLineWizard(true), hint: 'wizard', title: "Marks' 2-line method: stamp this line at two lengths and emit a native HFSS script that extracts effective permittivity and attenuation directly in HFSS." },
                 { label: 'GDS-II', icon: Download, onClick: handleExportGDS, hint: 'layout.gds', title: 'Binary GDS-II layout. Layers: waveguide=1, conductors=10+ (one per stack layer), port=100. Coords in µm with 1nm database resolution.' },
                 { label: 'gdsfactory', icon: Download, onClick: handleExportGdsfactory, hint: 'layout_gf.py', title: 'Parametric @gf.cell Python function. Every scene parameter becomes a kwarg with its current value as default — call the function with overrides to sweep params in Python.' },
                 { divider: true },
@@ -8178,6 +8203,14 @@ export default function App() {
         scene={scene}
         paramValues={paramValues}
         onApply={(fragment) => updateScene((prev) => applyAiGeometryFragment(prev, fragment, { viewport, paramValues }))}
+      />
+
+      <TwoLineWizard
+        open={showTwoLineWizard}
+        onClose={() => setShowTwoLineWizard(false)}
+        scene={scene}
+        paramValues={paramValues}
+        onGenerate={handleExportTwoLine}
       />
 
       {/* Modal dialog (confirm/prompt/alert) */}

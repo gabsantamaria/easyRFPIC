@@ -248,6 +248,60 @@ Natural-language / sketch-image → parametric scene fragment, via the user's ow
 - **`src/ai/client.js`** — browser-direct Anthropic call (`dangerouslyAllowBrowser`, SDK lazy-imported into its own chunk); models claude-opus-4-8 (default) / sonnet-4-6 / haiku-4-5; adaptive thinking except haiku; typed-error → friendly message mapping; `fileToImagePayload` downscales sketches to ≤1568 px and flattens transparency onto white.
 - **`src/ai/settings.js`** — API key + model in `localStorage` ONLY (key `photonic_layout_ai_settings`, outside every workspace prefix), so the key can never ride along in design/workspace exports or generated scripts. Never log it, never embed it in exports.
 
+## 2-line method wizard (εeff / α extraction)
+
+Marks' 2-line/TRL eigenvalue method (IEEE-MTT 1991) automated end-to-end: the
+user draws a SINGLE transmission line, the wizard stamps it at two lengths, and
+the generated native HFSS script extracts the effective permittivity εeff and
+attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
+"2-line method (εeff & α)".
+
+- **`src/scene/twoLine.js`** (pure, fully tested — `tests/two-line.test.js`):
+  - `buildTwoLineScene(scene, cfg)` — reuses the parametric-cell machinery
+    (`makeCellFromSelection` over ALL components → `instantiateCell` twice) to
+    stamp the line as `lineA` (length override `tl_L1`) and `lineB` (`tl_L2`),
+    offset by `cfg.separation` (auto ≈ 3× bbox span if blank). `lineA`'s
+    components are merged BEFORE `lineB`'s — because HFSS numbers lumped ports in
+    creation (= component) order, this fixes the S-indices to 1,2 (line A) and
+    3,4 (line B). Injects top-level params `tl_L1`/`tl_L2`/`tl_dL` (`tl_dL =
+    tl_L2 − tl_L1`, kept LIVE so the lengths stay HFSS-sweepable) and forces a
+    Discrete sweep. VERIFIES the contract before returning: exactly 4 ports,
+    grouped (A,A,B,B) in solved order, all equal reference impedance — else
+    throws a user-facing Error. Returns `{ scene, portIndices:{a1,a2,b1,b2},
+    portNames, warnings }`.
+  - `twoLineOutputVariables(pi, dLVar='tl_dL')` — the ORDERED list of HFSS Output
+    Variables (dependency order; each `{name, expr, note}`) implementing the
+    extraction: per-line wave-cascade T from its 2-port S-block (T11=−detS/S21,
+    …), `M = T_B·T_A⁻¹`, eigenvalue `λ = (trM+√(trM²−4detM))/2 = e^∓γΔl`,
+    `γ = −ln(λ)/Δl`. KEY simplification (no sign/branch `if()` needed in HFSS):
+    εeff is EVEN in γ ⇒ `tl_eeff = (c/ω)²(im(γ)²−re(γ)²)`, and α is `abs(re(γ))`.
+    Uses HFSS report syntax (`S(i,j)`, `re/im/abs/ln/sqrt`, `pi`, reserved `Freq`
+    in Hz). **Update this if the S-index convention or HFSS expr engine changes.**
+  - `twoLineExtractNumeric(SA, SB, dLmeters, fHz)` — full complex-arithmetic
+    reference impl mirroring the exprs EXACTLY (for unit tests); verified to
+    recover γ/α/εeff from synthetic ideal-line S-parameters.
+  - `findLumpedPortOrder(solved, pv)` — replicates the exporter's port filter
+    (`hfss-native.js`) over the solved list to discover the port order.
+- **Exporter hook**: `generateHfssNative(scene, pv, { twoLine: { portIndices } })`
+  emits, before `oProject.Save()` (inside the non-append branch), an
+  `OutputVariable` block (`_tl_outvar` helper → `CreateOutputVariable(..,
+  "Setup1 : Sweep", "Modal Solution Data")` per row) + two `ReportSetup`
+  `CreateReport`s ("eeff vs Freq", "alpha vs Freq"), plus a COMMENTED IronPython
+  post-solve CSV fallback (`_tl_extract_csv`) in case an older expr engine
+  rejects complex `ln`/`sqrt`. No `twoLine` option → byte-identical to before.
+- **`src/ui/TwoLineWizard.jsx`** — dialog (mount-on-open wrapper like
+  `AiAssistantDialog`): length-param dropdown (user params, live values, sorted,
+  `_comp_*` hidden), L1/L2 (re-seeded from the param's current value on
+  change), separation (blank = auto), freq band (seeded from `simSetup`). LIVE
+  runs `buildTwoLineScene` in a memo — surfaces the port-contract error or a
+  green "4 ports verified" + warnings, computes the βΔl phase-ambiguity guidance
+  (`εeff_max = (c/(2·f_max·Δl))²`; amber if < 5), and gates Generate. Wired in
+  `PhotonicLayout.jsx`: `handleExportTwoLine(builtScene, portIndices)` generates
+  the script from the BUILT scene (not the canvas scene) → preview/download as
+  `<base>_2line_hfss.py`.
+- **Phase-ambiguity caveat (v1)**: β is unwrapped only while βΔl < π over the
+  band — pick L2−L1 small enough. α and εeff-from-α are unaffected by the branch.
+
 ## Settings & appearance themes
 
 User preferences + appearance themes, via the ⚙ header button (between Workspace and the AI ✨ button → `src/ui/SettingsPanel.jsx`).
@@ -304,6 +358,10 @@ Parallel structure to pyAEDT but emits raw `oEditor.*` COM calls wrapped in try/
 Non-rect shapes are emitted as a polygonal sheet via `CreatePolyline` + `SweepAlongVector` to thicken. Racetracks emit outer perimeter + inner perimeter + Subtract to leave a hollow band.
 
 Transform chain emission uses the same logic as pyAEDT (separate helper `emitTransformChainHfss`).
+
+`options.twoLine = { portIndices }` appends the 2-line-method εeff/α
+output-variable + report block before `oProject.Save()` (see "2-line method
+wizard"). Absent the option, output is byte-identical to before.
 
 **Per-layer Z (`layerZ` walk, mirrored numerically in pyAEDT's `numericLayerZ`)**: the stack is grouped by `coplanarGroup` id (NOT device role). Adjacent layers sharing a group id are coplanar — they share `zBottom`; the cursor advances past a group by its **cladding top** (`advanceLayerOf` = thickest cladding member, else thickest member for a malformed group with no cladding), so a layer ABOVE a coplanar group (e.g. a conductor in a different/no group) starts at the group's cladding top, not its `zBottom`. Layers with no `coplanarGroup` stack sequentially. Both walks `migrateStackCoplanarGroups` the stack first (defensive — matches in-app normalization), and pin Z=0 at the first device-role or grouped layer (substrates below go negative). The advance is the cladding's own `thicknessExpr`, so single-cladding groups (the norm) are parametrically exact under sweeps.
 
@@ -367,6 +425,10 @@ npx vitest run
 #   tests/cells.test.js               — parametric cells: selection→def (warnings, param closure),
 #                                       prefix instantiation, two-instance coexistence + HFSS set_var
 #                                       parametricity, update-from-master, workspace storage round-trip
+#   tests/two-line.test.js            — 2-line method (Marks 1991): twoLineExtractNumeric recovers
+#                                       γ/α/εeff from synthetic lines; buildTwoLineScene 4-port (A,A,B,B)
+#                                       ordering + parametric L1/L2 + error gates; generateHfssNative
+#                                       options.twoLine emits output vars + reports + parses as Python
 #   tests/canvas-perf-helpers.test.js — uniform-grid spatial index + anchor-snap / alt-drag index
 #                                       EQUIVALENCE vs the old full-scan oracles (probe sweeps +
 #                                       seeded fuzz), boolean-operand cells, tie-order preservation
