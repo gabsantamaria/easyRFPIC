@@ -339,16 +339,22 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
   with a COMMENTED auto-transfer that sets `tl_C_F_per_m` on the HFSS design
   (off by default so a mis-parsed matrix can't silently corrupt Z₀). Both share
   `buildQ3DBody`. Conductors are **THIN CONDUCTORS** — a covered sheet swept up
-  (`SweepAlongVector`) by `thicknessUm` (= `h_cond`, or a wizard-supplied value
-  when `h_cond=0`). Each conductor object gets its own **signal net**
-  (`AssignSignalNet`). Emits a capacitance setup + a **frequency sweep**
-  (`InsertSweep`, same band as the 2-line wizard). **Q3D matrix quantities
-  (`C(netA,netB)`) only exist AFTER a solve** — referencing them in a
-  report/output variable pre-solve fails with "'C' is not a function name". So
-  the script `oDesign.Analyze("Setup1")` FIRST (fast electrostatic cap), THEN
-  creates a raw **Capacitance** report + a **C-per-length** report/output var
-  (`C_per_m = |C(netA,netB)| / lengthMeters`, `lengthUm` = supplied or a
-  geometry best-effort — VERIFY for meanders). Builds ONLY the SELECTED line
+  (`SweepAlongVector`) by `q3d_cond_thk` (= `h_cond`, or a wizard value when
+  `h_cond=0`). **PARAMETRIC**: scene params are declared as Q3D design variables
+  and the rects + dielectric Z are emitted as expressions referencing them —
+  rect size from the component w/h, inter-strip gap from the `repeat` offset
+  (`parametricOffsets`), stack Z from `computeLayerZ`'s `zBottomExpr`, plus
+  `q3d_cond_thk` and `q3d_line_len_um` — so width/gap/thickness/dielectric sweep
+  in Q3D and re-Analyze. Non-rect / rotated conductors fall back to baked numeric
+  geometry. Each conductor object gets its own **signal net** (`AssignSignalNet`).
+  Emits a capacitance setup + a **frequency sweep** (`InsertSweep`, same band as
+  the 2-line wizard). **Q3D matrix quantities (`C(netA,netB)`) only exist AFTER a
+  solve** — referencing them pre-solve fails with "'C' is not a function name".
+  So the script `oDesign.Analyze("Setup1")` FIRST (fast electrostatic cap), THEN
+  creates a raw **Capacitance** report + a **C-per-length** report/output var.
+  The line C is the **DIFFERENTIAL** capacitance `((C11+C22)/2 − C12)/2`
+  (the port drives the strips differentially), NOT `|C12|`; `÷ (q3d_line_len_um
+  ·1e-6)` — VERIFY the length for meanders. Builds ONLY the SELECTED line
   conductor(s)
   (each transform instance → its own covered sheet via `shapeInstanceToRing`, at
   the conductor mid-Z) + the dielectric stack boxes over the footprint, calls

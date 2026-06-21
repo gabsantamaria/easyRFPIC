@@ -418,7 +418,7 @@ describe('generateHfssNative options.twoLine — script emits the εeff/α math'
 // separate Q3D script for the SELECTED line conductor(s); the user divides
 // conductor-to-conductor C by physical length and feeds it back as cFperM.
 describe('generateQ3DCapacitance — meander C extraction script', () => {
-  it('builds a Q3D design: thin conductors, nets, sweep, C-per-length; parses as Python', () => {
+  it('builds a PARAMETRIC Q3D design: thin conductors, nets, sweep, C-per-length; parses', () => {
     const scene = makeLineScene(500);
     const pv = resolveParams(scene.params).values;
     const q = generateQ3DCapacitance(scene, pv, {
@@ -428,9 +428,15 @@ describe('generateQ3DCapacitance — meander C extraction script', () => {
     expect(q).toContain('InsertDesign("Q3D Extractor"');
     expect(q).toContain('line_i0');                 // a conductor instance object
     expect(q).toMatch(/diel_/);                     // dielectric stack boxes
-    // Thin conductor = swept sheet of the given thickness.
+    // Parametric design variables + geometry referencing them.
+    expect(q).toContain('set_var("Lc"');            // scene param declared as a Q3D var
+    expect(q).toContain('set_var("q3d_cond_thk", "0.2um")');
+    expect(q).toContain('set_var("q3d_line_len_um", "500")');
+    expect(q).toContain('set_var("line_q3cx"');     // editable base position
+    expect(q).toMatch(/\(line_q3cx\) \+ \(Lc\)\/2|\(Lc\)\/2/); // size from the line's w expr (Lc)
+    // Thin conductor = swept sheet by the thickness VARIABLE.
     expect(q).toContain('SweepAlongVector');
-    expect(q).toContain('"0.2um"');
+    expect(q).toMatch(/safe_sweep_z\("line_i0", "q3d_cond_thk"\)/);
     // Explicit signal nets (one per conductor object).
     expect(q).toContain('AssignSignalNet');
     expect(q).toContain('net_line_i0');
@@ -439,17 +445,14 @@ describe('generateQ3DCapacitance — meander C extraction script', () => {
     expect(q).toContain('InsertSweep');
     expect(q).toContain('"1GHz"');
     expect(q).toContain('"50GHz"');
-    // Capacitance-per-length report (÷ physical length in metres). The line C is
-    // the DIFFERENTIAL capacitance ((C11+C22)/2 − C12)/2, NOT just |C12| (the
-    // port drives the strips differentially; |C12| omits the to-ground term).
+    // Differential per-length C ((C11+C22)/2 − C12)/2, NOT |C12|; length via the var.
     expect(q).toContain('"C per length"');
     expect(q).toContain('C_per_m');
-    expect(q).toContain('0.0005');                  // 500 µm → 5e-4 m
-    expect(q).not.toMatch(/abs\(C\(/);              // not |C12|
+    expect(q).toContain('q3d_line_len_um*1e-6');
+    expect(q).not.toMatch(/abs\(C\(/);
     expect(q).toMatch(/\(\(C\(net_line_i0,net_line_i0\)\+C\(net_padL_i0,net_padL_i0\)\)\/2-C\(net_line_i0,net_padL_i0\)\)\/2/);
-    // Q3D matrix quantities only exist post-solve → Analyze must precede the
-    // reports/output var (else "'C' is not a function name").
-    expect(q).toContain('"Capacitance"');           // raw C report
+    // Q3D matrix quantities only exist post-solve → Analyze precedes the reports.
+    expect(q).toContain('"Capacitance"');
     expect(q.indexOf('oDesign.Analyze("Setup1")')).toBeGreaterThan(0);
     expect(q.indexOf('oDesign.Analyze("Setup1")')).toBeLessThan(q.indexOf('CreateOutputVariable('));
     expect(q.indexOf('oDesign.Analyze("Setup1")')).toBeLessThan(q.indexOf('CreateReport("Capacitance"'));
@@ -462,7 +465,7 @@ describe('generateQ3DCapacitance — meander C extraction script', () => {
     const scene = makeLineScene(500); // default stack h_cond = 0.8
     const pv = resolveParams(scene.params).values;
     const q = generateQ3DCapacitance(scene, pv, { conductorIds: ['line'] });
-    expect(q).toContain('"0.8um"'); // swept by h_cond
+    expect(q).toContain('set_var("q3d_cond_thk", "0.8um")'); // swept by h_cond
   });
 
   it('throws when no conductor is selected', () => {
