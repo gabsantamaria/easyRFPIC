@@ -342,10 +342,14 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
   (`SweepAlongVector`) by `thicknessUm` (= `h_cond`, or a wizard-supplied value
   when `h_cond=0`). Each conductor object gets its own **signal net**
   (`AssignSignalNet`). Emits a capacitance setup + a **frequency sweep**
-  (`InsertSweep`, same band as the 2-line wizard) + a **C-per-length** report
+  (`InsertSweep`, same band as the 2-line wizard). **Q3D matrix quantities
+  (`C(netA,netB)`) only exist AFTER a solve** — referencing them in a
+  report/output variable pre-solve fails with "'C' is not a function name". So
+  the script `oDesign.Analyze("Setup1")` FIRST (fast electrostatic cap), THEN
+  creates a raw **Capacitance** report + a **C-per-length** report/output var
   (`C_per_m = |C(netA,netB)| / lengthMeters`, `lengthUm` = supplied or a
-  geometry best-effort — VERIFY for meanders) + a full C-matrix table. Builds
-  ONLY the SELECTED line conductor(s)
+  geometry best-effort — VERIFY for meanders). Builds ONLY the SELECTED line
+  conductor(s)
   (each transform instance → its own covered sheet via `shapeInstanceToRing`, at
   the conductor mid-Z) + the dielectric stack boxes over the footprint, calls
   `AutoIdentifyNets`, inserts a capacitance setup. Feeds/launches are EXCLUDED

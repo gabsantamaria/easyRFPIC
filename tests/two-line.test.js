@@ -443,6 +443,12 @@ describe('generateQ3DCapacitance — meander C extraction script', () => {
     expect(q).toContain('"C per length"');
     expect(q).toContain('C_per_m');
     expect(q).toContain('0.0005');                  // 500 µm → 5e-4 m
+    // Q3D matrix quantities only exist post-solve → Analyze must precede the
+    // reports/output var (else "'C' is not a function name").
+    expect(q).toContain('"Capacitance"');           // raw C report
+    expect(q.indexOf('oDesign.Analyze("Setup1")')).toBeGreaterThan(0);
+    expect(q.indexOf('oDesign.Analyze("Setup1")')).toBeLessThan(q.indexOf('CreateOutputVariable('));
+    expect(q.indexOf('oDesign.Analyze("Setup1")')).toBeLessThan(q.indexOf('CreateReport("Capacitance"'));
     mkdirSync('tests/out', { recursive: true });
     writeFileSync('tests/out/q3d_cap.py', q);
     execSync('python3 -c "import ast; ast.parse(open(\'tests/out/q3d_cap.py\').read())"');

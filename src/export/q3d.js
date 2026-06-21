@@ -162,9 +162,12 @@ const CAP_SETUP = (fGHz) => `["NAME:Setup1",
           "PerError:=", 1, "PerRefine:=", 30, "AutoIncreaseSolutionOrder:=", True,
           "SolutionOrder:=", "High", "Solver Type:=", "Iterative"]]`;
 
-// Nets + setup + frequency sweep + C-per-length reports (top-level statements,
-// shared by both emitters). Each conductor object → its own signal net; C per
-// length = |C(netA,netB)| / lengthMeters across the swept band.
+// Nets + setup + frequency sweep + SOLVE + C-per-length reports (top-level
+// statements, shared by both emitters). Each conductor object → its own signal
+// net. IMPORTANT: Q3D matrix quantities like C(netA,netB) DO NOT EXIST until the
+// design is solved — creating a report/output-variable that references C(...)
+// BEFORE solving fails with "'C' is not a function name". So we Analyze the
+// (fast, electrostatic) capacitance setup FIRST, then create the reports.
 function q3dNetsSetupReports({ condObjs, fAdaptGHz, lengthUm, sweep }) {
   const nets = condObjs.map((o) => `q3d_signal_net("net_${o}", "${o}")`).join('\n');
   const lenM = (Number.isFinite(lengthUm) && lengthUm > 0) ? lengthUm * 1e-6 : 1e-3;
@@ -172,30 +175,43 @@ function q3dNetsSetupReports({ condObjs, fAdaptGHz, lengthUm, sweep }) {
   const startG = Number.isFinite(s.startGHz) ? s.startGHz : 1;
   const stopG = Number.isFinite(s.stopGHz) ? s.stopGHz : 40;
   const pts = (Number.isFinite(s.points) && s.points >= 1) ? Math.round(s.points) : 201;
-  // C-per-length report (only when there are >=2 nets to pair).
-  let perLen = '# (need >=2 conductor nets for a conductor-to-conductor C/length)';
-  if (condObjs.length >= 2) {
-    const a = `net_${condObjs[0]}`, b = `net_${condObjs[1]}`;
-    perLen = `# Per-length capacitance: |C(${a},${b})| / line length.
-# LINE_LENGTH_UM is a best-effort geometry guess — VERIFY it equals your line's
+  const a = condObjs.length >= 2 ? `net_${condObjs[0]}` : null;
+  const b = condObjs.length >= 2 ? `net_${condObjs[1]}` : null;
+
+  let extract = '# (need >=2 conductor nets for a conductor-to-conductor C/length)';
+  if (a && b) {
+    extract = `# LINE_LENGTH_UM is a best-effort geometry guess — VERIFY it equals your line's
 # PHYSICAL (unfolded) length, especially for a meander.
 LINE_LENGTH_UM = ${dec(lengthUm)}
+# Solve the (fast) electrostatic capacitance so the C matrix quantities exist —
+# they DON'T pre-solve, which is why the reports below come AFTER Analyze.
+# Comment this out if you'd rather mesh/solve manually first; then create the
+# reports from Results -> Create Report -> Matrix.
 try:
-    oOut = oDesign.GetModule("OutputVariable")
-    oOut.CreateOutputVariable("C_per_m", "abs(C(${a},${b}))/${dec(lenM)}", "Setup1 : Sweep1", "Matrix", [])
+    oDesign.Analyze("Setup1")
 except Exception as e:
-    oDesktop.AddMessage("", "", 1, "C_per_m output var failed: " + str(e))
+    oDesktop.AddMessage("", "", 2, "Q3D Analyze failed (solve manually, then create the report from Results -> Matrix): " + str(e))
+# Raw conductor-to-conductor capacitance report (most robust).
 try:
-    oRep = oDesign.GetModule("ReportSetup")
-    oRep.CreateReport("C per length", "Matrix", "Rectangular Plot", "Setup1 : Sweep1",
-        ["Context:=", "Original"], ["Freq:=", ["All"]],
+    oDesign.GetModule("ReportSetup").CreateReport("Capacitance", "Matrix", "Data Table",
+        "Setup1 : LastAdaptive", ["Context:=", "Original"], [],
+        ["X Component:=", "Freq", "Y Component:=", ["C(${a},${b})"]], [])
+except Exception as e:
+    oDesktop.AddMessage("", "", 1, "Capacitance report skipped (create from Results -> Matrix): " + str(e))
+# Per-length: C(netA,netB) / physical length. The output variable is valid only
+# now (post-solve); if your release still rejects C(...) here, read C from the
+# 'Capacitance' report and divide by LINE_LENGTH_UM*1e-6 yourself.
+try:
+    oDesign.GetModule("OutputVariable").CreateOutputVariable(
+        "C_per_m", "abs(C(${a},${b}))/${dec(lenM)}", "Setup1 : LastAdaptive", "Matrix", [])
+    oDesign.GetModule("ReportSetup").CreateReport("C per length", "Matrix", "Data Table",
+        "Setup1 : LastAdaptive", ["Context:=", "Original"], [],
         ["X Component:=", "Freq", "Y Component:=", ["C_per_m"]], [])
-    oRep.CreateReport("C matrix", "Matrix", "Data Table", "Setup1 : Sweep1",
-        ["Context:=", "Original"], ["Freq:=", ["All"]],
-        ["X Component:=", "Freq", "Y Component:=", ["C(${a},${b})", "C(${a},${a})", "C(${b},${b})"]], [])
 except Exception as e:
-    oDesktop.AddMessage("", "", 1, "C reports failed (create from GUI: Results -> Create Report -> Matrix): " + str(e))`;
+    oDesktop.AddMessage("", "", 1, "C_per_m report skipped: " + str(e))
+oDesktop.AddMessage("", "", 0, "C per length = abs(C(${a},${b})) / (LINE_LENGTH_UM*1e-6). Read C from the 'Capacitance' report (or Results -> Matrix); paste C_per_m into the 2-line wizard.")`;
   }
+
   return `# ===== Nets (one signal net per conductor object) =====
 oBnd = oDesign.GetModule("BoundarySetup")
 def q3d_signal_net(net, obj):
@@ -219,8 +235,8 @@ try:
 except Exception as e:
     oDesktop.AddMessage("", "", 1, "InsertSweep failed (add a sweep from the GUI): " + str(e))
 
-# ===== Capacitance-per-length reports =====
-${perLen}`;
+# ===== Solve + capacitance-per-length reports (post-solve!) =====
+${extract}`;
 }
 
 // Standalone Q3D capacitance script (own project + design).
@@ -294,7 +310,7 @@ ${body.condBlocks.join('\n')}
 ${q3dNetsSetupReports({ condObjs: body.condObjs, fAdaptGHz: body.fAdaptGHz, lengthUm: opts.lengthUm ?? body.lineLengthUm, sweep })}
 
 oProject.Save()
-oDesktop.AddMessage("", "", 0, "Q3D capacitance model built. Analyze Setup1, then read 'C per length' (verify LINE_LENGTH_UM) -> paste C (F/m) into the 2-line wizard.")
+oDesktop.AddMessage("", "", 0, "Q3D capacitance built + solved. Read 'C per length' (verify LINE_LENGTH_UM) -> paste C (F/m) into the 2-line wizard.")
 `;
   return ascii(code);
 }
@@ -356,7 +372,7 @@ ${body.condBlocks.join('\n')}
 ${q3dNetsSetupReports({ condObjs: body.condObjs, fAdaptGHz: body.fAdaptGHz, lengthUm: opts.lengthUm ?? body.lineLengthUm, sweep })}
 
 oProject.Save()
-oDesktop.AddMessage("", "", 0, "Q3D design '${design}' built. Analyze it, read 'C per length' (verify LINE_LENGTH_UM), set ${cVar} on design '${hfss}'.")
+oDesktop.AddMessage("", "", 0, "Q3D design '${design}' built + solved. Read 'C per length' (verify LINE_LENGTH_UM), set ${cVar} on design '${hfss}'.")
 
 # --- Optional AUTO-TRANSFER (uncomment after verifying the matrix read in your
 #     AEDT release; a wrong read would silently corrupt Z0, so it's off by default) ---
