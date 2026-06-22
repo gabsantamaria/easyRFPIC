@@ -438,9 +438,12 @@ describe('generateQ3DCapacitance — meander C extraction script', () => {
     // Thin conductor = swept sheet by the thickness VARIABLE.
     expect(q).toContain('SweepAlongVector');
     expect(q).toMatch(/safe_sweep_z\("line_i0", "q3d_cond_thk"\)/);
-    // Explicit signal nets (one per conductor object).
+    // Signal nets: ONE per conductor COMPONENT (all its sheets joined), not per
+    // sheet — so the C matrix is conductor-to-conductor (2 nets for 2 conductors).
     expect(q).toContain('AssignSignalNet');
-    expect(q).toContain('net_line_i0');
+    expect(q).toContain('q3d_signal_net("net_line", ["line_i0"])');
+    expect(q).toContain('q3d_signal_net("net_padL", ["padL_i0"])');
+    expect(q).not.toContain('net_line_i0');         // not per-object anymore
     // Capacitance setup with CG convergence controls + frequency sweep.
     expect(q).toContain('InsertSetup("Matrix"');
     expect(q).toContain('"PerError:=", 0.01');
@@ -449,13 +452,21 @@ describe('generateQ3DCapacitance — meander C extraction script', () => {
     expect(q).toContain('InsertSweep');
     expect(q).toContain('"1GHz"');
     expect(q).toContain('"50GHz"');
-    // Solve, then the C matrix is read NATIVELY (no scripted C report/output var,
-    // which Q3D rejects). The differential per-length formula is printed.
+    // Solve, then EXPORT the C matrix to CSV (Q3D rejects a scripted C report/
+    // output var). The differential per-length formula is printed.
     expect(q).toContain('oDesign.Analyze("Setup1")');
+    expect(q).toContain('oDesign.ExportMatrixData(');  // direct matrix dump
+    expect(q).toContain('"C",');                       // capacitance problem type
+    expect(q).toContain('mtl_Cmatrix.csv');            // CSV named after the design
     expect(q).toContain('Results -> Solution Data -> Matrix');
     expect(q).toContain('((C11+C22)/2 - C12)/2');   // differential, in the message
     expect(q).not.toContain('CreateOutputVariable');
     expect(q).not.toMatch(/abs\(C\(/);
+    // Resilience: guarded logger + existence-checked delete (the abnormal-
+    // termination fix), no raw oDesktop.AddMessage in the Q3D body.
+    expect(q).toContain('def q3d_msg(');
+    expect(q).toContain('_existing_objs()');
+    expect(q).toContain('GetObjectsInGroup');
     mkdirSync('tests/out', { recursive: true });
     writeFileSync('tests/out/q3d_cap.py', q);
     execSync('python3 -c "import ast; ast.parse(open(\'tests/out/q3d_cap.py\').read())"');

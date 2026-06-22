@@ -15,11 +15,14 @@
 // Non-rectangular or rotated conductors fall back to baked numeric geometry.
 //
 // Modeling: conductors are THIN CONDUCTORS (a covered sheet swept up by the
-// thickness); each conductor object gets its own SIGNAL NET; a capacitance setup
-// + frequency sweep; the design is SOLVED, then a raw C-matrix report + a
-// per-length (differential) C report are created (matrix quantities don't exist
-// pre-solve). The line capacitance is the DIFFERENTIAL capacitance
-// ((C11+C22)/2 − C12)/2 — the port drives the strips differentially — NOT |C12|.
+// thickness); each conductor COMPONENT gets one SIGNAL NET (all its repeat/meander
+// sheets joined, so the matrix is conductor-to-conductor — NOT one net per sheet);
+// a capacitance setup + frequency sweep; the design is SOLVED, then the C matrix
+// is EXPORTED to a CSV via oDesign.ExportMatrixData (and shown under Results ->
+// Solution Data -> Matrix). No C report/output var is scripted — Q3D rejects the
+// matrix quantity C(net,net) in any expression ("'C' is not a function name").
+// The line capacitance is the DIFFERENTIAL capacitance ((C11+C22)/2 − C12)/2 —
+// the port drives the strips differentially — NOT |C12|.
 //
 // Two emitters: generateQ3DCapacitance (standalone, own project) and
 // generateQ3DCombinedBlock (appended to the 2-line HFSS script, same project).
@@ -137,6 +140,8 @@ function buildQ3DBody(scene, paramValues, opts, boxFn, polyFn, sweepFn) {
 
   // ---- Conductors (parametric rects; numeric fallback otherwise) ----
   const condObjs = [];
+  const condNets = []; // {net, objects[]} grouped by COMPONENT — one physical
+                       // conductor each (a repeat/meander → many sheets, ONE net)
   const condBlocks = [];
   let bb = { xMin: Infinity, xMax: -Infinity, yMin: Infinity, yMax: -Infinity };
   let lineLengthUm = 0;
@@ -166,6 +171,7 @@ ${sweepFn}("${name}", "q3d_cond_thk")  # thin conductor: sweep up by thickness`;
 
   for (const c of condComps) {
     const cid = c.id.replace(/[^A-Za-z0-9_]/g, '_');
+    const compObjs = []; // every sheet/instance of THIS component → one signal net
     const insts = expandTransforms([c], pv);
     for (const inst of insts) {
       const w = Math.abs(inst.w), h = Math.abs(inst.h);
@@ -190,6 +196,7 @@ ${sweepFn}("${name}", "q3d_cond_thk")  # thin conductor: sweep up by thickness`;
         const ym = `(${cy}) - ${hE}/2`, yp = `(${cy}) + ${hE}/2`;
         const name = `${cid}_i${k}`;
         condObjs.push(name);
+        compObjs.push(name);
         condBlocks.push(polySheet(name, [[xm, ym], [xp, ym], [xp, yp], [xm, yp]]));
         // numeric bbox for the dielectric footprint
         const ni = insts[k] || insts[0];
@@ -204,9 +211,11 @@ ${sweepFn}("${name}", "q3d_cond_thk")  # thin conductor: sweep up by thickness`;
         for (const [x, y] of ring) { bb.xMin = Math.min(bb.xMin, x); bb.xMax = Math.max(bb.xMax, x); bb.yMin = Math.min(bb.yMin, y); bb.yMax = Math.max(bb.yMax, y); }
         const name = `${cid}_i${k}`;
         condObjs.push(name);
+        compObjs.push(name);
         condBlocks.push(polySheet(name, ring.map(([x, y]) => [`${num(x)}um`, `${num(y)}um`])));
       });
     }
+    if (compObjs.length) condNets.push({ net: `net_${cid}`, objects: compObjs });
   }
   if (!Number.isFinite(bb.xMin)) throw new Error('Selected conductors have no resolvable geometry.');
 
@@ -244,7 +253,7 @@ ${sweepFn}("${name}", "q3d_cond_thk")  # thin conductor: sweep up by thickness`;
   }).join('\n');
 
   const fAdaptGHz = (() => { const f = evalExpr(src.simSetup?.fnominal ?? '4', pv); return Number.isFinite(f) && f > 0 ? f : 4; })();
-  return { varDecls, matDefs, dielBlocks, condBlocks, condObjs, fAdaptGHz, effThk, lengthUm: num(lengthUm) };
+  return { varDecls, matDefs, dielBlocks, condBlocks, condObjs, condNets, fAdaptGHz, effThk, lengthUm: num(lengthUm) };
 }
 
 const CAP_SETUP = (fGHz, cg) => `["NAME:Setup1",
@@ -253,14 +262,19 @@ const CAP_SETUP = (fGHz, cg) => `["NAME:Setup1",
           "PerError:=", ${cg.perError}, "PerRefine:=", 30, "AutoIncreaseSolutionOrder:=", True,
           "SolutionOrder:=", "High", "Solver Type:=", "Iterative"]]`;
 
-// Nets + setup + frequency sweep + SOLVE (shared, top-level). The capacitance
-// MATRIX is read from Q3D's native results (Results -> Solution Data -> Matrix)
-// — we do NOT create a report/output variable for it, because Q3D's expression
-// parser rejects the matrix quantity C(netA,netB) as a function ("'C' is not a
-// function name") in ANY expression context, even post-solve. The script prints
-// the per-length formula instead.
-function q3dNetsSetupReports({ condObjs, fAdaptGHz, sweep, cg }) {
-  const nets = condObjs.map((o) => `q3d_signal_net("net_${o}", "${o}")`).join('\n');
+// Nets + setup + frequency sweep + SOLVE (shared, top-level). After the solve the
+// C matrix is EXPORTED to a CSV via oDesign.ExportMatrixData (the only scriptable
+// route — Q3D's expression parser rejects the matrix quantity C(netA,netB) as a
+// function, "'C' is not a function name", in ANY report/output-variable
+// expression, even post-solve). The same matrix is also visible under Results ->
+// Solution Data -> Matrix. One signal net per conductor COMPONENT (all its
+// sheets joined) so the matrix is conductor-to-conductor — the differential
+// per-length formula assumes exactly 2 nets. Every COM call routes failures
+// through q3d_msg (a guarded logger) so one bad call can never abort the script.
+function q3dNetsSetupReports({ condNets, design, fAdaptGHz, sweep, cg }) {
+  const groups = condNets || [];
+  const nets = groups.map((n) =>
+    `q3d_signal_net("${n.net}", [${n.objects.map((o) => `"${o}"`).join(', ')}])`).join('\n');
   const s = sweep || {};
   const startG = Number.isFinite(s.startGHz) ? s.startGHz : 1;
   const stopG = Number.isFinite(s.stopGHz) ? s.stopGHz : 40;
@@ -270,29 +284,39 @@ function q3dNetsSetupReports({ condObjs, fAdaptGHz, sweep, cg }) {
     minPass: (Number.isFinite(cg?.minPass) && cg.minPass >= 1) ? Math.round(cg.minPass) : 15,
     maxPass: (Number.isFinite(cg?.maxPass) && cg.maxPass >= 1) ? Math.round(cg.maxPass) : 20,
   };
-  const a = condObjs.length >= 2 ? `net_${condObjs[0]}` : null;
-  const b = condObjs.length >= 2 ? `net_${condObjs[1]}` : null;
+  const a = groups.length >= 2 ? groups[0].net : null;
+  const b = groups.length >= 2 ? groups[1].net : null;
+  const fHz = num((Number.isFinite(fAdaptGHz) ? fAdaptGHz : 4) * 1e9);
+  const dname = (design || 'q3d_cap');
 
   const extract = (a && b)
-    ? `# Solve the (fast) electrostatic capacitance, then read the matrix natively.
-# (We do NOT script a C report/output var: Q3D rejects C(netA,netB) in an
-# expression. The C MATRIX is shown directly under Results -> Solution Data ->
-# Matrix once solved.) Comment out the Analyze to mesh/solve manually first.
+    ? `# Solve the (fast) electrostatic capacitance, then EXPORT the matrix to CSV.
+# Comment out the Analyze to mesh/solve manually first.
 try:
     oDesign.Analyze("Setup1")
 except Exception as e:
-    oDesktop.AddMessage("", "", 2, "Q3D Analyze failed: " + str(e))
-oDesktop.AddMessage("", "", 0, "Q3D solved. Read the C matrix: Results -> Solution Data -> Matrix (Capacitance). Maxwell off-diagonal C(${a},${b}) is NEGATIVE (|.| = mutual).")
-oDesktop.AddMessage("", "", 0, "Per-length line C (differential) = ((C11+C22)/2 - C12)/2 / (q3d_line_len_um*1e-6). Compute it from the matrix and paste into the 2-line wizard 'C per length'.")`
-    : '# (need >=2 conductor nets for a conductor-to-conductor capacitance)';
+    q3d_msg(2, "Q3D Analyze failed: " + str(e))
+# Direct C-matrix dump to a CSV next to the project. ExportMatrixData is the only
+# scriptable export — Q3D rejects C(net,net) in a report expression. Maxwell C in fF.
+try:
+    _cdir = oProject.GetPath()
+    _cfile = _cdir + "/${dname}_Cmatrix.csv"
+    oDesign.ExportMatrixData(_cfile, "C", "", "Setup1 : LastAdaptive", "Original",
+        "ohm", "nH", "fF", "mSie", ${fHz}, "Maxwell, Spice, Couple", 0, False)
+    q3d_msg(0, "C matrix (fF) exported -> " + _cfile)
+except Exception as e:
+    q3d_msg(1, "ExportMatrixData failed; read Results -> Solution Data -> Matrix instead: " + str(e))
+q3d_msg(0, "C-matrix nets: 1=${a}, 2=${b}. Maxwell off-diagonal C12 is NEGATIVE (|.| = mutual).")
+q3d_msg(0, "Per-length line C (differential) = ((C11+C22)/2 - C12)/2 / (q3d_line_len_um*1e-6). Paste into the 2-line wizard 'C per length'.")`
+    : '# (need >=2 conductor nets for a conductor-to-conductor capacitance — select >=2 line conductors in the wizard)';
 
-  return `# ===== Nets (one signal net per conductor object) =====
+  return `# ===== Nets (one signal net per conductor COMPONENT; all its sheets joined) =====
 oBnd = oDesign.GetModule("BoundarySetup")
-def q3d_signal_net(net, obj):
+def q3d_signal_net(net, objs):
     try:
-        oBnd.AssignSignalNet(["NAME:" + net, "Objects:=", [obj]])
+        oBnd.AssignSignalNet(["NAME:" + net, "Objects:=", objs])
     except Exception as e:
-        oDesktop.AddMessage("", "", 1, "AssignSignalNet " + net + " failed: " + str(e))
+        q3d_msg(1, "AssignSignalNet " + net + " failed: " + str(e))
 ${nets}
 
 # ===== Capacitance setup + frequency sweep (same band as the 2-line wizard) =====
@@ -301,22 +325,46 @@ oAna = oDesign.GetModule("AnalysisSetup")
 try:
     oAna.InsertSetup("Matrix", ${CAP_SETUP(fAdaptGHz, cgv)})
 except Exception as e:
-    oDesktop.AddMessage("", "", 2, "InsertSetup(Matrix) failed: " + str(e))
+    q3d_msg(2, "InsertSetup(Matrix) failed: " + str(e))
 try:
     oAna.InsertSweep("Setup1",
         ["NAME:Sweep1", "IsEnabled:=", True, "RangeType:=", "LinearCount",
          "RangeStart:=", "${startG}GHz", "RangeEnd:=", "${stopG}GHz", "RangeCount:=", ${pts},
          "Type:=", "Interpolating", "SaveFields:=", False])
 except Exception as e:
-    oDesktop.AddMessage("", "", 1, "InsertSweep failed (add a sweep from the GUI): " + str(e))
+    q3d_msg(1, "InsertSweep failed (add a sweep from the GUI): " + str(e))
 
-# ===== Solve + read the capacitance matrix (native, post-solve) =====
+# ===== Solve + export the capacitance matrix =====
 ${extract}`;
 }
 
-const Q3D_HELPERS = (boxFn, polyFn, sweepFn, delFn) => `def ${delFn}(name):
+// Guarded logger. oDesktop.AddMessage can ITSELF throw (stale/closed handle) and,
+// if that throw escapes an except block, escalate a caught error into an
+// "abnormal script termination". Never let it. Emitted before set_var so every
+// helper can use it.
+const Q3D_MSG_DEF = `def q3d_msg(sev, text):
     try:
-        oEditor.Delete(["NAME:Selections", "Selections:=", name])
+        oDesktop.AddMessage("", "", sev, str(text))
+    except:
+        pass`;
+
+const Q3D_HELPERS = (boxFn, polyFn, sweepFn, delFn) => `def _existing_objs():
+    objs = set()
+    for grp in ("Solids", "Sheets", "Unclassified"):
+        try:
+            for o in oEditor.GetObjectsInGroup(grp):
+                objs.add(o)
+        except:
+            pass
+    return objs
+def ${delFn}(name):
+    # Delete only if the object ALREADY exists. Deleting a non-existent object
+    # raises a MODAL error that IronPython try/except CANNOT catch -> the script
+    # host logs "abnormal script termination". On a freshly-inserted Q3D design
+    # nothing exists yet, so an unguarded delete fired one abort per object.
+    try:
+        if name in _existing_objs():
+            oEditor.Delete(["NAME:Selections", "Selections:=", name])
     except:
         pass
 def ${boxFn}(bp, attr, name):
@@ -324,13 +372,13 @@ def ${boxFn}(bp, attr, name):
     try:
         oEditor.CreateBox(bp, attr)
     except Exception as e:
-        oDesktop.AddMessage("", "", 1, "CreateBox " + name + " failed: " + str(e))
+        q3d_msg(1, "CreateBox " + name + " failed: " + str(e))
 def ${polyFn}(pp, attr, name):
     ${delFn}(name)
     try:
         oEditor.CreatePolyline(pp, attr)
     except Exception as e:
-        oDesktop.AddMessage("", "", 1, "CreatePolyline " + name + " failed: " + str(e))
+        q3d_msg(1, "CreatePolyline " + name + " failed: " + str(e))
 def ${sweepFn}(name, dz):
     try:
         oEditor.SweepAlongVector(
@@ -339,7 +387,7 @@ def ${sweepFn}(name, dz):
              "CheckFaceFaceIntersection:=", False,
              "SweepVectorX:=", "0um", "SweepVectorY:=", "0um", "SweepVectorZ:=", dz])
     except Exception as e:
-        oDesktop.AddMessage("", "", 1, "Sweep " + name + " failed: " + str(e))`;
+        q3d_msg(1, "Sweep " + name + " failed: " + str(e))`;
 
 // Standalone Q3D capacitance script (own project + design).
 export function generateQ3DCapacitance(scene, paramValues, opts = {}) {
@@ -361,10 +409,11 @@ oProject = oDesktop.NewProject()
 oProject.InsertDesign("Q3D Extractor", "${design}", "", "")
 oDesign = oProject.SetActiveDesign("${design}")
 oEditor = oDesign.SetActiveEditor("3D Modeler")
+${Q3D_MSG_DEF}
 try:
     oEditor.SetModelUnits(["NAME:Units Parameter", "Units:=", "um", "Rescale:=", True])
 except Exception as e:
-    oDesktop.AddMessage("", "", 1, "SetModelUnits failed: " + str(e))
+    q3d_msg(1, "SetModelUnits failed: " + str(e))
 
 def set_var(name, value):
     try:
@@ -377,7 +426,7 @@ def set_var(name, value):
                  ["NAME:NewProps", ["NAME:" + name, "PropType:=", "VariableProp",
                   "UserDef:=", True, "Value:=", value]]]])
         except Exception as e:
-            oDesktop.AddMessage("", "", 1, "set_var " + name + " failed: " + str(e))
+            q3d_msg(1, "set_var " + name + " failed: " + str(e))
 ${Q3D_HELPERS('safe_create_box', 'safe_create_polyline', 'safe_sweep_z', '_del')}
 def define_material(name, eps_r, mu_r, sigma, tand):
     try:
@@ -386,7 +435,7 @@ def define_material(name, eps_r, mu_r, sigma, tand):
              "permittivity:=", str(eps_r), "permeability:=", str(mu_r),
              "conductivity:=", str(sigma), "dielectric_loss_tangent:=", str(tand)])
     except Exception as e:
-        oDesktop.AddMessage("", "", 1, "AddMaterial " + name + " failed: " + str(e))
+        q3d_msg(1, "AddMaterial " + name + " failed: " + str(e))
 
 # ===== Design variables (edit + re-Analyze to sweep) =====
 ${body.varDecls.join('\n')}
@@ -400,10 +449,10 @@ ${body.dielBlocks.join('\n') || '# (no dielectric layers)'}
 # ===== Line conductor(s) — thin conductors (parametric) =====
 ${body.condBlocks.join('\n')}
 
-${q3dNetsSetupReports({ condObjs: body.condObjs, fAdaptGHz: body.fAdaptGHz, sweep, cg: { perError: opts.perError, minPass: opts.minPass, maxPass: opts.maxPass } })}
+${q3dNetsSetupReports({ condNets: body.condNets, design, fAdaptGHz: body.fAdaptGHz, sweep, cg: { perError: opts.perError, minPass: opts.minPass, maxPass: opts.maxPass } })}
 
 oProject.Save()
-oDesktop.AddMessage("", "", 0, "Parametric Q3D capacitance built + solved. Read the C matrix (Results -> Solution Data -> Matrix); compute the per-length C (printed formula) and paste into the 2-line wizard.")
+q3d_msg(0, "Parametric Q3D capacitance built + solved. C matrix exported to <project>/${design}_Cmatrix.csv (also Results -> Solution Data -> Matrix). Compute the per-length C and paste into the 2-line wizard.")
 `;
   return ascii(code);
 }
@@ -421,13 +470,14 @@ export function generateQ3DCombinedBlock(scene, paramValues, opts = {}) {
 # selected conductor(s) as thin conductors; feeds excluded). After it solves,
 # read 'C per length' and set the HFSS variable "${cVar}" on design "${hfss}".
 # Reuses set_var + materials from the HFSS script above.
+${Q3D_MSG_DEF}
 try:
     oProject.InsertDesign("Q3D Extractor", "${design}", "", "")
     oDesign = oProject.SetActiveDesign("${design}")
     oEditor = oDesign.SetActiveEditor("3D Modeler")
     oEditor.SetModelUnits(["NAME:Units Parameter", "Units:=", "um", "Rescale:=", True])
 except Exception as e:
-    oDesktop.AddMessage("", "", 2, "Q3D design create failed: " + str(e))
+    q3d_msg(2, "Q3D design create failed: " + str(e))
 
 ${Q3D_HELPERS('q3d_box', 'q3d_poly', 'q3d_sweep', '_q3d_del')}
 
@@ -439,10 +489,10 @@ ${body.dielBlocks.join('\n')}
 # ===== Line conductor(s) — thin conductors (parametric) =====
 ${body.condBlocks.join('\n')}
 
-${q3dNetsSetupReports({ condObjs: body.condObjs, fAdaptGHz: body.fAdaptGHz, sweep, cg: { perError: opts.perError, minPass: opts.minPass, maxPass: opts.maxPass } })}
+${q3dNetsSetupReports({ condNets: body.condNets, design, fAdaptGHz: body.fAdaptGHz, sweep, cg: { perError: opts.perError, minPass: opts.minPass, maxPass: opts.maxPass } })}
 
 oProject.Save()
-oDesktop.AddMessage("", "", 0, "Q3D design '${design}' built + solved. Read the C matrix (Results -> Solution Data -> Matrix), compute per-length C (printed formula), set ${cVar} on design '${hfss}'.")
+q3d_msg(0, "Q3D design '${design}' built + solved. C matrix exported to <project>/${design}_Cmatrix.csv (also Results -> Solution Data -> Matrix). Compute per-length C, set ${cVar} on design '${hfss}'.")
 
 # --- Optional AUTO-TRANSFER (uncomment after verifying the matrix read in your
 #     AEDT release; a wrong read would silently corrupt Z0, so it's off by default) ---
