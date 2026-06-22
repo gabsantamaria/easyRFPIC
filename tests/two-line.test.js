@@ -466,6 +466,13 @@ describe('generateQ3DCapacitance — meander C extraction script', () => {
     expect(q).toContain('mtl_Cmatrix.csv');            // CSV named after the design
     expect(q).toContain('Results -> Solution Data -> Matrix');
     expect(q).toContain('((C11+C22)/2 - C12)/2');   // differential, in the message
+    // Auto-generated C-per-length PLOT. The report engine (unlike the design
+    // output-var parser) DOES accept C(net,net) arithmetic; baked length in
+    // metres → F/m. lengthUm=500 → /0.0005.
+    expect(q).toContain('GetModule("ReportSetup")');
+    expect(q).toContain('CreateReport("C_per_length_F_per_m", "Matrix", "Rectangular Plot"');
+    expect(q).toContain('"Context:=", "Original"');
+    expect(q).toContain('((C(net_line,net_line)+C(net_padL,net_padL))/2-C(net_line,net_padL))/2)/0.0005');
     expect(q).not.toContain('CreateOutputVariable');
     expect(q).not.toMatch(/abs\(C\(/);
     // Resilience: guarded logger + existence-checked delete (the abnormal-

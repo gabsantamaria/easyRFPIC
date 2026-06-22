@@ -355,19 +355,26 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
   was a real bug — it made the matrix N×N and broke the formula.) Emits a
   capacitance setup (with wizard CG convergence controls — `PerError` %,
   `MinPass`, `MaxPass`, defaults 0.01/15/20) + a **frequency sweep**
-  (`InsertSweep`, same band as the 2-line wizard), then SOLVES (`Analyze`) and
-  **EXPORTS the C matrix to `<project>/<design>_Cmatrix.csv`** via
-  `oDesign.ExportMatrixData(file, "C", "", "Setup1 : LastAdaptive", "Original",
-  "ohm","nH","fF","mSie", <fHz>, "Maxwell, Spice, Couple", 0, False)` (the 13-arg
-  AEDT-2023 form; `problem_type="C"` for 3-D Q3D, NOT `"CG"`; freq is numeric Hz).
-  **Q3D's expression parser REJECTS the matrix quantity `C(netA,netB)` as a
-  function ("'C' is not a function name") in ANY report/output-var expression —
-  even post-solve — so ExportMatrixData (a direct matrix dump) is the ONLY
-  scriptable C export.** The matrix is also visible under Results → Solution Data
-  → Matrix; the script prints the per-length formula. The line C is the
-  **DIFFERENTIAL** capacitance `((C11+C22)/2 − C12)/2` (the port drives the strips
-  differentially), NOT `|C12|`; `÷ (q3d_line_len_um ·1e-6)` — VERIFY the length
-  for meanders. Builds ONLY the SELECTED line conductor(s) (each transform
+  (`InsertSweep`, same band as the 2-line wizard), then SOLVES (`Analyze`). After
+  the solve it produces the C result TWO ways: (1) **EXPORTS the C matrix to
+  `<project>/<design>_Cmatrix.csv`** via `oDesign.ExportMatrixData(file, "C", "",
+  "Setup1 : LastAdaptive", "Original", "ohm","nH","fF","mSie", <fHz>, "Maxwell,
+  Spice, Couple", 0, False)` (the 13-arg AEDT-2023 form; `problem_type="C"` for
+  3-D Q3D, NOT `"CG"`; freq is numeric Hz); and (2) **auto-creates a "C per length
+  (F/m)" PLOT** via `oReportSetup.CreateReport(name, "Matrix", "Rectangular Plot",
+  "Setup1 : Sweep1", ["Context:=","Original"], ["Freq:=",["All"]], ["X
+  Component:=","Freq","Y Component:=",[<expr>]])` whose Y is `((C(a,a)+C(b,b))/2 −
+  C(a,b))/2 / <lengthMeters>`. **CRITICAL distinction:** the post-processing REPORT
+  engine (`ReportSetup`) DOES accept `C(net,net)` arithmetic and resolves it in SI
+  **Farads** — so the trace is F/m directly (length BAKED in metres, same
+  anti-double-conversion lesson as the 2-line Δl literal; if a release resolves C
+  in fF the trace is off by ~1e15 → fall back to the CSV). It is only the DESIGN
+  output-variable parser that rejects `C(...)` as "'C' is not a function name"
+  ("C Matrix" report category ⇒ report type string `"Matrix"`, NOT "C Matrix").
+  The matrix is also visible under Results → Solution Data → Matrix. The line C is
+  the **DIFFERENTIAL** capacitance `((C11+C22)/2 − C12)/2` (the port drives the
+  strips differentially), NOT `|C12|`; `÷ length(m)` — VERIFY the length for
+  meanders. Builds ONLY the SELECTED line conductor(s) (each transform
   instance → its own covered sheet via `shapeInstanceToRing`, at the conductor
   mid-Z) + the dielectric stack boxes over the footprint. Feeds/launches are
   EXCLUDED on purpose (they bridge the conductors across the port gap → would

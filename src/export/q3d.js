@@ -17,12 +17,14 @@
 // Modeling: conductors are THIN CONDUCTORS (a covered sheet swept up by the
 // thickness); each conductor COMPONENT gets one SIGNAL NET (all its repeat/meander
 // sheets joined, so the matrix is conductor-to-conductor — NOT one net per sheet);
-// a capacitance setup + frequency sweep; the design is SOLVED, then the C matrix
-// is EXPORTED to a CSV via oDesign.ExportMatrixData (and shown under Results ->
-// Solution Data -> Matrix). No C report/output var is scripted — Q3D rejects the
-// matrix quantity C(net,net) in any expression ("'C' is not a function name").
-// The line capacitance is the DIFFERENTIAL capacitance ((C11+C22)/2 − C12)/2 —
-// the port drives the strips differentially — NOT |C12|.
+// a capacitance setup + frequency sweep; the design is SOLVED, then (a) the C
+// matrix is EXPORTED to a CSV via oDesign.ExportMatrixData and (b) a "C per
+// length (F/m)" PLOT is created via oReportSetup.CreateReport. The post-
+// processing REPORT engine DOES accept C(net,net) arithmetic (and resolves it in
+// SI Farads); it's only the DESIGN output-variable parser that rejects C(...) as
+// "'C' is not a function name" — don't confuse the two. The line capacitance is
+// the DIFFERENTIAL capacitance ((C11+C22)/2 − C12)/2 — the port drives the
+// strips differentially — NOT |C12|.
 //
 // Two emitters: generateQ3DCapacitance (standalone, own project) and
 // generateQ3DCombinedBlock (appended to the 2-line HFSS script, same project).
@@ -282,7 +284,7 @@ const CAP_SETUP = (fGHz, cg) => `["NAME:Setup1",
 // sheets joined) so the matrix is conductor-to-conductor — the differential
 // per-length formula assumes exactly 2 nets. Every COM call routes failures
 // through q3d_msg (a guarded logger) so one bad call can never abort the script.
-function q3dNetsSetupReports({ condNets, design, fAdaptGHz, sweep, cg }) {
+function q3dNetsSetupReports({ condNets, design, fAdaptGHz, lengthUm, sweep, cg }) {
   const groups = condNets || [];
   const nets = groups.map((n) =>
     `q3d_signal_net("${n.net}", [${n.objects.map((o) => `"${o}"`).join(', ')}])`).join('\n');
@@ -299,6 +301,13 @@ function q3dNetsSetupReports({ condNets, design, fAdaptGHz, sweep, cg }) {
   const b = groups.length >= 2 ? groups[1].net : null;
   const fHz = num((Number.isFinite(fAdaptGHz) ? fAdaptGHz : 4) * 1e9);
   const dname = (design || 'q3d_cap');
+  // Per-length differential C as a REPORT expression. In a Q3D report expression
+  // C(net,net) resolves in SI Farads, so dividing by the length BAKED in metres
+  // (NOT a unit-carrying variable — same anti-double-conversion lesson as the
+  // 2-line Δl literal) yields F/m directly.
+  const lengthM = dec((Number.isFinite(lengthUm) && lengthUm > 0 ? lengthUm : 1) * 1e-6);
+  const diffC = (a && b) ? `((C(${a},${a})+C(${b},${b}))/2-C(${a},${b}))/2` : '';
+  const perLen = `(${diffC})/${lengthM}`;
 
   const extract = (a && b)
     ? `# Solve the (fast) electrostatic capacitance, then EXPORT the matrix to CSV.
@@ -317,6 +326,18 @@ try:
     q3d_msg(0, "C matrix (fF) exported -> " + _cfile)
 except Exception as e:
     q3d_msg(1, "ExportMatrixData failed; read Results -> Solution Data -> Matrix instead: " + str(e))
+# Auto-create a PLOT of C PER UNIT LENGTH (F/m) vs Freq. The post-processing
+# REPORT engine (unlike the design output-variable parser) DOES accept C(net,net)
+# arithmetic; C resolves in SI Farads there, and the length is baked in metres,
+# so the trace is F/m directly. Flat vs Freq (capacitance is electrostatic).
+try:
+    oRpt = oDesign.GetModule("ReportSetup")
+    oRpt.CreateReport("C_per_length_F_per_m", "Matrix", "Rectangular Plot",
+        "Setup1 : Sweep1", ["Context:=", "Original"], ["Freq:=", ["All"]],
+        ["X Component:=", "Freq", "Y Component:=", ["${perLen}"]])
+    q3d_msg(0, "Report 'C_per_length_F_per_m' created (F/m, flat vs Freq) -> read the value, paste into the 2-line wizard 'C per length'. If it's off by ~1e15, C resolved in fF on your release; use the CSV / matrix instead.")
+except Exception as e:
+    q3d_msg(1, "CreateReport failed (read the C matrix / CSV instead): " + str(e))
 q3d_msg(0, "C-matrix nets: 1=${a}, 2=${b}. Maxwell off-diagonal C12 is NEGATIVE (|.| = mutual).")
 q3d_msg(0, "Per-length line C (differential) = ((C11+C22)/2 - C12)/2 / (q3d_line_len_um*1e-6). Paste into the 2-line wizard 'C per length'.")`
     : '# (need >=2 conductor nets for a conductor-to-conductor capacitance — select >=2 line conductors in the wizard)';
@@ -460,7 +481,7 @@ ${body.dielBlocks.join('\n') || '# (no dielectric layers)'}
 # ===== Line conductor(s) — thin conductors (parametric) =====
 ${body.condBlocks.join('\n')}
 
-${q3dNetsSetupReports({ condNets: body.condNets, design, fAdaptGHz: body.fAdaptGHz, sweep, cg: { perError: opts.perError, minPass: opts.minPass, maxPass: opts.maxPass } })}
+${q3dNetsSetupReports({ condNets: body.condNets, design, fAdaptGHz: body.fAdaptGHz, lengthUm: body.lengthUm, sweep, cg: { perError: opts.perError, minPass: opts.minPass, maxPass: opts.maxPass } })}
 
 oProject.Save()
 q3d_msg(0, "Parametric Q3D capacitance built + solved. C matrix exported to <project>/${design}_Cmatrix.csv (also Results -> Solution Data -> Matrix). Compute the per-length C and paste into the 2-line wizard.")
@@ -500,7 +521,7 @@ ${body.dielBlocks.join('\n')}
 # ===== Line conductor(s) — thin conductors (parametric) =====
 ${body.condBlocks.join('\n')}
 
-${q3dNetsSetupReports({ condNets: body.condNets, design, fAdaptGHz: body.fAdaptGHz, sweep, cg: { perError: opts.perError, minPass: opts.minPass, maxPass: opts.maxPass } })}
+${q3dNetsSetupReports({ condNets: body.condNets, design, fAdaptGHz: body.fAdaptGHz, lengthUm: body.lengthUm, sweep, cg: { perError: opts.perError, minPass: opts.minPass, maxPass: opts.maxPass } })}
 
 oProject.Save()
 q3d_msg(0, "Q3D design '${design}' built + solved. C matrix exported to <project>/${design}_Cmatrix.csv (also Results -> Solution Data -> Matrix). Compute per-length C, set ${cVar} on design '${hfss}'.")
