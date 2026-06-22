@@ -149,24 +149,26 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
   const cNum = cFperM.trim() === '' ? null : Number(cFperM);
   const cValid = cNum != null && Number.isFinite(cNum) && cNum > 0;
 
-  // Remember EVERY field for next time — called on any generate path (the main
-  // 2-line Generate and both Q3D buttons), so nothing the user typed is lost.
-  const persist = () => saveTwoLinePrefs({
-    lengthParam, l1, l2, separation, freqStart, freqStop, freqPoints, cFperM,
-    q3dThk, q3dLen, bundleQ3D, q3dIds: [...q3dPick],
-  });
+  // Remember EVERY field for next time. Persist on every change (NOT only on
+  // Generate) so the last-entered values survive even if the dialog is closed
+  // without generating, or while the build is invalid (Generate disabled). The
+  // mount run just re-saves the restored values — harmless.
+  useEffect(() => {
+    saveTwoLinePrefs({
+      lengthParam, l1, l2, separation, freqStart, freqStop, freqPoints, cFperM,
+      q3dThk, q3dLen, bundleQ3D, q3dIds: [...q3dPick],
+    });
+  }, [lengthParam, l1, l2, separation, freqStart, freqStop, freqPoints, cFperM, q3dThk, q3dLen, bundleQ3D, q3dPick]);
 
   const generate = () => {
     if (!build.ok) return;
-    persist();
     const bundle = (bundleQ3D && q3dPick.size > 0 && thkValid)
       ? { conductorIds: [...q3dPick], ...q3dOpts() }
       : undefined;
     onGenerate(build.ok.scene, build.ok.portIndices, build.ok.dLMeters, cValid ? cNum : undefined, bundle);
     onClose();
   };
-  // Generate the separate Q3D script — also persist the current settings.
-  const generateQ3D = () => { persist(); onGenerateQ3D([...q3dPick], q3dOpts()); };
+  const generateQ3D = () => onGenerateQ3D([...q3dPick], q3dOpts());
 
   const fieldCls = 'w-full px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-100 text-xs focus:outline-none focus:border-cyan-500';
   const labelCls = 'text-[11px] text-slate-400';

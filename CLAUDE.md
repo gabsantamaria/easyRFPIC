@@ -386,6 +386,8 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
   persist** (lengthParam, L1/L2, separation, freq band, C, Q3D thickness/length,
   the conductor selection, and the bundle toggle) — saved by a shared `persist()`
   on EVERY generate path (main Generate AND both Q3D buttons), restored on open;
+  on every field CHANGE (a useEffect, not only on Generate) — so values survive
+  closing without generating, or while the build is invalid (Generate disabled);
   in `localStorage`
   (`src/ui/twoLineSettings.js`, key `photonic_layout_two_line` — outside
   workspace prefixes, same isolation as the AI key/settings): saved on Generate,
