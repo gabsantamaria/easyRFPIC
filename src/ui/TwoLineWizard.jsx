@@ -28,7 +28,7 @@ export function TwoLineWizard(props) {
   return <TwoLineWizardInner {...props} />;
 }
 
-function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerateQ3D }) {
+function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerateQ3D, onGenerateZ0Transfer }) {
   // Candidate length params: everything the user authored, minus the synthetic
   // per-component position/size params (_comp_*). Sorted for stable display.
   const paramNames = useMemo(() => Object.keys(scene.params || {})
@@ -179,6 +179,7 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
     onClose();
   };
   const generateQ3D = () => onGenerateQ3D([...q3dPick], q3dOpts());
+  const generateZ0Transfer = () => onGenerateZ0Transfer([...q3dPick], q3dOpts());
 
   const fieldCls = 'w-full px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-100 text-xs focus:outline-none focus:border-cyan-500';
   const labelCls = 'text-[11px] text-slate-400';
@@ -345,6 +346,19 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
                     <span className="text-[11px] text-cyan-400">↑ also built into the main script on Generate</span>
                   )}
                 </div>
+                {onGenerateZ0Transfer && (
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={generateZ0Transfer}
+                      disabled={q3dPick.size < 2}
+                      className="px-2.5 py-1 rounded text-[11px] font-medium border border-slate-600 hover:bg-slate-800 text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed"
+                      title="Generate a SEPARATE 'Z₀ from Q3D C' script to run on the SOLVED combined project (Q3D + 2-line HFSS both solved). It reads the Q3D capacitance matrix, sets tl_C_F_per_m as a POST-PROCESSING variable on the HFSS design (no re-solve), and plots Re/Im Z₀ vs Freq. Needs ≥2 conductors (differential C). The computed C is echoed with sanity bounds so a mis-read is visible."
+                    >
+                      Z₀-from-Q3D script…
+                    </button>
+                    <span className="text-[11px] text-slate-500">run after solving both designs</span>
+                  </div>
+                )}
               </div>
             )}
           </div>

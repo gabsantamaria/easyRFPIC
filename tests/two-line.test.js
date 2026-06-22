@@ -15,7 +15,7 @@ import {
   TL_L1, TL_L2, TL_DL,
 } from '../src/scene/twoLine.js';
 import { generateHfssNative } from '../src/export/hfss-native.js';
-import { generateQ3DCapacitance } from '../src/export/q3d.js';
+import { generateQ3DCapacitance, generateZ0TransferScript } from '../src/export/q3d.js';
 import { makeDefaultScene, normalizeScene, paramsForStack } from '../src/scene/schema.js';
 import { resolveParams, evalExpr } from '../src/scene/params.js';
 import { solveLayout } from '../src/scene/solver.js';
@@ -499,5 +499,49 @@ describe('generateQ3DCapacitance — meander C extraction script', () => {
   it('throws when no conductor is selected', () => {
     expect(() => generateQ3DCapacitance(makeLineScene(500), resolveParams(makeLineScene(500).params).values, { conductorIds: [] }))
       .toThrow(/at least one line conductor/i);
+  });
+});
+
+// "Z0 from Q3D C" transfer + plot script: run on the SOLVED combined project.
+// Reads the Q3D C matrix (ExportMatrixData CSV), sets tl_C_F_per_m as a
+// post-processing var on the HFSS design, plots Re/Im Z0.
+describe('generateZ0TransferScript — Q3D C → HFSS Z0 post-processing transfer', () => {
+  it('reads the Q3D matrix, sets a post-processing C var, plots Re/Im Z0; parses', () => {
+    const scene = makeLineScene(500);
+    const pv = resolveParams(scene.params).values;
+    const s = generateZ0TransferScript(scene, pv, {
+      conductorIds: ['line', 'padL'], thicknessUm: 0.2, lengthUm: 500,
+    });
+    // 1. Reads the Q3D matrix via ExportMatrixData and parses the whitespace-
+    //    delimited, net-name-labeled square block.
+    expect(s).toContain('oProject.SetActiveDesign("q3d_cap")');
+    expect(s).toContain('oDesign.ExportMatrixData(');
+    expect(s).toContain('"Capacitance Matrix"');
+    expect(s).toContain('"Conductance Matrix"');
+    expect(s).toContain('_d[("net_line", "net_line")]');     // C11 by net name
+    expect(s).toContain('_d[("net_padL", "net_padL")]');     // C22
+    expect(s).toContain('_d[("net_line", "net_padL")]');     // C12
+    expect(s).toContain('((_C11 + _C22) / 2.0 - _C12) / 2.0'); // differential C
+    expect(s).toContain('1e-15 / 0.0005');                   // fF→F, ÷ length(m=500µm)
+    expect(s).toContain('1e-12 < C_per_m < 1e-8');           // loud sanity bound
+    // 2. Sets tl_C_F_per_m as a POST-PROCESSING var on the HFSS design (no re-solve).
+    expect(s).toContain('oProject.SetActiveDesign("Layout")');
+    expect(s).toContain('def _tl_pp_var(');
+    expect(s).toContain('"PostProcessingVariableProp"');
+    expect(s).toContain('_tl_pp_var("tl_C_F_per_m"');
+    // 3. Plots Re/Im Z0 vs Freq from the existing output vars.
+    expect(s).toContain('CreateReport("Z0 re+im (from Q3D C)"');
+    expect(s).toContain('"Setup1 : Sweep"');                 // HFSS solution name
+    expect(s).toContain('["tl_Z0_re", "tl_Z0_im"]');
+    mkdirSync('tests/out', { recursive: true });
+    writeFileSync('tests/out/z0_from_q3d.py', s);
+    execSync('python3 -c "import ast; ast.parse(open(\'tests/out/z0_from_q3d.py\').read())"');
+  });
+
+  it('throws when fewer than 2 conductors are selected (differential C undefined)', () => {
+    const scene = makeLineScene(500);
+    const pv = resolveParams(scene.params).values;
+    expect(() => generateZ0TransferScript(scene, pv, { conductorIds: ['line'] }))
+      .toThrow(/2 line conductors|2 nets/i);
   });
 });

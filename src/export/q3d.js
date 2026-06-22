@@ -540,3 +540,133 @@ oDesign = oProject.SetActiveDesign("${hfss}")
 `;
   return ascii(code);
 }
+
+// Standalone "Z0 from Q3D C" transfer + plot script. Run it (AEDT: Tools -> Run
+// Script) on the SOLVED combined project — the bundled Q3D design "q3d_cap" and
+// the 2-line HFSS design "Layout" must both be solved. It (1) reads the Q3D
+// capacitance matrix (ExportMatrixData -> CSV -> parse the DIFFERENTIAL per-
+// length C in F/m), (2) sets tl_C_F_per_m as a POST-PROCESSING variable on the
+// HFSS design (no re-solve), and (3) plots Re/Im Z0 vs Freq. The read is ECHOED
+// with sanity bounds so a mis-read is LOUD — the reason the auto-transfer was
+// previously left manual. Reuses buildQ3DBody only for the net names + length.
+export function generateZ0TransferScript(scene, paramValues, opts = {}) {
+  const body = buildQ3DBody(scene, paramValues, opts, 'q3d_box', 'q3d_poly', 'q3d_sweep');
+  const groups = body.condNets || [];
+  if (groups.length < 2) throw new Error('Select at least 2 line conductors (2 nets) so the differential C for Z0 is defined.');
+  const a = groups[0].net, b = groups[1].net;
+  const design = (opts.designName || 'q3d_cap').replace(/[^A-Za-z0-9_]/g, '_');
+  const hfss = (opts.hfssDesignName || 'Layout').replace(/[^A-Za-z0-9_]/g, '_');
+  const cVar = (opts.cVarName || 'tl_C_F_per_m');
+  const lengthUm = (Number.isFinite(opts.lengthUm) && opts.lengthUm > 0) ? opts.lengthUm : body.lengthUm;
+  const lengthM = dec((Number.isFinite(lengthUm) && lengthUm > 0 ? lengthUm : 1) * 1e-6);
+  const fHz = num((Number.isFinite(body.fAdaptGHz) ? body.fAdaptGHz : 4) * 1e9);
+  const code = `# -*- coding: utf-8 -*-
+# Auto-generated: transfer the Q3D-solved per-length capacitance into the HFSS
+# 2-line design's POST-PROCESSING variable "${cVar}", then plot Re/Im Z0.
+# RUN (AEDT: Tools -> Run Script) on the SOLVED combined project: the bundled
+# Q3D design "${design}" and the 2-line HFSS design "${hfss}" must BOTH be solved
+# (run the *_2line_hfss.py script with the Q3D bundle ON, then Analyze both).
+# "${cVar}" is a post-processing variable, so setting it does NOT invalidate the
+# HFSS field solution — the eeff/alpha/Z0 reports just re-scale.
+import ScriptEnv
+ScriptEnv.Initialize("Ansoft.ElectronicsDesktop")
+oDesktop.RestoreWindow()
+oProject = oDesktop.GetActiveProject()
+
+def _msg(sev, text):
+    try:
+        oDesktop.AddMessage("", "", sev, str(text))
+    except:
+        pass
+
+def _tl_pp_var(name, value):
+    # Set/update a POST-PROCESSING local variable on the active oDesign.
+    try:
+        existing = list(oDesign.GetVariables())
+    except:
+        existing = []
+    if name in existing:
+        try:
+            oDesign.ChangeProperty(
+                ["NAME:AllTabs", ["NAME:LocalVariableTab",
+                 ["NAME:PropServers", "LocalVariables"],
+                 ["NAME:ChangedProps",
+                  ["NAME:" + name, "Value:=", value, "Description:=", "",
+                   "ReadOnly:=", False, "Hidden:=", False, "Sweep:=", True]]]])
+            return
+        except:
+            pass
+    try:
+        oDesign.ChangeProperty(
+            ["NAME:AllTabs", ["NAME:LocalVariableTab",
+             ["NAME:PropServers", "LocalVariables"],
+             ["NAME:NewProps",
+              ["NAME:" + name, "PropType:=", "PostProcessingVariableProp",
+               "UserDef:=", True, "Value:=", value, "Description:=", "",
+               "ReadOnly:=", False, "Hidden:=", False, "Sweep:=", True]]]])
+        return
+    except:
+        pass
+    try:
+        oDesign.SetVariableValue(name, value)
+    except Exception as e:
+        _msg(2, "Could not set " + name + ": " + str(e))
+
+if oProject is None:
+    _msg(2, "No active project. Open the solved 2-line + Q3D project first.")
+else:
+    C_per_m = None
+    # ---- 1. Read the Q3D capacitance matrix (export to CSV + parse) ----
+    try:
+        oDesign = oProject.SetActiveDesign("${design}")
+        _csv = oProject.GetPath() + "/${design}_Cmatrix_z0.csv"
+        oDesign.ExportMatrixData(_csv, "C", "", "Setup1 : LastAdaptive", "Original",
+            "ohm", "nH", "fF", "mSie", ${fHz}, "Maxwell, Spice, Couple", 0, False)
+        _f = open(_csv); _txt = _f.read(); _f.close()
+        # ExportMatrixData is WHITESPACE-delimited (even as .csv): a net-name-
+        # labeled SQUARE block between "Capacitance Matrix" and "Conductance
+        # Matrix"; values in fF (Maxwell: diagonal +, off-diagonal -).
+        _cap = _txt.split("Capacitance Matrix")[1].split("Conductance Matrix")[0]
+        _rows = [ln for ln in _cap.splitlines() if ln.strip()]
+        _cols = _rows[0].split()
+        _d = {}
+        for _ln in _rows[1:]:
+            _t = _ln.split()
+            for _j in range(len(_cols)):
+                _d[(_t[0], _cols[_j])] = float(_t[_j + 1])
+        _C11 = _d[("${a}", "${a}")]; _C22 = _d[("${b}", "${b}")]; _C12 = _d[("${a}", "${b}")]
+        _Cd_fF = ((_C11 + _C22) / 2.0 - _C12) / 2.0          # differential C, fF
+        C_per_m = _Cd_fF * 1e-15 / ${lengthM}                 # F/m (length baked in metres)
+        _msg(0, "Q3D C [fF]: C11=%g C22=%g C12=%g -> Cd=%g fF ; length=${lengthM} m -> C/length=%g F/m" % (_C11, _C22, _C12, _Cd_fF, C_per_m))
+        if not (1e-12 < C_per_m < 1e-8):
+            _msg(2, "C/length=%g F/m is OUTSIDE the sane ~1e-12..1e-8 band -- CHECK net names (${a}, ${b}), the baked length, and the matrix read BEFORE trusting Z0." % C_per_m)
+    except Exception as e:
+        _msg(2, "Failed to read/parse the Q3D C matrix: " + str(e) + " -- read it manually (Results -> Solution Data -> Matrix) and set ${cVar} by hand.")
+
+    # ---- 2. Set ${cVar} (post-processing) on HFSS + 3. plot Re/Im Z0 ----
+    if C_per_m is not None:
+        try:
+            oDesign = oProject.SetActiveDesign("${hfss}")
+        except Exception as e:
+            _msg(2, "HFSS design '${hfss}' not found: " + str(e))
+            oDesign = None
+        if oDesign is not None:
+            _val = ("%.10g" % C_per_m)
+            _tl_pp_var("${cVar}", _val)
+            _msg(0, "Set ${cVar} = " + _val + " F/m (post-processing) on '${hfss}'. No re-solve needed.")
+            try:
+                oRpt = oDesign.GetModule("ReportSetup")
+                try:
+                    oRpt.DeleteReports(["Z0 re+im (from Q3D C)"])
+                except:
+                    pass
+                oRpt.CreateReport("Z0 re+im (from Q3D C)", "Modal Solution Data", "Rectangular Plot",
+                    "Setup1 : Sweep", ["Domain:=", "Sweep"], ["Freq:=", ["All"]],
+                    ["X Component:=", "Freq", "Y Component:=", ["tl_Z0_re", "tl_Z0_im"]], [])
+                _msg(0, "Report 'Z0 re+im (from Q3D C)' created: Re(Z0)=tl_Z0_re, Im(Z0)=tl_Z0_im vs Freq.")
+            except Exception as e:
+                _msg(1, "CreateReport Z0 failed -- tl_Z0_re/tl_Z0_im come from the main 2-line script; run it (with Z0 on) first: " + str(e))
+    oProject.Save()
+`;
+  return ascii(code);
+}

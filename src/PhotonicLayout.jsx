@@ -12,7 +12,7 @@ import { solveLayout, applyMirrors, resolveBooleanBboxes, validateSnapGraph } fr
 import { generateGDS, viaGdsLayerMap } from './export/gds.js';
 import { generatePyAEDT } from './export/pyaedt.js';
 import { generateHfssNative } from './export/hfss-native.js';
-import { generateQ3DCapacitance } from './export/q3d.js';
+import { generateQ3DCapacitance, generateZ0TransferScript } from './export/q3d.js';
 import { generateGdsfactory } from './export/gdsfactory.js';
 import { generateSvgFromElement, generatePdfFromElement } from './export/figure.js';
 import { defaultStack, normalizeScene, makeDefaultScene, makeBlankScene, paramsForStack, migrateStackCoplanarGroups } from './scene/schema.js';
@@ -5037,6 +5037,23 @@ export default function App() {
     const ok = downloadFile(filename, content);
     setExportPreview({ filename, content, downloaded: ok });
   };
+  // "Z₀ from Q3D C" transfer + plot script: run on the SOLVED combined project —
+  // reads the Q3D capacitance matrix, sets tl_C_F_per_m as a post-processing var
+  // on the HFSS design (no re-solve), and plots Re/Im Z₀ vs Freq.
+  const handleExportZ0Transfer = async (conductorIds, q3dOpts = {}) => {
+    let content;
+    try {
+      content = generateZ0TransferScript(normalizeScene(scene), paramValues, { conductorIds, ...q3dOpts, designName: 'q3d_cap', hfssDesignName: 'Layout' });
+    } catch (e) {
+      console.error('Z0-transfer generator error:', e);
+      await alertDialog('Error generating Z₀ transfer script: ' + e.message, 'Export error');
+      return;
+    }
+    if (!content) { await alertDialog('Failed to generate Z₀ transfer script.', 'Export error'); return; }
+    const filename = `${exportFileBase()}_z0_from_q3d.py`;
+    const ok = downloadFile(filename, content);
+    setExportPreview({ filename, content, downloaded: ok });
+  };
   // gdsfactory export: a parametric @gf.cell function. The design name
   // (project only — NOT the versioned filename) is passed through so the
   // function and output .gds use a stable identifier.
@@ -8234,6 +8251,7 @@ export default function App() {
         paramValues={paramValues}
         onGenerate={handleExportTwoLine}
         onGenerateQ3D={handleExportQ3DCap}
+        onGenerateZ0Transfer={handleExportZ0Transfer}
       />
 
       {/* Modal dialog (confirm/prompt/alert) */}

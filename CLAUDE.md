@@ -398,6 +398,22 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
   (AssignSignalNet / InsertSetup "Matrix" / InsertSweep / ExportMatrixData) are
   pyAEDT-validated (AEDT 2023 R-series) but still wrapped defensively. Stack-Z via
   a local group-aware `computeLayerZ` mirroring `layerZ`.
+- **Z₀ transfer script (`generateZ0TransferScript`, q3d.js)**: a SEPARATE
+  standalone script (`<base>_z0_from_q3d.py`; wizard "Z₀-from-Q3D script…" button,
+  enabled at ≥2 selected conductors) that the user runs on the SOLVED combined
+  project. It (1) reads the `q3d_cap` C matrix by RE-EXPORTING via
+  `ExportMatrixData` to a CSV and PARSING it (whitespace-delimited, net-name-
+  labeled SQUARE block between the literal markers `Capacitance Matrix` /
+  `Conductance Matrix`, values in fF, Maxwell signs — verified against
+  qiskit-metal's `readin_q3d_matrix`), computes the differential per-length C =
+  `((C11+C22)/2 − C12)/2 · 1e-15 / <length_m>` (F/m, length baked in metres),
+  (2) sets `tl_C_F_per_m` as a POST-PROCESSING var on `Layout` via the same
+  `_tl_pp_var` helper (no re-solve), and (3) `CreateReport`s "Z0 re+im (from Q3D
+  C)" plotting `tl_Z0_re`/`tl_Z0_im` vs `Setup1 : Sweep`. The computed C is ECHOED
+  with a sane-range bound (1e-12–1e-8 F/m) so a mis-read (wrong net names /
+  length / parse) is LOUD, not silent — which is why the original in-line
+  auto-transfer was left commented. Reuses `buildQ3DBody` only for the net names +
+  length; assumes the combined-script design names (`q3d_cap`, `Layout`).
 - **`src/ui/TwoLineWizard.jsx`** — dialog (mount-on-open wrapper like
   `AiAssistantDialog`): length-param dropdown (user params, live values, sorted,
   `_comp_*` hidden), L1/L2 (re-seeded from the param's current value on
