@@ -418,12 +418,13 @@ describe('generateHfssNative options.twoLine — script emits the εeff/α math'
 // separate Q3D script for the SELECTED line conductor(s); the user divides
 // conductor-to-conductor C by physical length and feeds it back as cFperM.
 describe('generateQ3DCapacitance — meander C extraction script', () => {
-  it('builds a PARAMETRIC Q3D design: thin conductors, nets, sweep, C-per-length; parses', () => {
+  it('builds a PARAMETRIC Q3D design: thin conductors, nets, sweep, CG controls; parses', () => {
     const scene = makeLineScene(500);
     const pv = resolveParams(scene.params).values;
     const q = generateQ3DCapacitance(scene, pv, {
       conductorIds: ['line', 'padL'], thicknessUm: 0.2, lengthUm: 500, // 2 conductors → C between nets
-      freqStartGHz: 1, freqStopGHz: 50, freqPoints: 201, designName: 'mtl',
+      freqStartGHz: 1, freqStopGHz: 50, freqPoints: 201,
+      perError: 0.01, minPass: 15, maxPass: 20, designName: 'mtl',
     });
     expect(q).toContain('InsertDesign("Q3D Extractor"');
     expect(q).toContain('line_i0');                 // a conductor instance object
@@ -440,22 +441,21 @@ describe('generateQ3DCapacitance — meander C extraction script', () => {
     // Explicit signal nets (one per conductor object).
     expect(q).toContain('AssignSignalNet');
     expect(q).toContain('net_line_i0');
-    // Capacitance setup + frequency sweep matching the band.
+    // Capacitance setup with CG convergence controls + frequency sweep.
     expect(q).toContain('InsertSetup("Matrix"');
+    expect(q).toContain('"PerError:=", 0.01');
+    expect(q).toContain('"MinPass:=", 15');
+    expect(q).toContain('"MaxPass:=", 20');
     expect(q).toContain('InsertSweep');
     expect(q).toContain('"1GHz"');
     expect(q).toContain('"50GHz"');
-    // Differential per-length C ((C11+C22)/2 − C12)/2, NOT |C12|; length via the var.
-    expect(q).toContain('"C per length"');
-    expect(q).toContain('C_per_m');
-    expect(q).toContain('q3d_line_len_um*1e-6');
+    // Solve, then the C matrix is read NATIVELY (no scripted C report/output var,
+    // which Q3D rejects). The differential per-length formula is printed.
+    expect(q).toContain('oDesign.Analyze("Setup1")');
+    expect(q).toContain('Results -> Solution Data -> Matrix');
+    expect(q).toContain('((C11+C22)/2 - C12)/2');   // differential, in the message
+    expect(q).not.toContain('CreateOutputVariable');
     expect(q).not.toMatch(/abs\(C\(/);
-    expect(q).toMatch(/\(\(C\(net_line_i0,net_line_i0\)\+C\(net_padL_i0,net_padL_i0\)\)\/2-C\(net_line_i0,net_padL_i0\)\)\/2/);
-    // Q3D matrix quantities only exist post-solve → Analyze precedes the reports.
-    expect(q).toContain('"Capacitance"');
-    expect(q.indexOf('oDesign.Analyze("Setup1")')).toBeGreaterThan(0);
-    expect(q.indexOf('oDesign.Analyze("Setup1")')).toBeLessThan(q.indexOf('CreateOutputVariable('));
-    expect(q.indexOf('oDesign.Analyze("Setup1")')).toBeLessThan(q.indexOf('CreateReport("Capacitance"'));
     mkdirSync('tests/out', { recursive: true });
     writeFileSync('tests/out/q3d_cap.py', q);
     execSync('python3 -c "import ast; ast.parse(open(\'tests/out/q3d_cap.py\').read())"');

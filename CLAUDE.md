@@ -347,12 +347,14 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
   `q3d_cond_thk` and `q3d_line_len_um` — so width/gap/thickness/dielectric sweep
   in Q3D and re-Analyze. Non-rect / rotated conductors fall back to baked numeric
   geometry. Each conductor object gets its own **signal net** (`AssignSignalNet`).
-  Emits a capacitance setup + a **frequency sweep** (`InsertSweep`, same band as
-  the 2-line wizard). **Q3D matrix quantities (`C(netA,netB)`) only exist AFTER a
-  solve** — referencing them pre-solve fails with "'C' is not a function name".
-  So the script `oDesign.Analyze("Setup1")` FIRST (fast electrostatic cap), THEN
-  creates a raw **Capacitance** report + a **C-per-length** report/output var.
-  The line C is the **DIFFERENTIAL** capacitance `((C11+C22)/2 − C12)/2`
+  Emits a capacitance setup (with wizard CG convergence controls — `PerError` %,
+  `MinPass`, `MaxPass`, defaults 0.01/15/20) + a **frequency sweep**
+  (`InsertSweep`, same band as the 2-line wizard), then SOLVES (`Analyze`).
+  **Q3D's expression parser REJECTS the matrix quantity `C(netA,netB)` as a
+  function ("'C' is not a function name") in ANY expression — even post-solve —
+  so we do NOT script a C report or output variable.** The C matrix is read
+  NATIVELY (Results → Solution Data → Matrix); the script prints the per-length
+  formula. The line C is the **DIFFERENTIAL** capacitance `((C11+C22)/2 − C12)/2`
   (the port drives the strips differentially), NOT `|C12|`; `÷ (q3d_line_len_um
   ·1e-6)` — VERIFY the length for meanders. Builds ONLY the SELECTED line
   conductor(s)

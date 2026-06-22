@@ -31,6 +31,9 @@ export function loadTwoLinePrefs() {
       q3dLen: str(p.q3dLen),
       bundleQ3D: !!p.bundleQ3D,
       q3dIds: Array.isArray(p.q3dIds) ? p.q3dIds.filter((x) => typeof x === 'string') : [],
+      q3dCg: str(p.q3dCg),
+      q3dMinP: str(p.q3dMinP),
+      q3dMaxP: str(p.q3dMaxP),
     };
   } catch {
     return null;
@@ -53,6 +56,9 @@ export function saveTwoLinePrefs(prefs) {
       q3dLen: p.q3dLen || '',
       bundleQ3D: !!p.bundleQ3D,
       q3dIds: Array.isArray(p.q3dIds) ? p.q3dIds : [],
+      q3dCg: p.q3dCg || '',
+      q3dMinP: p.q3dMinP || '',
+      q3dMaxP: p.q3dMaxP || '',
     }));
     return true;
   } catch {

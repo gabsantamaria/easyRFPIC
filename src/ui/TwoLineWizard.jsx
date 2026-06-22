@@ -82,16 +82,24 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
   }, [scene, paramValues]);
   const [q3dThk, setQ3dThk] = useState(() => (prefs && prefs.q3dThk ? prefs.q3dThk : (condThkResolved > 0 ? String(condThkResolved) : '')));
   const [q3dLen, setQ3dLen] = useState(() => (prefs && prefs.q3dLen ? prefs.q3dLen : '')); // line physical length (µm); blank = geometry guess
+  // Q3D capacitance-setup convergence controls.
+  const [q3dCg, setQ3dCg] = useState(() => (prefs && prefs.q3dCg ? prefs.q3dCg : '0.01'));      // CG % error (ΔC per pass)
+  const [q3dMinP, setQ3dMinP] = useState(() => (prefs && prefs.q3dMinP ? prefs.q3dMinP : '15')); // min passes
+  const [q3dMaxP, setQ3dMaxP] = useState(() => (prefs && prefs.q3dMaxP ? prefs.q3dMaxP : '20')); // max passes
   const thkNum = q3dThk.trim() === '' ? null : Number(q3dThk);
   const thkValid = thkNum != null && Number.isFinite(thkNum) && thkNum > 0;
   const lenNum = q3dLen.trim() === '' ? null : Number(q3dLen);
-  // Options bundle passed to the Q3D generators (thickness, optional length, band).
+  const numOr = (s, d) => { const v = Number(s); return Number.isFinite(v) && v > 0 ? v : d; };
+  // Options bundle passed to the Q3D generators (thickness, optional length, band, convergence).
   const q3dOpts = () => ({
     thicknessUm: thkValid ? thkNum : undefined,
     lengthUm: (lenNum != null && Number.isFinite(lenNum) && lenNum > 0) ? lenNum : undefined,
     freqStartGHz: freqStart.trim() === '' ? undefined : Number(freqStart),
     freqStopGHz: freqStop.trim() === '' ? undefined : Number(freqStop),
     freqPoints: freqPoints.trim() === '' ? undefined : Number(freqPoints),
+    perError: numOr(q3dCg, 0.01),
+    minPass: numOr(q3dMinP, 15),
+    maxPass: numOr(q3dMaxP, 20),
   });
 
   // When the user CHANGES the length param, re-seed L1/L2 from its current
@@ -156,9 +164,9 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
   useEffect(() => {
     saveTwoLinePrefs({
       lengthParam, l1, l2, separation, freqStart, freqStop, freqPoints, cFperM,
-      q3dThk, q3dLen, bundleQ3D, q3dIds: [...q3dPick],
+      q3dThk, q3dLen, bundleQ3D, q3dIds: [...q3dPick], q3dCg, q3dMinP, q3dMaxP,
     });
-  }, [lengthParam, l1, l2, separation, freqStart, freqStop, freqPoints, cFperM, q3dThk, q3dLen, bundleQ3D, q3dPick]);
+  }, [lengthParam, l1, l2, separation, freqStart, freqStop, freqPoints, cFperM, q3dThk, q3dLen, bundleQ3D, q3dPick, q3dCg, q3dMinP, q3dMaxP]);
 
   const generate = () => {
     if (!build.ok) return;
@@ -298,6 +306,20 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
                     <label className={labelCls}>Line physical length (µm)</label>
                     <input className={fieldCls} value={q3dLen} placeholder="auto (geometry) — set unfolded length"
                       onChange={(e) => setQ3dLen(e.target.value)} />
+                  </div>
+                </div>
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="space-y-1">
+                    <label className={labelCls}>CG error (%)</label>
+                    <input className={fieldCls} value={q3dCg} placeholder="0.01" onChange={(e) => setQ3dCg(e.target.value)} />
+                  </div>
+                  <div className="space-y-1">
+                    <label className={labelCls}>Min passes</label>
+                    <input className={fieldCls} value={q3dMinP} placeholder="15" onChange={(e) => setQ3dMinP(e.target.value)} />
+                  </div>
+                  <div className="space-y-1">
+                    <label className={labelCls}>Max passes</label>
+                    <input className={fieldCls} value={q3dMaxP} placeholder="20" onChange={(e) => setQ3dMaxP(e.target.value)} />
                   </div>
                 </div>
                 {q3dPick.size > 0 && !thkValid && (

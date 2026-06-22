@@ -247,55 +247,44 @@ ${sweepFn}("${name}", "q3d_cond_thk")  # thin conductor: sweep up by thickness`;
   return { varDecls, matDefs, dielBlocks, condBlocks, condObjs, fAdaptGHz, effThk, lengthUm: num(lengthUm) };
 }
 
-const CAP_SETUP = (fGHz) => `["NAME:Setup1",
+const CAP_SETUP = (fGHz, cg) => `["NAME:Setup1",
          "AdaptiveFreq:=", "${fGHz}GHz", "SaveFields:=", False, "Enabled:=", True,
-         ["NAME:Cap", "MaxPass:=", 10, "MinPass:=", 1, "MinConvPass:=", 1,
-          "PerError:=", 1, "PerRefine:=", 30, "AutoIncreaseSolutionOrder:=", True,
+         ["NAME:Cap", "MaxPass:=", ${cg.maxPass}, "MinPass:=", ${cg.minPass}, "MinConvPass:=", 1,
+          "PerError:=", ${cg.perError}, "PerRefine:=", 30, "AutoIncreaseSolutionOrder:=", True,
           "SolutionOrder:=", "High", "Solver Type:=", "Iterative"]]`;
 
-// Nets + setup + frequency sweep + SOLVE + C reports (shared, top-level). Q3D
-// matrix quantities C(netA,netB) DON'T EXIST until solved → Analyze FIRST, then
-// create the reports (else "'C' is not a function name").
-function q3dNetsSetupReports({ condObjs, fAdaptGHz, sweep }) {
+// Nets + setup + frequency sweep + SOLVE (shared, top-level). The capacitance
+// MATRIX is read from Q3D's native results (Results -> Solution Data -> Matrix)
+// — we do NOT create a report/output variable for it, because Q3D's expression
+// parser rejects the matrix quantity C(netA,netB) as a function ("'C' is not a
+// function name") in ANY expression context, even post-solve. The script prints
+// the per-length formula instead.
+function q3dNetsSetupReports({ condObjs, fAdaptGHz, sweep, cg }) {
   const nets = condObjs.map((o) => `q3d_signal_net("net_${o}", "${o}")`).join('\n');
   const s = sweep || {};
   const startG = Number.isFinite(s.startGHz) ? s.startGHz : 1;
   const stopG = Number.isFinite(s.stopGHz) ? s.stopGHz : 40;
   const pts = (Number.isFinite(s.points) && s.points >= 1) ? Math.round(s.points) : 201;
+  const cgv = {
+    perError: (Number.isFinite(cg?.perError) && cg.perError > 0) ? cg.perError : 0.01,
+    minPass: (Number.isFinite(cg?.minPass) && cg.minPass >= 1) ? Math.round(cg.minPass) : 15,
+    maxPass: (Number.isFinite(cg?.maxPass) && cg.maxPass >= 1) ? Math.round(cg.maxPass) : 20,
+  };
   const a = condObjs.length >= 2 ? `net_${condObjs[0]}` : null;
   const b = condObjs.length >= 2 ? `net_${condObjs[1]}` : null;
 
-  let extract = '# (need >=2 conductor nets for a conductor-to-conductor C/length)';
-  if (a && b) {
-    extract = `# Solve the (fast) electrostatic capacitance so the C matrix quantities exist —
-# they DON'T pre-solve, which is why the reports below come AFTER Analyze.
-# Comment this out to mesh/solve manually first; then make the reports from
-# Results -> Create Report -> Matrix.
+  const extract = (a && b)
+    ? `# Solve the (fast) electrostatic capacitance, then read the matrix natively.
+# (We do NOT script a C report/output var: Q3D rejects C(netA,netB) in an
+# expression. The C MATRIX is shown directly under Results -> Solution Data ->
+# Matrix once solved.) Comment out the Analyze to mesh/solve manually first.
 try:
     oDesign.Analyze("Setup1")
 except Exception as e:
-    oDesktop.AddMessage("", "", 2, "Q3D Analyze failed (solve manually, then report from Results -> Matrix): " + str(e))
-# Raw Maxwell C-matrix report. Off-diagonal C(netA,netB) is NEGATIVE by Maxwell
-# convention; |C(netA,netB)| is the mutual capacitance.
-try:
-    oDesign.GetModule("ReportSetup").CreateReport("Capacitance", "Matrix", "Data Table",
-        "Setup1 : LastAdaptive", ["Context:=", "Original"], [],
-        ["X Component:=", "Freq", "Y Component:=", ["C(${a},${b})", "C(${a},${a})", "C(${b},${b})"]], [])
-except Exception as e:
-    oDesktop.AddMessage("", "", 1, "Capacitance report skipped (create from Results -> Matrix): " + str(e))
-# Per-length DIFFERENTIAL line capacitance (the port drives the strips
-# differentially): C_line = ((C11+C22)/2 - C12)/2, NOT |C12|. q3d_line_len_um is
-# the line physical length (um) — VERIFY for a meander.
-try:
-    oDesign.GetModule("OutputVariable").CreateOutputVariable(
-        "C_per_m", "((C(${a},${a})+C(${b},${b}))/2-C(${a},${b}))/2/(q3d_line_len_um*1e-6)", "Setup1 : LastAdaptive", "Matrix", [])
-    oDesign.GetModule("ReportSetup").CreateReport("C per length", "Matrix", "Data Table",
-        "Setup1 : LastAdaptive", ["Context:=", "Original"], [],
-        ["X Component:=", "Freq", "Y Component:=", ["C_per_m"]], [])
-except Exception as e:
-    oDesktop.AddMessage("", "", 1, "C_per_m report skipped: " + str(e))
-oDesktop.AddMessage("", "", 0, "C per length = ((C11+C22)/2 - C12)/2 / (q3d_line_len_um*1e-6). Paste C_per_m into the 2-line wizard.")`;
-  }
+    oDesktop.AddMessage("", "", 2, "Q3D Analyze failed: " + str(e))
+oDesktop.AddMessage("", "", 0, "Q3D solved. Read the C matrix: Results -> Solution Data -> Matrix (Capacitance). Maxwell off-diagonal C(${a},${b}) is NEGATIVE (|.| = mutual).")
+oDesktop.AddMessage("", "", 0, "Per-length line C (differential) = ((C11+C22)/2 - C12)/2 / (q3d_line_len_um*1e-6). Compute it from the matrix and paste into the 2-line wizard 'C per length'.")`
+    : '# (need >=2 conductor nets for a conductor-to-conductor capacitance)';
 
   return `# ===== Nets (one signal net per conductor object) =====
 oBnd = oDesign.GetModule("BoundarySetup")
@@ -307,9 +296,10 @@ def q3d_signal_net(net, obj):
 ${nets}
 
 # ===== Capacitance setup + frequency sweep (same band as the 2-line wizard) =====
+# Cap convergence: PerError = ${cgv.perError}% (CG/% delta-C), MinPass = ${cgv.minPass}, MaxPass = ${cgv.maxPass}.
 oAna = oDesign.GetModule("AnalysisSetup")
 try:
-    oAna.InsertSetup("Matrix", ${CAP_SETUP(fAdaptGHz)})
+    oAna.InsertSetup("Matrix", ${CAP_SETUP(fAdaptGHz, cgv)})
 except Exception as e:
     oDesktop.AddMessage("", "", 2, "InsertSetup(Matrix) failed: " + str(e))
 try:
@@ -320,7 +310,7 @@ try:
 except Exception as e:
     oDesktop.AddMessage("", "", 1, "InsertSweep failed (add a sweep from the GUI): " + str(e))
 
-# ===== Solve + capacitance-per-length reports (post-solve!) =====
+# ===== Solve + read the capacitance matrix (native, post-solve) =====
 ${extract}`;
 }
 
@@ -410,10 +400,10 @@ ${body.dielBlocks.join('\n') || '# (no dielectric layers)'}
 # ===== Line conductor(s) — thin conductors (parametric) =====
 ${body.condBlocks.join('\n')}
 
-${q3dNetsSetupReports({ condObjs: body.condObjs, fAdaptGHz: body.fAdaptGHz, sweep })}
+${q3dNetsSetupReports({ condObjs: body.condObjs, fAdaptGHz: body.fAdaptGHz, sweep, cg: { perError: opts.perError, minPass: opts.minPass, maxPass: opts.maxPass } })}
 
 oProject.Save()
-oDesktop.AddMessage("", "", 0, "Parametric Q3D capacitance built + solved. Read 'C per length' (verify q3d_line_len_um) -> paste C (F/m) into the 2-line wizard.")
+oDesktop.AddMessage("", "", 0, "Parametric Q3D capacitance built + solved. Read the C matrix (Results -> Solution Data -> Matrix); compute the per-length C (printed formula) and paste into the 2-line wizard.")
 `;
   return ascii(code);
 }
@@ -449,10 +439,10 @@ ${body.dielBlocks.join('\n')}
 # ===== Line conductor(s) — thin conductors (parametric) =====
 ${body.condBlocks.join('\n')}
 
-${q3dNetsSetupReports({ condObjs: body.condObjs, fAdaptGHz: body.fAdaptGHz, sweep })}
+${q3dNetsSetupReports({ condObjs: body.condObjs, fAdaptGHz: body.fAdaptGHz, sweep, cg: { perError: opts.perError, minPass: opts.minPass, maxPass: opts.maxPass } })}
 
 oProject.Save()
-oDesktop.AddMessage("", "", 0, "Q3D design '${design}' built + solved. Read 'C per length' (verify q3d_line_len_um), set ${cVar} on design '${hfss}'.")
+oDesktop.AddMessage("", "", 0, "Q3D design '${design}' built + solved. Read the C matrix (Results -> Solution Data -> Matrix), compute per-length C (printed formula), set ${cVar} on design '${hfss}'.")
 
 # --- Optional AUTO-TRANSFER (uncomment after verifying the matrix read in your
 #     AEDT release; a wrong read would silently corrupt Z0, so it's off by default) ---
