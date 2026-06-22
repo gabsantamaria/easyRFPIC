@@ -386,17 +386,24 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
   designs. Generates from the BUILT scene (not the canvas scene) →
   preview/download as `<base>_2line_hfss.py`. **All last-used field values
   persist** (lengthParam, L1/L2, separation, freq band, C, Q3D thickness/length,
-  the conductor selection, and the bundle toggle) — saved by a shared `persist()`
-  on EVERY generate path (main Generate AND both Q3D buttons), restored on open;
-  on every field CHANGE (a useEffect, not only on Generate) — so values survive
-  closing without generating, or while the build is invalid (Generate disabled);
-  in `localStorage`
-  (`src/ui/twoLineSettings.js`, key `photonic_layout_two_line` — outside
-  workspace prefixes, same isolation as the AI key/settings): saved on Generate,
-  restored on open. A saved lengthParam absent from the current design falls
-  back to the first param; the L1/L2 re-seed-on-param-change is gated by a
-  prev-value ref (NOT a mount-count flag) so it survives StrictMode's
-  double-invoked mount effect and doesn't clobber restored values.
+  the conductor selection, the bundle toggle, and the CG convergence controls) —
+  saved on every field CHANGE via a useEffect (NOT only on Generate), so values
+  survive closing without generating or while the build is invalid (Generate
+  disabled). Persistence is LAYERED (`src/ui/twoLineSettings.js`, key
+  `photonic_layout_two_line` — outside workspace prefixes, same isolation as the
+  AI key/settings): (1) an in-memory module cache is authoritative for the
+  session and makes close→reopen survive EVEN WHEN the browser silently drops
+  `localStorage` writes (private mode / blocked storage / quota) — this was the
+  actual "wizard keeps forgetting" bug; (2) `window.storage` (IndexedDB — the
+  same durable backend designs use) is written fire-and-forget and hydrated once
+  at boot (`hydrateTwoLinePrefs()` in `main.jsx`) so a reload restores even
+  without `localStorage`; (3) `localStorage` is best-effort, for a fast
+  synchronous restore before the async hydrate lands. Do NOT revert this to a
+  bare `localStorage.getItem/setItem` — that reintroduces the bug for any user
+  whose `localStorage` is non-functional. A saved lengthParam absent from the
+  current design falls back to the first param; the L1/L2 re-seed-on-param-change
+  is gated by a prev-value ref (NOT a mount-count flag) so it survives
+  StrictMode's double-invoked mount effect and doesn't clobber restored values.
 - **Phase-ambiguity caveat (v1)**: β is unwrapped only while βΔl < π over the
   band — pick L2−L1 small enough. α and εeff-from-α are unaffected by the branch.
 

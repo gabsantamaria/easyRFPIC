@@ -35,9 +35,11 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
     .filter((n) => !n.startsWith('_comp_'))
     .sort((a, b) => a.localeCompare(b)), [scene]);
 
-  // Last-used field values (localStorage). Loaded once on mount — the wizard
-  // remounts on every open, so this restores what was last GENERATED. A saved
-  // lengthParam that no longer exists in this design falls back to the first.
+  // Last-used field values. Loaded synchronously on mount from the in-memory
+  // session cache (set on every change — survives close→reopen even if browser
+  // storage is blocked), backed by IndexedDB across reloads (see
+  // twoLineSettings.js). A saved lengthParam that no longer exists in this
+  // design falls back to the first.
   const prefs = useMemo(() => loadTwoLinePrefs(), []);
   const savedParamOk = prefs && prefs.lengthParam && paramNames.includes(prefs.lengthParam);
 
