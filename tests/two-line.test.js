@@ -375,14 +375,18 @@ describe('generateHfssNative options.twoLine — script emits the εeff/α math'
     expect(py).not.toContain('tl_eeff');
   });
 
-  it('with cFperM, emits the Z₀ vars (referencing the C set_var) + Z0 report; without, none', () => {
+  it('with cFperM, emits the Z₀ vars + a post-processing C var + Z0 report; without, none', () => {
     const { scene, portIndices, dLMeters } = buildTwoLineScene(makeLineScene(500), {
       lengthParam: 'Lc', l1: 300, l2: 900,
     });
     const pv = resolveParams(scene.params).values;
     const withC = generateHfssNative(scene, pv, { twoLine: { portIndices, dLMeters, cFperM: 1.6e-10 } });
     expect(withC).toContain('tl_Z0_re');
-    expect(withC).toContain('set_var("tl_C_F_per_m", "0.00000000016")'); // editable design var
+    // C is a POST-PROCESSING variable: editing it after a solve re-scales Z0
+    // WITHOUT invalidating the field solution (it only feeds the Z0 output vars).
+    expect(withC).toContain('_tl_pp_var("tl_C_F_per_m", "0.00000000016")');
+    expect(withC).toContain('"PropType:=", "PostProcessingVariableProp"');
+    expect(withC).not.toContain('set_var("tl_C_F_per_m"'); // NOT a design var
     expect(withC).toContain('"Z0 vs Freq"');
     const noC = generateHfssNative(scene, pv, { twoLine: { portIndices, dLMeters } });
     expect(noC).not.toContain('tl_Z0_re');
@@ -400,7 +404,7 @@ describe('generateHfssNative options.twoLine — script emits the εeff/α math'
     });
     expect(py).toContain('InsertDesign("HFSS"');            // the 2-line design
     expect(py).toContain('InsertDesign("Q3D Extractor"');   // bundled in same project
-    expect(py).toContain('set_var("tl_C_F_per_m"');         // placeholder, Q3D sets it
+    expect(py).toContain('_tl_pp_var("tl_C_F_per_m"');      // post-processing scale, Q3D sets it
     expect(py).toContain('tl_Z0_re');                       // Z0 still emitted
     expect(py).toContain('AssignSignalNet');                // explicit nets
     expect(py).toContain('SweepAlongVector');               // thin conductors

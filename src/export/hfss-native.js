@@ -4532,9 +4532,48 @@ except Exception as e:
       const tlLines = tlVars.map(v =>
         `_tl_outvar(${JSON.stringify(v.name)}, ${JSON.stringify(v.expr)})  # ${ascii(v.note || '')}`
       ).join('\n');
-      // Per-length C as an editable HFSS design variable (F/m, unitless number).
-      // Manual value if supplied, else a placeholder for the Q3D step to set.
-      const tlCVar = tlHasZ0 ? `set_var("tl_C_F_per_m", "${tlCInit}")  # F/m (edit, or set from the Q3D capacitance solve)\n` : '';
+      // Per-length C as a POST-PROCESSING variable (F/m). It ONLY scales the Z0
+      // output-variable expressions (Z0 = gamma/(j*w*C)) — so editing it after a
+      // solve re-scales the reports WITHOUT invalidating the field solution (no
+      // re-solve). A normal design variable would dirty the solution. The
+      // post-processing nature is carried entirely by PropType
+      // "PostProcessingVariableProp" (there is NO separate "PostProcessing" key);
+      // updates to an existing var use ChangedProps (no PropType). Falls back to
+      // a normal design variable if a release rejects it.
+      const tlCVar = tlHasZ0 ? `def _tl_pp_var(name, value):
+    try:
+        existing = list(oDesign.GetVariables())
+    except:
+        existing = []
+    if name in existing:
+        try:
+            oDesign.ChangeProperty(
+                ["NAME:AllTabs", ["NAME:LocalVariableTab",
+                 ["NAME:PropServers", "LocalVariables"],
+                 ["NAME:ChangedProps",
+                  ["NAME:" + name, "Value:=", value, "Description:=", "",
+                   "ReadOnly:=", False, "Hidden:=", False, "Sweep:=", True]]]])
+            return
+        except:
+            pass
+    try:
+        oDesign.ChangeProperty(
+            ["NAME:AllTabs", ["NAME:LocalVariableTab",
+             ["NAME:PropServers", "LocalVariables"],
+             ["NAME:NewProps",
+              ["NAME:" + name, "PropType:=", "PostProcessingVariableProp",
+               "UserDef:=", True, "Value:=", value, "Description:=", "",
+               "ReadOnly:=", False, "Hidden:=", False, "Sweep:=", True]]]])
+        return
+    except:
+        pass
+    try:
+        oDesktop.AddMessage("", "", 1, "tl_C_F_per_m: post-processing var failed; using a normal design variable (editing C will require a re-solve).")
+    except:
+        pass
+    set_var(name, value)
+_tl_pp_var("tl_C_F_per_m", "${tlCInit}")  # F/m post-processing scale (edit, or set from the Q3D capacitance solve)
+` : '';
       // Optional Z0 report.
       const tlZ0Report = tlHasZ0 ? `
 try:
@@ -4576,9 +4615,10 @@ except Exception as e:
 # alpha = |Re gamma|. Line A = ports 1,2; line B = ports 3,4. DeltaL is a baked
 # metres literal (NOT the tl_dL design var, which resolves to metres in report
 # exprs and would double-convert).${tlHasZ0 ? `
-# Z0 = gamma/(j*w*C) is ALSO emitted, referencing the design variable
+# Z0 = gamma/(j*w*C) is ALSO emitted, referencing the POST-PROCESSING variable
 # tl_C_F_per_m (F/m): Re(Z0)=beta/(wC), Im(Z0)=-alpha/(wC). C is electrostatic so
-# Z0 is kinetic-inductance-correct. Set tl_C_F_per_m below${tlQ3DBlock ? ' (the bundled Q3D design solves it — see the block after the reports)' : ' (edit it / from a Q3D capacitance solve)'}.` : ''}
+# Z0 is kinetic-inductance-correct. Because it's post-processing, you can edit
+# tl_C_F_per_m AFTER solving and the reports re-scale with NO re-solve. Set it${tlQ3DBlock ? ' (the bundled Q3D design solves it — see the block after the reports)' : ' (edit it / from a Q3D capacitance solve)'}.` : ''}
 # Assumes the report expression engine evaluates Freq in Hz (HFSS 2023). After
 # you Analyze Setup1:Sweep, the reports below populate. PHASE-AMBIGUITY: valid
 # only while beta*DeltaL < pi over the band (pick L2-L1 small enough); alpha is

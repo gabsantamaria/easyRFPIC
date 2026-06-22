@@ -533,7 +533,7 @@ q3d_msg(0, "Q3D design '${design}' built + solved. C matrix exported to <project
 #     oDesign = oProject.SetActiveDesign("${design}")
 #     # ... read C_per_m from the solution, then: ...
 #     oDesign = oProject.SetActiveDesign("${hfss}")
-#     set_var("${cVar}", str(C_per_m_value))
+#     _tl_pp_var("${cVar}", str(C_per_m_value))  # post-processing var: no re-solve
 # except Exception as e:
 #     oDesktop.AddMessage("", "", 2, "Auto-transfer failed: " + str(e))
 oDesign = oProject.SetActiveDesign("${hfss}")

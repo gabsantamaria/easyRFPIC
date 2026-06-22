@@ -316,9 +316,14 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
   - `findLumpedPortOrder(solved, pv)` — replicates the exporter's port filter
     (`hfss-native.js`) over the solved list to discover the port order.
 - **Z₀ (optional, `includeZ0`)**: `twoLineOutputVariables(pi, dLMeters, includeZ0)`
-  appends `tl_Z0_re/_im/_mag` referencing the HFSS DESIGN VARIABLE `tl_C_F_per_m`
-  (the exporter emits a `set_var` for it — editable in HFSS / settable from a Q3D
-  solve): `Z0 = γ/(jωC)` ⇒ Re=β/(ωC), Im=−α/(ωC), sign-free like εeff. C is
+  appends `tl_Z0_re/_im/_mag` referencing `tl_C_F_per_m`, which the exporter emits
+  as a **POST-PROCESSING variable** (`_tl_pp_var` helper → `ChangeProperty` on
+  `LocalVariableTab` with `PropType:="PostProcessingVariableProp"`; updates use
+  `ChangedProps`, no PropType). Because C only scales the report-only Z₀ output
+  vars, editing it AFTER a solve re-scales the reports with **no re-solve / no
+  lost solution** — a normal design variable would dirty the field solution
+  (`_tl_pp_var` falls back to `set_var` if a release rejects the PP PropType):
+  `Z0 = γ/(jωC)` ⇒ Re=β/(ωC), Im=−α/(ωC), sign-free like εeff. C is
   electrostatic ⇒ kinetic-inductance-correct. The 2-line method gives γ ONLY
   (εeff fixes √(LC); Z₀ needs L/C) — so Z₀ requires an independent C. For a
   MEANDER there's no cross-section, so C comes from a full-3-D Q3D solve (below).
