@@ -310,14 +310,27 @@ function q3dNetsSetupReports({ condNets, design, fAdaptGHz, lengthUm, sweep, cg 
   const perLen = `(${diffC})/${lengthM}`;
 
   const extract = (a && b)
-    ? `# Solve the (fast) electrostatic capacitance, then EXPORT the matrix to CSV.
-# Comment out the Analyze to mesh/solve manually first.
+    ? `# Create the C-per-length PLOT BEFORE solving — with "Real time" update it then
+# populates live as the adaptive passes + sweep run. Defining the trace needs NO
+# solved data: the C(net,net) quantities exist as soon as the nets are assigned,
+# and "Setup1 : Sweep1" is defined by InsertSweep above. The post-processing
+# REPORT engine (unlike the design output-variable parser) accepts C(net,net)
+# arithmetic and resolves it in SI Farads; the length is baked in metres, so the
+# trace is F/m directly. Flat vs Freq (capacitance is electrostatic).
+try:
+    oRpt = oDesign.GetModule("ReportSetup")
+    oRpt.CreateReport("C_per_length_F_per_m", "Matrix", "Rectangular Plot",
+        "Setup1 : Sweep1", ["Context:=", "Original"], ["Freq:=", ["All"]],
+        ["X Component:=", "Freq", "Y Component:=", ["${perLen}"]])
+    q3d_msg(0, "Report 'C_per_length_F_per_m' created (F/m; updates live during the solve). Read the flat value, paste into the 2-line wizard 'C per length'. If it's off by ~1e15, C resolved in fF on your release; use the CSV / matrix instead.")
+except Exception as e:
+    q3d_msg(1, "CreateReport failed (read the C matrix / CSV after solving): " + str(e))
+# Solve the (fast) electrostatic capacitance. Comment out to mesh/solve manually.
 try:
     oDesign.Analyze("Setup1")
 except Exception as e:
     q3d_msg(2, "Q3D Analyze failed: " + str(e))
-# Direct C-matrix dump to a CSV next to the project. ExportMatrixData is the only
-# scriptable export — Q3D rejects C(net,net) in a report expression. Maxwell C in fF.
+# Direct C-matrix dump to a CSV next to the project (post-solve). Maxwell C in fF.
 try:
     _cdir = oProject.GetPath()
     _cfile = _cdir + "/${dname}_Cmatrix.csv"
@@ -326,18 +339,6 @@ try:
     q3d_msg(0, "C matrix (fF) exported -> " + _cfile)
 except Exception as e:
     q3d_msg(1, "ExportMatrixData failed; read Results -> Solution Data -> Matrix instead: " + str(e))
-# Auto-create a PLOT of C PER UNIT LENGTH (F/m) vs Freq. The post-processing
-# REPORT engine (unlike the design output-variable parser) DOES accept C(net,net)
-# arithmetic; C resolves in SI Farads there, and the length is baked in metres,
-# so the trace is F/m directly. Flat vs Freq (capacitance is electrostatic).
-try:
-    oRpt = oDesign.GetModule("ReportSetup")
-    oRpt.CreateReport("C_per_length_F_per_m", "Matrix", "Rectangular Plot",
-        "Setup1 : Sweep1", ["Context:=", "Original"], ["Freq:=", ["All"]],
-        ["X Component:=", "Freq", "Y Component:=", ["${perLen}"]])
-    q3d_msg(0, "Report 'C_per_length_F_per_m' created (F/m, flat vs Freq) -> read the value, paste into the 2-line wizard 'C per length'. If it's off by ~1e15, C resolved in fF on your release; use the CSV / matrix instead.")
-except Exception as e:
-    q3d_msg(1, "CreateReport failed (read the C matrix / CSV instead): " + str(e))
 q3d_msg(0, "C-matrix nets: 1=${a}, 2=${b}. Maxwell off-diagonal C12 is NEGATIVE (|.| = mutual).")
 q3d_msg(0, "Per-length line C (differential) = ((C11+C22)/2 - C12)/2 / (q3d_line_len_um*1e-6). Paste into the 2-line wizard 'C per length'.")`
     : '# (need >=2 conductor nets for a conductor-to-conductor capacitance — select >=2 line conductors in the wizard)';

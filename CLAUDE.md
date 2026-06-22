@@ -355,16 +355,18 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
   was a real bug — it made the matrix N×N and broke the formula.) Emits a
   capacitance setup (with wizard CG convergence controls — `PerError` %,
   `MinPass`, `MaxPass`, defaults 0.01/15/20) + a **frequency sweep**
-  (`InsertSweep`, same band as the 2-line wizard), then SOLVES (`Analyze`). After
-  the solve it produces the C result TWO ways: (1) **EXPORTS the C matrix to
-  `<project>/<design>_Cmatrix.csv`** via `oDesign.ExportMatrixData(file, "C", "",
-  "Setup1 : LastAdaptive", "Original", "ohm","nH","fF","mSie", <fHz>, "Maxwell,
-  Spice, Couple", 0, False)` (the 13-arg AEDT-2023 form; `problem_type="C"` for
-  3-D Q3D, NOT `"CG"`; freq is numeric Hz); and (2) **auto-creates a "C per length
-  (F/m)" PLOT** via `oReportSetup.CreateReport(name, "Matrix", "Rectangular Plot",
-  "Setup1 : Sweep1", ["Context:=","Original"], ["Freq:=",["All"]], ["X
-  Component:=","Freq","Y Component:=",[<expr>]])` whose Y is `((C(a,a)+C(b,b))/2 −
-  C(a,b))/2 / <lengthMeters>`. **CRITICAL distinction:** the post-processing REPORT
+  (`InsertSweep`, same band as the 2-line wizard). The C result comes out TWO
+  ways: (1) a **"C per length (F/m)" PLOT auto-created BEFORE the `Analyze`** (so
+  with "Real time" update it populates live during the solve — defining the trace
+  needs no solved data, only the nets + the `Setup1 : Sweep1` solution name) via
+  `oReportSetup.CreateReport(name, "Matrix", "Rectangular Plot", "Setup1 :
+  Sweep1", ["Context:=","Original"], ["Freq:=",["All"]], ["X Component:=","Freq","Y
+  Component:=",[<expr>]])` whose Y is `((C(a,a)+C(b,b))/2 − C(a,b))/2 /
+  <lengthMeters>`; then SOLVES (`Analyze`); and (2) **EXPORTS the C matrix to
+  `<project>/<design>_Cmatrix.csv`** (post-solve) via `oDesign.ExportMatrixData(
+  file, "C", "", "Setup1 : LastAdaptive", "Original", "ohm","nH","fF","mSie",
+  <fHz>, "Maxwell, Spice, Couple", 0, False)` (the 13-arg AEDT-2023 form;
+  `problem_type="C"` for 3-D Q3D, NOT `"CG"`; freq is numeric Hz). **CRITICAL distinction:** the post-processing REPORT
   engine (`ReportSetup`) DOES accept `C(net,net)` arithmetic and resolves it in SI
   **Farads** — so the trace is F/m directly (length BAKED in metres, same
   anti-double-conversion lesson as the 2-line Δl literal; if a release resolves C
