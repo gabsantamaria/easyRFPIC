@@ -41,6 +41,17 @@ const num = (v) => (Number.isFinite(v) ? (Math.round(v * 1e6) / 1e6) : 0);
 // engine reads. Rounds to 1e-9 (sub-femtometre) and trims trailing zeros.
 const dec = (x) => { if (!Number.isFinite(x)) return '0'; let s = (Math.round(x * 1e9) / 1e9).toFixed(9); if (s.indexOf('.') >= 0) s = s.replace(/0+$/, '').replace(/\.$/, ''); return s || '0'; };
 const unitFor = (u) => (u === 'µm' ? 'um' : (u === 'deg' ? 'deg' : ''));
+// Z/thickness expression with correct units. Mirrors hfss-native's exprWithUm:
+// a BARE NUMERIC gets the unit INSIDE the parens ("(0.6um)"); an expression with
+// identifiers is left alone ("(h_si)") because its variables already carry their
+// unit (set_var declares them "<n>um"). NEVER append "um" OUTSIDE the parens —
+// "(h_si)um" double-converts (h_si is already µm) → picometre-thin layers.
+const exprUm = (e) => {
+  const s = String(e ?? '').trim();
+  if (s === '' || s === '0') return '0um';
+  if (/^-?\d+(?:\.\d+)?$/.test(s)) return `(${s}um)`;
+  return `(${s})`;
+};
 
 // Group-aware Z walk: numeric (zBottom/zTop) AND parametric (zBottomExpr/
 // zTopExpr, in terms of the layer thickness vars h_si/h_wg/…). Mirrors
@@ -48,12 +59,12 @@ const unitFor = (u) => (u === 'µm' ? 'um' : (u === 'deg' ? 'deg' : ''));
 function computeLayerZ(stack, pv) {
   const layers = migrateStackCoplanarGroups(stack || []);
   const thkNum = (l) => { const v = evalExpr(l.thickness, pv); return Number.isFinite(v) ? Math.abs(v) : 0; };
-  const thkExpr = (l) => (l.thickness ? `(${l.thickness})` : '0');
+  const thkExpr = (l) => exprUm(l.thickness);
   const zBottom = {}, zTop = {}, zBottomExpr = {}, zTopExpr = {};
   let datum = layers.findIndex((l) => l.role !== 'substrate' || l.coplanarGroup);
   if (datum < 0) datum = layers.length;
   // Substrates below the datum, stacked downward (negative Z).
-  let zc = 0, zcE = '0';
+  let zc = 0, zcE = '0um';
   for (let i = datum - 1; i >= 0; i--) {
     const l = layers[i], t = thkNum(l);
     zTop[l.id] = zc; zTopExpr[l.id] = zcE;
@@ -62,7 +73,7 @@ function computeLayerZ(stack, pv) {
   }
   // From the datum up; coplanar groups share zBottom; advance past a group by
   // its cladding top (thickest cladding, else thickest member).
-  zc = 0; zcE = '0';
+  zc = 0; zcE = '0um';
   let i = datum;
   while (i < layers.length) {
     const l = layers[i];
@@ -126,7 +137,7 @@ function buildQ3DBody(scene, paramValues, opts, boxFn, polyFn, sweepFn) {
   const hCond = condLayer ? (evalExpr(condLayer.thickness, pv) || 0) : 0;
   let effThk = Number.isFinite(opts.thicknessUm) && opts.thicknessUm > 0 ? opts.thicknessUm : (hCond > 0 ? hCond : 0.1);
   effThk = num(effThk);
-  const condZBotExpr = condLayer ? `(${zBottomExpr[condLayer.id]})` : '0';
+  const condZBotExpr = condLayer ? `(${zBottomExpr[condLayer.id]})` : '0um';
 
   // ---- Design variables: scene params + thickness + line length + bases ----
   const varDecls = [];
@@ -148,7 +159,7 @@ function buildQ3DBody(scene, paramValues, opts, boxFn, polyFn, sweepFn) {
 
   const polySheet = (name, pts) => {
     const ptStr = [...pts, pts[0]].map(([x, y]) =>
-      `["NAME:PLPoint", "X:=", "${x}", "Y:=", "${y}", "Z:=", "${condZBotExpr}um"]`
+      `["NAME:PLPoint", "X:=", "${x}", "Y:=", "${y}", "Z:=", "${condZBotExpr}"]`
     ).join(',\n          ');
     const segs = pts.map((_, j) => `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", ${j}, "NoOfPoints:=", 2]`).join(',\n          ');
     return `${polyFn}(
@@ -235,8 +246,8 @@ ${sweepFn}("${name}", "q3d_cond_thk")  # thin conductor: sweep up by thickness`;
     const nm = `diel_${l.id}`.replace(/[^A-Za-z0-9_]/g, '_');
     dielBlocks.push(`${boxFn}(
     ["NAME:BoxParameters",
-     "XPosition:=", "${xPos}um", "YPosition:=", "${yPos}um", "ZPosition:=", "(${zBottomExpr[l.id]})um",
-     "XSize:=", "${xSize}um", "YSize:=", "${ySize}um", "ZSize:=", "(${l.thickness || '0'})um"],
+     "XPosition:=", "${xPos}um", "YPosition:=", "${yPos}um", "ZPosition:=", "(${zBottomExpr[l.id]})",
+     "XSize:=", "${xSize}um", "YSize:=", "${ySize}um", "ZSize:=", "${exprUm(l.thickness || '0')}"],
     ["NAME:Attributes",
      "Name:=", "${nm}", "Flags:=", "", "Color:=", "(160 160 200)",
      "Transparency:=", 0.7, "PartCoordinateSystem:=", "Global",

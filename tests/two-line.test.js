@@ -429,6 +429,12 @@ describe('generateQ3DCapacitance — meander C extraction script', () => {
     expect(q).toContain('InsertDesign("Q3D Extractor"');
     expect(q).toContain('line_i0');                 // a conductor instance object
     expect(q).toMatch(/diel_/);                     // dielectric stack boxes
+    // UNIT SAFETY: thickness/Z exprs reference unit-carrying vars WITHOUT
+    // re-appending "um" — "(h_si)um" double-converts (h_si is already µm) to
+    // picometre-thin layers. Bare numerics get the unit INSIDE: "(6um)".
+    expect(q).toContain('"ZSize:=", "(h_si)"');     // variable thickness, no double unit
+    expect(q).toMatch(/"ZPosition:=", "\(0um/);     // Z cursor seeded in µm, unit inside
+    expect(q).not.toMatch(/\([A-Za-z_][^)]*\)um/);  // NO "(varexpr)um" double-unit anywhere
     // Parametric design variables + geometry referencing them.
     expect(q).toContain('set_var("Lc"');            // scene param declared as a Q3D var
     expect(q).toContain('set_var("q3d_cond_thk", "0.2um")');
