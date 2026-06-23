@@ -194,7 +194,7 @@ function clusterOf(c, byId, acc = []) {
 // cluster) into distinct static components. `components` should be SOLVED
 // (resolved cx/cy) so baked positions account for any snap chain. Returns
 // { components, warnings }.
-function flattenReplicas(components, pv) {
+export function flattenReplicas(components, pv) {
   const byId = Object.fromEntries(components.map((c) => [c.id, c]));
   const tops = components.filter((c) => !c.consumedBy); // operands ride their boolean
   const info = [];

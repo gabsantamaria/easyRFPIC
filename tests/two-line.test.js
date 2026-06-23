@@ -534,5 +534,36 @@ describe('generateQ3DCapacitance — meander C extraction script', () => {
     expect(() => generateQ3DCapacitance(makeLineScene(500), resolveParams(makeLineScene(500).params).values, { conductorIds: [] }))
       .toThrow(/at least one line conductor/i);
   });
+
+  it('expands a BOOLEAN conductor (e.g. a meander union) into operand sheets under ONE net', () => {
+    // Two union electrodes; one with a 3× repeat. The picker now exposes booleans
+    // (a meander is a union), and buildQ3DBody must emit all operand sheets of a
+    // selected boolean under a single net_<id> — not skip the boolean.
+    const rect = (id, extra) => ({ id, kind: 'rect', layer: 'electrode', cutouts: [], transforms: [], ...extra });
+    const boolU = (id, ops, extra) => ({ id, kind: 'boolean', op: 'union', operandIds: ops, layer: 'electrode', cx: 0, cy: 0, w: '0', h: '0', cutouts: [], transforms: [], ...extra });
+    const scene = normalizeScene({
+      params: paramsForStack(defaults.stack),
+      components: [
+        rect('a1', { cx: 0, cy: 10, w: '20', h: '2', consumedBy: 'condA' }),
+        rect('a2', { cx: 0, cy: 13, w: '20', h: '2', consumedBy: 'condA' }),
+        boolU('condA', ['a1', 'a2'], { cx: 0, cy: 11.5, transforms: [{ id: 'r', kind: 'repeat', enabled: true, n: '2', dx: '30', dy: '0', includeOriginal: true }] }),
+        rect('b1', { cx: 0, cy: -10, w: '20', h: '2', consumedBy: 'condB' }),
+        rect('b2', { cx: 0, cy: -13, w: '20', h: '2', consumedBy: 'condB' }),
+        boolU('condB', ['b1', 'b2']),
+      ],
+      snaps: [], mirrors: [], groups: [], booleans: [],
+      stack: defaults.stack, stackName: defaults.stackName, simSetup: defaults.simSetup,
+    });
+    const pv = resolveParams(scene.params).values;
+    const q = generateQ3DCapacitance(scene, pv, { conductorIds: ['condA', 'condB'], thicknessUm: 0.2, lengthUm: 80, designName: 'mtl' });
+    // condA = 2 operands × 3 repeats = 6 sheets, all in ONE net; condB = 2 sheets.
+    expect(q).toMatch(/q3d_signal_net\("net_condA", \[[^\]]*"condA_b0"[^\]]*"condA_b5"[^\]]*\]\)/);
+    expect(q).toContain('q3d_signal_net("net_condB"');
+    expect((q.match(/condA_b\d+/g) || []).filter((s, i, a) => a.indexOf(s) === i).length).toBe(6);
+    expect(q).toContain('((C11+C22)/2 - C12)/2'); // 2 nets → differential C
+    mkdirSync('tests/out', { recursive: true });
+    writeFileSync('tests/out/q3d_bool.py', q);
+    execSync('python3 -c "import ast; ast.parse(open(\'tests/out/q3d_bool.py\').read())"');
+  });
 });
 

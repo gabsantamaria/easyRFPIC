@@ -36,6 +36,7 @@ import { resolveParams, evalExpr } from '../scene/params.js';
 import { solveLayout } from '../scene/solver.js';
 import { expandTransforms } from '../scene/transforms.js';
 import { shapeInstanceToRing } from '../geometry/rings.js';
+import { flattenReplicas } from '../scene/twoLine.js';
 
 const ascii = (s) => String(s ?? '').replace(/[^\x00-\x7F]/g, '?');
 const num = (v) => (Number.isFinite(v) ? (Math.round(v * 1e6) / 1e6) : 0);
@@ -131,8 +132,23 @@ function buildQ3DBody(scene, paramValues, opts, boxFn, polyFn, sweepFn) {
   const { zBottom, zTop, zBottomExpr } = computeLayerZ(stack, pv);
 
   const wantIds = new Set(opts.conductorIds || []);
-  const condComps = solved.filter((c) => wantIds.has(c.id) && c.kind !== 'boolean');
+  // A selected conductor may be a BOOLEAN (e.g. a meander electrode = union of
+  // many rects, often with a repeat). Booleans are kept here and expanded below
+  // into their operand sheets under ONE net (one physical conductor). Operands
+  // that are themselves directly selected are skipped (their boolean carries them).
+  const condComps = solved.filter((c) => wantIds.has(c.id) && !(c.consumedBy && wantIds.has(c.consumedBy)));
   if (condComps.length === 0) throw new Error('Select at least one line conductor for the Q3D capacitance run.');
+  // For boolean conductors we need each one's operand geometry with its repeat/
+  // displace replicas materialized. flattenReplicas (the 2-line helper) does
+  // exactly that for the whole solved scene; we then pick out each boolean's
+  // operands by their (replica-remapped) consumedBy chain. Mirror/rotate on a
+  // boolean are NOT materialized (flattenReplicas drops them) — flagged below.
+  const hasBoolean = condComps.some((c) => c.kind === 'boolean');
+  const flat = hasBoolean ? flattenReplicas(solved, pv).components : [];
+  const flatById = Object.fromEntries(flat.map((p) => [p.id, p]));
+  const baseId = (id) => String(id).replace(/__r\d+$/, '');
+  const rootCompId = (p) => { let cur = p, g = 0; while (cur && g++ < 64) { if (!cur.consumedBy) return baseId(cur.id); cur = flatById[cur.consumedBy]; } return null; };
+  const condWarnings = [];
 
   const condLayer = stack.find((l) => l.role === 'conductor');
   const condMat = (condLayer && condLayer.material) || 'gold';
@@ -185,6 +201,33 @@ ${sweepFn}("${name}", "q3d_cond_thk")  # thin conductor: sweep up by thickness`;
   for (const c of condComps) {
     const cid = c.id.replace(/[^A-Za-z0-9_]/g, '_');
     const compObjs = []; // every sheet/instance of THIS component → one signal net
+    if (c.kind === 'boolean') {
+      // Expand the boolean (e.g. a meander union) into ALL its operand rects —
+      // every repeat/displace replica materialized — and emit each as a numeric
+      // thin-conductor sheet, all under ONE net (the boolean is one physical
+      // conductor). Geometry is BAKED numeric (parametric emission isn't feasible
+      // for a multi-operand boolean).
+      if ((c.transforms || []).some((t) => t.enabled !== false && (t.kind === 'mirror' || t.kind === 'rotate'))) {
+        condWarnings.push(`${c.id}: a mirror/rotate transform on the boolean was NOT applied to the Q3D geometry (repeat/displace ARE) — verify the conductor footprint before trusting C.`);
+      }
+      const mine = flat.filter((p) => p.kind !== 'boolean' && rootCompId(p) === c.id);
+      mine.forEach((p, k) => {
+        const inst = expandTransforms([p], pv)[0];
+        if (!inst || !Number.isFinite(inst.w) || inst.w <= 0) return;
+        const ring = shapeInstanceToRing(inst);
+        if (!ring || ring.length < 3) return;
+        for (const [x, y] of ring) { bb.xMin = Math.min(bb.xMin, x); bb.xMax = Math.max(bb.xMax, x); bb.yMin = Math.min(bb.yMin, y); bb.yMax = Math.max(bb.yMax, y); }
+        const w = Math.abs(inst.w), h = Math.abs(inst.h);
+        if (Number.isFinite(w) && w > 0) lineLengthUm = Math.max(lineLengthUm, w, h);
+        const name = `${cid}_b${k}`;
+        condObjs.push(name);
+        compObjs.push(name);
+        condBlocks.push(polySheet(name, ring.map(([x, y]) => [`${num(x)}um`, `${num(y)}um`])));
+      });
+      if (compObjs.length === 0) condWarnings.push(`${c.id}: no operand geometry resolved for the Q3D conductor.`);
+      if (compObjs.length) condNets.push({ net: `net_${cid}`, objects: compObjs });
+      continue;
+    }
     const insts = expandTransforms([c], pv);
     for (const inst of insts) {
       const w = Math.abs(inst.w), h = Math.abs(inst.h);
@@ -266,7 +309,10 @@ ${sweepFn}("${name}", "q3d_cond_thk")  # thin conductor: sweep up by thickness`;
   }).join('\n');
 
   const fAdaptGHz = (() => { const f = evalExpr(src.simSetup?.fnominal ?? '4', pv); return Number.isFinite(f) && f > 0 ? f : 4; })();
-  return { varDecls, matDefs, dielBlocks, condBlocks, condObjs, condNets, fAdaptGHz, effThk, lengthUm: num(lengthUm) };
+  const condComment = condWarnings.length
+    ? condWarnings.map((w) => `# WARNING: ${ascii(w)}`).join('\n') + '\n'
+    : '';
+  return { varDecls, matDefs, dielBlocks, condBlocks, condObjs, condNets, condComment, fAdaptGHz, effThk, lengthUm: num(lengthUm) };
 }
 
 const CAP_SETUP = (fGHz, cg) => `["NAME:Setup1",
@@ -480,7 +526,7 @@ ${body.matDefs || '# (all materials are AEDT built-ins)'}
 ${body.dielBlocks.join('\n') || '# (no dielectric layers)'}
 
 # ===== Line conductor(s) — thin conductors (parametric) =====
-${body.condBlocks.join('\n')}
+${body.condComment}${body.condBlocks.join('\n')}
 
 ${q3dNetsSetupReports({ condNets: body.condNets, design, fAdaptGHz: body.fAdaptGHz, lengthUm: body.lengthUm, sweep, cg: { perError: opts.perError, minPass: opts.minPass, maxPass: opts.maxPass } })}
 
@@ -574,7 +620,7 @@ ${body.varDecls.join('\n')}
 # ===== Dielectric stack (parametric Z) =====
 ${body.dielBlocks.join('\n')}
 # ===== Line conductor(s) — thin conductors (parametric) =====
-${body.condBlocks.join('\n')}
+${body.condComment}${body.condBlocks.join('\n')}
 
 ${q3dNetsSetupReports({ condNets: body.condNets, design, fAdaptGHz: body.fAdaptGHz, lengthUm: body.lengthUm, sweep, cg: { perError: opts.perError, minPass: opts.minPass, maxPass: opts.maxPass } })}
 

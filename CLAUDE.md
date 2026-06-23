@@ -395,9 +395,21 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
   strips differentially), NOT `|C12|`; `÷ length(m)` — VERIFY the length for
   meanders. Builds ONLY the SELECTED line conductor(s) (each transform
   instance → its own covered sheet via `shapeInstanceToRing`, at the conductor
-  mid-Z) + the dielectric stack boxes over the footprint. Feeds/launches are
-  EXCLUDED on purpose (they bridge the conductors across the port gap → would
-  short the nets electrostatically). The user solves, reads the
+  mid-Z) + the dielectric stack boxes over the footprint. **A selected conductor
+  may be a BOOLEAN** (a meander electrode is a union of many rects, often with a
+  `repeat`): `buildQ3DBody` expands it via `flattenReplicas` (the 2-line helper,
+  now exported) — materializing the boolean's whole operand cluster + repeat/
+  displace replicas — and emits EVERY operand rect as a numeric-baked sheet, ALL
+  under ONE `net_<boolean_id>` (one physical conductor). Operands are grouped to
+  their boolean by the replica-remapped `consumedBy` chain (`__r<k>` suffix
+  stripped). Boolean geometry is numeric (parametric emission isn't feasible for a
+  multi-operand union); a `mirror`/`rotate` on the boolean is NOT materialized
+  (flattenReplicas drops it) → a `# WARNING` comment is emitted. The wizard's
+  conductor picker therefore lists TOP-LEVEL electrode objects (`layer ===
+  'electrode' && !consumedBy` — booleans INCLUDED, consumed operands hidden) so
+  the user can pick the whole meander. Feeds/launches are EXCLUDED on purpose
+  (they bridge the conductors across the port gap → would short the nets
+  electrostatically). The user solves, reads the
   conductor-to-conductor C (from the CSV or the matrix), ÷ physical length →
   pastes C (F/m) back into the wizard. **Resilience (the "abnormal script
   termination" fix):** in AEDT IronPython a MODAL COM error (e.g. deleting a

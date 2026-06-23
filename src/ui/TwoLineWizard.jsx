@@ -60,8 +60,12 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
 
   // Conductor components selectable for the Q3D capacitance run (exclude
   // booleans/feeds; the user picks the LINE conductor).
+  // Pickable conductors: TOP-LEVEL electrode objects — INCLUDING booleans (a
+  // meander electrode is a union of many rects), EXCLUDING operands consumed by a
+  // boolean (they're parts of it, not standalone conductors). buildQ3DBody
+  // expands a selected boolean into its operand sheets under one net.
   const conductorComps = useMemo(() => (scene.components || [])
-    .filter((c) => c.layer === 'electrode' && c.kind !== 'boolean'), [scene]);
+    .filter((c) => c.layer === 'electrode' && !c.consumedBy), [scene]);
   // Restore last-picked conductors, filtered to those that still exist here.
   const [q3dPick, setQ3dPick] = useState(() => new Set(
     (prefs && Array.isArray(prefs.q3dIds) ? prefs.q3dIds : []).filter((id) => conductorComps.some((c) => c.id === id)),
