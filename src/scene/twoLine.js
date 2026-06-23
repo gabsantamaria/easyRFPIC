@@ -106,13 +106,18 @@ export function twoLineOutputVariables(pi, dLMeters, includeZ0) {
     { name: 'tl_eeff', expr: '(tl_cc/tl_TwoPiF)*(tl_cc/tl_TwoPiF)*(tl_gim*tl_gim-tl_gre*tl_gre)', note: 'effective permittivity εeff = (c/ω)²(β²−α²) = Re[-(γc/ω)²]' },
   ];
   // Characteristic impedance Z0 = γ/(jωC), appended only when requested. The
-  // rows reference the HFSS design variable `tl_C_F_per_m` (F/m) — emitted as a
-  // set_var by the caller, editable in HFSS / settable from a Q3D solve. The
-  // impedance pieces are sign-free like εeff.
+  // rows reference the post-processing variable `tl_C_F_per_m` (F/m), settable
+  // from a Q3D solve. MUST be sign-free: the 2-line eigenvalue method resolves γ
+  // only up to a GLOBAL SIGN (the two eigenvalues are e^±γΔl, so the off branch
+  // flips re(γ) and im(γ) TOGETHER). For a passive forward wave α=re(γ)≥0 and
+  // β=im(γ)≥0, so we take magnitudes — otherwise Re Z0 = β/(ωC) comes out NEGATIVE
+  // on the wrong branch. (εeff is even in γ and α uses abs already; Z0 needs the
+  // same treatment. The 2π phase-wrap caveat on β is separate — see below.)
+  //   Z0 = γ/(jωC) = β/(ωC) − jα/(ωC)  ⇒  Re Z0 = β/(ωC) > 0, Im Z0 = −α/(ωC) ≤ 0.
   if (includeZ0) {
     rows.push(
-      { name: 'tl_Z0_re', expr: 'tl_gim/(tl_TwoPiF*tl_C_F_per_m)', note: 'Re Z0 = β/(ωC)  [Z0 = γ/(jωC)]' },
-      { name: 'tl_Z0_im', expr: '-tl_gre/(tl_TwoPiF*tl_C_F_per_m)', note: 'Im Z0 = -α/(ωC)' },
+      { name: 'tl_Z0_re', expr: 'abs(tl_gim)/(tl_TwoPiF*tl_C_F_per_m)', note: 'Re Z0 = β/(ωC) = |Im γ|/(ωC) (sign-free)' },
+      { name: 'tl_Z0_im', expr: '-abs(tl_gre)/(tl_TwoPiF*tl_C_F_per_m)', note: 'Im Z0 = -α/(ωC) = -|Re γ|/(ωC) (≤0, sign-free)' },
       { name: 'tl_Z0_mag', expr: 'sqrt(tl_gre*tl_gre+tl_gim*tl_gim)/(tl_TwoPiF*tl_C_F_per_m)', note: '|Z0| = |γ|/(ωC)' },
     );
   }

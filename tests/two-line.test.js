@@ -123,10 +123,12 @@ describe('twoLineOutputVariables — εeff/α expression list', () => {
     expect(noZ0.some((v) => v.name === 'tl_Z0_re')).toBe(false);
     const withZ0 = twoLineOutputVariables({ a1: 1, a2: 2, b1: 3, b2: 4 }, 6e-4, true);
     const m = Object.fromEntries(withZ0.map((v) => [v.name, v.expr]));
-    // C is a design variable (emitted via set_var by the exporter), NOT an output var.
+    // C is a post-processing variable (set by the exporter), NOT an output var.
     expect(m.tl_C_F_per_m).toBeUndefined();
-    expect(m.tl_Z0_re).toBe('tl_gim/(tl_TwoPiF*tl_C_F_per_m)'); // Re Z0 = β/(ωC)
-    expect(m.tl_Z0_im).toBe('-tl_gre/(tl_TwoPiF*tl_C_F_per_m)'); // Im Z0 = -α/(ωC)
+    // Z0 must be SIGN-FREE: the eigenvalue method resolves γ only up to a global
+    // sign, so re/im γ must be abs()'d or Re Z0 = β/(ωC) flips negative.
+    expect(m.tl_Z0_re).toBe('abs(tl_gim)/(tl_TwoPiF*tl_C_F_per_m)'); // Re Z0 = β/(ωC) ≥ 0
+    expect(m.tl_Z0_im).toBe('-abs(tl_gre)/(tl_TwoPiF*tl_C_F_per_m)'); // Im Z0 = -α/(ωC) ≤ 0
     expect(m.tl_Z0_mag).toContain('sqrt(tl_gre*tl_gre+tl_gim*tl_gim)');
   });
 

@@ -323,7 +323,13 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
   vars, editing it AFTER a solve re-scales the reports with **no re-solve / no
   lost solution** — a normal design variable would dirty the field solution
   (`_tl_pp_var` falls back to `set_var` if a release rejects the PP PropType):
-  `Z0 = γ/(jωC)` ⇒ Re=β/(ωC), Im=−α/(ωC), sign-free like εeff. C is
+  `Z0 = γ/(jωC)` ⇒ Re=β/(ωC), Im=−α/(ωC). **Sign-free (critical):** the
+  eigenvalue method resolves γ only up to a GLOBAL SIGN (the two eigenvalues are
+  e^±γΔl), so `tl_Z0_re`/`tl_Z0_im` MUST take magnitudes —
+  `Re=abs(im γ)/(ωC)`, `Im=−abs(re γ)/(ωC)` — else Re Z₀ comes out NEGATIVE on the
+  off branch (a real bug we shipped + fixed; εeff is even in γ and α already uses
+  abs, but Z₀ needs the same). Physical: α=re γ≥0, β=im γ≥0 ⇒ Re Z₀>0, Im Z₀≤0.
+  (The 2π β-wrap caveat is separate.) C is
   electrostatic ⇒ kinetic-inductance-correct. The 2-line method gives γ ONLY
   (εeff fixes √(LC); Z₀ needs L/C) — so Z₀ requires an independent C. For a
   MEANDER there's no cross-section, so C comes from a full-3-D Q3D solve (below).
