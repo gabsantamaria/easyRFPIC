@@ -264,8 +264,14 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
     components are merged BEFORE `lineB`'s — because HFSS numbers lumped ports in
     creation (= component) order, this fixes the S-indices to 1,2 (line A) and
     3,4 (line B). Injects top-level params `tl_L1`/`tl_L2`/`tl_dL` (`tl_dL =
-    tl_L2 − tl_L1`, kept LIVE so the lengths stay HFSS-sweepable) and forces a
-    Discrete sweep. VERIFIES the contract before returning: exactly 4 ports,
+    tl_L2 − tl_L1`, kept LIVE so the lengths stay HFSS-sweepable) and sets an
+    **Interpolating** sweep (the εeff/α/Z0 extraction runs on the interpolated
+    S(i,j) — faster than per-point Discrete, fine for a smooth TL). Also bakes the
+    wizard's **min/max adaptive passes** into `simSetup.minPasses`/`maxPasses`
+    (clamped min≤max) so the HFSS solve uses the SAME pass budget as the bundled
+    Q3D CG solve (`generateHfssNative` emits `MinimumPasses`/`MaximumPasses` from
+    those; default MinimumPasses=1 for non-2-line exports). VERIFIES the contract
+    before returning: exactly 4 ports,
     grouped (A,A,B,B) in solved order, all equal reference impedance — else
     throws a user-facing Error. Returns `{ scene, portIndices:{a1,a2,b1,b2},
     portNames, warnings }`.

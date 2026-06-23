@@ -127,7 +127,11 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
     freqStart: freqStart.trim() === '' ? null : Number(freqStart),
     freqStop: freqStop.trim() === '' ? null : Number(freqStop),
     freqPoints: freqPoints.trim() === '' ? null : Number(freqPoints),
-  }), [lengthParam, l1, l2, separation, freqStart, freqStop, freqPoints]);
+    // Min/max adaptive passes for the HFSS solve = the same convergence fields
+    // the bundled Q3D CG solve uses (so both sims share one pass budget).
+    minPass: numOr(q3dMinP, 15),
+    maxPass: numOr(q3dMaxP, 20),
+  }), [lengthParam, l1, l2, separation, freqStart, freqStop, freqPoints, q3dMinP, q3dMaxP]);
 
   // Live build + validate (the same call Generate runs). Errors block; warnings
   // inform.
@@ -326,6 +330,7 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
                     <input className={fieldCls} value={q3dMaxP} placeholder="20" onChange={(e) => setQ3dMaxP(e.target.value)} />
                   </div>
                 </div>
+                <p className="text-[10px] text-slate-500">CG error is Q3D-only; Min/Max passes also set the HFSS adaptive solve (Interpolating sweep).</p>
                 {q3dPick.size > 0 && !thkValid && (
                   <p className="text-[11px] text-amber-400">Set a conductor thickness (µm) — it's a thin conductor of this height ({condThkResolved > 0 ? 'defaults to h_cond' : 'h_cond is 0, so required'}).</p>
                 )}

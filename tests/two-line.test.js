@@ -203,10 +203,31 @@ describe('buildTwoLineScene — 4-port two-line design', () => {
     expect(evalExpr(lineA.w, pv)).toBeCloseTo(300, 6);
     expect(evalExpr(lineB.w, pv)).toBeCloseTo(900, 6);
 
-    // Discrete sweep forced (per-point eigenvalue math).
+    // Interpolating sweep (eigenvalue math runs on the interpolated S).
     expect(scene.simSetup.sweepEnabled).toBe(true);
-    expect(scene.simSetup.sweepType).toBe('Discrete');
+    expect(scene.simSetup.sweepType).toBe('Interpolating');
     expect(warnings).toBeDefined();
+  });
+
+  it('bakes the wizard min/max passes into simSetup and the HFSS setup emits them', () => {
+    const { scene, portIndices, dLMeters } = buildTwoLineScene(makeLineScene(500), {
+      lengthParam: 'Lc', l1: 300, l2: 900, minPass: 15, maxPass: 20,
+    });
+    expect(scene.simSetup.maxPasses).toBe('20');
+    expect(scene.simSetup.minPasses).toBe('15');
+    const pv = resolveParams(scene.params).values;
+    const py = generateHfssNative(scene, pv, { twoLine: { portIndices, dLMeters } });
+    expect(py).toContain('"MaximumPasses:=", 20');
+    expect(py).toContain('"MinimumPasses:=", 15');
+    expect(py).toContain('"Type:=", "Interpolating"');
+  });
+
+  it('clamps minPass to maxPass (HFSS requires MinimumPasses ≤ MaximumPasses)', () => {
+    const { scene } = buildTwoLineScene(makeLineScene(500), {
+      lengthParam: 'Lc', l1: 300, l2: 900, minPass: 30, maxPass: 12,
+    });
+    expect(scene.simSetup.maxPasses).toBe('12');
+    expect(scene.simSetup.minPasses).toBe('12'); // clamped down
   });
 
   it('rejects a length param the line does not use', () => {
@@ -365,8 +386,9 @@ describe('generateHfssNative options.twoLine — script emits the εeff/α math'
     expect(py).toContain('"alpha vs Freq"');
     // The 4 lumped ports are emitted.
     expect((py.match(/AssignLumpedPort/g) || []).length).toBe(4);
-    // Discrete sweep present so the report context "Setup1 : Sweep" exists.
+    // Interpolating sweep present so the report context "Setup1 : Sweep" exists.
     expect(py).toContain('InsertFrequencySweep');
+    expect(py).toContain('"Type:=", "Interpolating"');
   });
 
   it('without options.twoLine, the script carries no tl_ output variables', () => {

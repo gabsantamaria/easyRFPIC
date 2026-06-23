@@ -337,14 +337,21 @@ export function buildTwoLineScene(scene, cfg) {
     mirrors: [],
     groups: [],
   };
-  // Force a Discrete sweep (per-point eigenvalue math must land on saved
-  // points), with the wizard's band if supplied.
+  // Interpolating sweep, with the wizard's band if supplied. The εeff/α/Z0
+  // eigenvalue extraction runs on the interpolated S(i,j) at each requested point
+  // — fine for a smooth TL and much faster than a per-point Discrete solve. Min/
+  // max ADAPTIVE passes mirror the wizard's convergence fields so the HFSS solve
+  // uses the same pass budget as the bundled Q3D CG solve.
   const sim = { ...(src.simSetup || {}) };
   sim.sweepEnabled = true;
-  sim.sweepType = 'Discrete';
+  sim.sweepType = 'Interpolating';
   if (cfg.freqStart != null) sim.sweepStart = String(cfg.freqStart);
   if (cfg.freqStop != null) sim.sweepStop = String(cfg.freqStop);
   if (cfg.freqPoints != null) sim.sweepPoints = String(cfg.freqPoints);
+  const posInt = (v) => { const n = Math.floor(Number(v)); return Number.isFinite(n) && n > 0 ? n : null; };
+  const mx = posInt(cfg.maxPass), mn = posInt(cfg.minPass);
+  if (mx != null) sim.maxPasses = String(mx);
+  if (mn != null) sim.minPasses = String(mx != null ? Math.min(mn, mx) : mn); // min ≤ max
   combined.simSetup = sim;
 
   let out = normalizeScene(combined);

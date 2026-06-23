@@ -4427,6 +4427,11 @@ except Exception as e:
     const solveFreqGHz = stripGhz(sim.solveFreq, String(fnominalGHz));
     const maxPassesNum = Math.floor(parseFloat(sim.maxPasses));
     const maxPasses = Number.isFinite(maxPassesNum) && maxPassesNum > 0 ? maxPassesNum : 12;
+    // MinimumPasses (default 1; the 2-line wizard bakes its own value into
+    // simSetup so the adaptive solve uses the same pass budget as the Q3D CG
+    // solve). HFSS requires MinimumPasses <= MaximumPasses.
+    const minPassesNum = Math.floor(parseFloat(sim.minPasses));
+    const minPasses = Math.min(Number.isFinite(minPassesNum) && minPassesNum > 0 ? minPassesNum : 1, maxPasses);
     const maxDeltaSNum = parseFloat(sim.maxDeltaS);
     const maxDeltaS = Number.isFinite(maxDeltaSNum) && maxDeltaSNum > 0 ? maxDeltaSNum : 0.02;
     code += `
@@ -4438,7 +4443,7 @@ oModule.InsertSetup("HfssDriven",
      "Frequency:=", "${solveFreqGHz}GHz",
      "MaxDeltaS:=", ${maxDeltaS},
      "MaximumPasses:=", ${maxPasses},
-     "MinimumPasses:=", 1,
+     "MinimumPasses:=", ${minPasses},
      "MinimumConvergedPasses:=", 1,
      "PercentRefinement:=", 30,
      "IsEnabled:=", True])
