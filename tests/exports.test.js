@@ -684,6 +684,58 @@ describe('generateHfssNative', () => {
     const names = sel.split(',');
     expect(new Set(names).size).toBe(names.length);
   });
+
+  it('mirror(pivot=C) reflects about the ORIGIN via a parametric translate sandwich (HFSS Mirror-base-expr quirk)', () => {
+    // Bug: oEditor.Mirror's MirrorBaseX/Y fields don't reliably evaluate
+    // parametric VARIABLE expressions, so feeding the parametric centroid
+    // straight in made HFSS silently skip the reflection — a mirrored line
+    // rendered UN-mirrored. Fix: translate(-c) → Mirror(base 0) →
+    // translate(+c), with the parametric centroid only in the Move calls.
+    const minimal = {
+      params: { off: { expr: '40' } },
+      components: [
+        // A parent feed the boolean snaps to with a PARAMETRIC dy, so the
+        // boolean's centroid expression references `off` (i.e. it's a real
+        // variable expression, not a baked numeric).
+        { id: 'feed', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: '10', h: '10', cutouts: [] },
+        { id: 'a', kind: 'rect', layer: 'electrode', cx: 0, cy: 50, w: '6', h: '4', cutouts: [], consumedBy: 'm' },
+        { id: 'b', kind: 'rect', layer: 'electrode', cx: 0, cy: 58, w: '6', h: '4', cutouts: [], consumedBy: 'm' },
+        {
+          id: 'm', kind: 'boolean', op: 'union', operandIds: ['a', 'b'],
+          layer: 'electrode', cx: 0, cy: 54, w: '0', h: '0', cutouts: [],
+          transforms: [
+            { id: 't1', kind: 'mirror', enabled: true, axis: 'y', pivot: 'C' },
+          ],
+        },
+      ],
+      snaps: [
+        { id: 's1', from: { compId: 'feed', anchor: 'N' }, to: { compId: 'm', anchor: 'S' }, dx: '0', dy: 'off' },
+      ],
+      mirrors: [], groups: [], booleans: [],
+      stack: scene.stack, stackName: scene.stackName, simSetup: scene.simSetup,
+    };
+    const { values: pv } = resolveParams(minimal.params);
+    const out = generateHfssNative(minimal, pv);
+    // The Mirror command must use a TRIVIAL base — never a parametric expr.
+    const mBaseY = [...out.matchAll(/"MirrorBaseY:=",\s*"([^"]*)"/g)].map(x => x[1]);
+    expect(mBaseY.length).toBeGreaterThan(0);
+    for (const v of mBaseY) expect(v).toBe('0um');
+    const mBaseX = [...out.matchAll(/"MirrorBaseX:=",\s*"([^"]*)"/g)].map(x => x[1]);
+    for (const v of mBaseX) expect(v).toBe('0um');
+    // The Mirror is sandwiched between two Move (translate) calls, and the
+    // pre-mirror translate carries the parametric centroid (references `off`),
+    // so the mirror plane still tracks parameter sweeps.
+    const mirrorIdx = out.indexOf('oEditor.Mirror(');
+    const before = out.slice(0, mirrorIdx);
+    const after = out.slice(mirrorIdx + 'oEditor.Mirror('.length);
+    const lastMoveBefore = before.lastIndexOf('oEditor.Move(');
+    expect(lastMoveBefore).toBeGreaterThan(0);
+    expect(after.indexOf('oEditor.Move(')).toBeGreaterThanOrEqual(0);
+    // The translate immediately before the Mirror negates the parametric
+    // centroid (references the `off` param) — proving sweep-parametricity.
+    const preMoveBlock = before.slice(lastMoveBefore);
+    expect(preMoveBlock).toMatch(/TranslateVectorY:=", "-\(.*\boff\b/);
+  });
 });
 
 describe('generateHfssNative — analysis setup, frequency sweep, Optimetrics', () => {

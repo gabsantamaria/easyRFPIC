@@ -3629,30 +3629,66 @@ except Exception as e:
         // oEditor.Mirror flips the selection across a plane defined by a
         // base point + normal vector. axis='x' ⇒ normal=(1,0,0) (mirror
         // line is vertical, parallel to Y); axis='y' ⇒ normal=(0,1,0).
+        //
+        // CRITICAL HFSS COM QUIRK: oEditor.Mirror's MirrorBaseX/Y fields do
+        // NOT reliably evaluate parametric VARIABLE expressions — unlike
+        // CreateBox positions and Move vectors, which do (the whole export
+        // relies on that, and these very parts are CREATED with deep
+        // parametric position exprs that HFSS evaluates fine). Feeding the
+        // parametric cluster-centroid expression straight into MirrorBaseY
+        // made HFSS silently skip the reflection (swallowed by the
+        // try/except), so a mirrored line rendered UN-mirrored in HFSS while
+        // the canvas looked correct. Fix: keep the parametric centroid ONLY
+        // in oEditor.Move calls and mirror about the ORIGIN (trivial "0um"
+        // base). For pivot='C' that's a translate(-c) → Mirror(origin) →
+        // translate(+c) sandwich — the same pattern the rotate-about-'C'
+        // branch above already uses — which stays fully sweep-parametric
+        // while the Mirror command itself only ever sees a "0um" base.
         const axis = t.axis === 'y' ? 'y' : 'x';
         const pivot = t.pivot === 'origin' ? 'origin' : 'C';
-        const baseXExpr = pivot === 'origin' ? '0um' : curCxExpr;
-        const baseYExpr = pivot === 'origin' ? '0um' : curCyExpr;
         const nx = axis === 'x' ? 1 : 0;
         const ny = axis === 'y' ? 1 : 0;
-        code += `try:
-    oEditor.Mirror(
+        const mirrorAboutOrigin = `    oEditor.Mirror(
         ["NAME:Selections", "Selections:=", "${selStr}", "NewPartsModelFlag:=", "Model"],
         ["NAME:MirrorParameters",
-         "MirrorBaseX:=", "${baseXExpr}",
-         "MirrorBaseY:=", "${baseYExpr}",
+         "MirrorBaseX:=", "0um",
+         "MirrorBaseY:=", "0um",
          "MirrorBaseZ:=", "0um",
          "MirrorNormalX:=", "${nx}",
          "MirrorNormalY:=", "${ny}",
-         "MirrorNormalZ:=", "0"])
+         "MirrorNormalZ:=", "0"])`;
+        if (pivot === 'origin') {
+          // Mirror about the world origin directly — base is trivially 0.
+          code += `try:
+${mirrorAboutOrigin}
 except Exception as e:
     oDesktop.AddMessage("", "", 1, "Mirror failed for ${selStr}: " + str(e))
 `;
-        // Centroid invariance: mirror about own center keeps the centroid;
-        // mirror about origin negates the coordinate along the axis.
-        if (pivot === 'origin') {
           if (axis === 'x') { curCx = -curCx; curCxExpr = `-(${curCxExpr})`; }
           else              { curCy = -curCy; curCyExpr = `-(${curCyExpr})`; }
+        } else {
+          // pivot='C': reflect about the cluster's own centroid via the
+          // translate-mirror-translate sandwich. The parametric centroid
+          // lives only in the (expression-tolerant) Move calls; Mirror sees
+          // base 0. Translating both axes is harmless for a single-axis
+          // mirror (the perpendicular -c/+c cancels). Centroid invariant.
+          code += `try:
+    oEditor.Move(
+        ["NAME:Selections", "Selections:=", "${selStr}", "NewPartsModelFlag:=", "Model"],
+        ["NAME:TranslateParameters",
+         "TranslateVectorX:=", "-(${curCxExpr})",
+         "TranslateVectorY:=", "-(${curCyExpr})",
+         "TranslateVectorZ:=", "0um"])
+${mirrorAboutOrigin}
+    oEditor.Move(
+        ["NAME:Selections", "Selections:=", "${selStr}", "NewPartsModelFlag:=", "Model"],
+        ["NAME:TranslateParameters",
+         "TranslateVectorX:=", "(${curCxExpr})",
+         "TranslateVectorY:=", "(${curCyExpr})",
+         "TranslateVectorZ:=", "0um"])
+except Exception as e:
+    oDesktop.AddMessage("", "", 1, "Mirror failed for ${selStr}: " + str(e))
+`;
         }
         curRotation = -curRotation;
       } else if (t.kind === 'duplicate_mirror') {
@@ -3666,45 +3702,65 @@ except Exception as e:
         const offsetExpr = (typeof t.offset === 'string' && /[A-Za-z_]/.test(t.offset))
           ? ascii(t.offset)
           : `${offsetNum.toFixed(4)}um`;
-        // Mirror plane base point: current centroid + offset along axis.
-        // Use the PARAMETRIC centroid expression so HFSS-side variable
-        // sweeps (e.g. cap_gap, slab_gap) move the mirror plane in
-        // lockstep with the rest of the geometry that depends on them.
-        // Baking the numeric centroid here was the source of the
-        // meander_h `52.2500um` bug — the plane stayed put while every
-        // dependent piece shifted, producing 2*delta misalignment.
-        const baseXExpr = axis === 'x'
-          ? `(${curCxExpr}) + (${offsetExpr})`
-          : `(${curCxExpr})`;
-        const baseYExpr = axis === 'y'
-          ? `(${curCyExpr}) + (${offsetExpr})`
-          : `(${curCyExpr})`;
+        // Mirror plane sits at the current centroid + offset along the axis.
+        // Same HFSS COM quirk as the in-place `mirror` branch above:
+        // DuplicateMirror's DuplicateMirrorBaseX/Y fields don't reliably
+        // evaluate parametric VARIABLE expressions, so a parametric base
+        // (built up through a long snap chain) makes HFSS silently skip the
+        // duplicate. Keep the parametric plane ONLY in (expression-tolerant)
+        // oEditor.Move calls: translate the selection so the mirror plane
+        // lands on the ORIGIN, DuplicateMirror about the origin (base 0),
+        // then translate BOTH the originals and the new copies back. Stays
+        // fully sweep-parametric (the earlier meander_h `52.2500um` bug —
+        // where a baked numeric plane lagged the swept geometry — does not
+        // return) while the DuplicateMirror command sees a trivial "0um"
+        // base.
         const nx = axis === 'x' ? 1 : 0;
         const ny = axis === 'y' ? 1 : 0;
+        const planeExpr = axis === 'x'
+          ? `(${curCxExpr}) + (${offsetExpr})`
+          : `(${curCyExpr}) + (${offsetExpr})`;
+        const tvx = axis === 'x' ? `-(${planeExpr})` : '0um';
+        const tvy = axis === 'y' ? `-(${planeExpr})` : '0um';
+        const tvxBack = axis === 'x' ? `(${planeExpr})` : '0um';
+        const tvyBack = axis === 'y' ? `(${planeExpr})` : '0um';
+        // Predict the mirrored-copy names up front (HFSS's
+        // next-available-suffix collision rule, e.g. `S_10` after a 10-clone
+        // repeat already used `S_1..S_9`) so the post-mirror translate can
+        // move the originals AND the new copies back together.
+        const newNames = activePartIds.map(b => nextCloneName(b));
+        const selBefore = selStr;
+        const selAfter = [...activePartIds, ...newNames].join(',');
         code += `try:
+    oEditor.Move(
+        ["NAME:Selections", "Selections:=", "${selBefore}", "NewPartsModelFlag:=", "Model"],
+        ["NAME:TranslateParameters",
+         "TranslateVectorX:=", "${tvx}",
+         "TranslateVectorY:=", "${tvy}",
+         "TranslateVectorZ:=", "0um"])
     oEditor.DuplicateMirror(
-        ["NAME:Selections", "Selections:=", "${selStr}", "NewPartsModelFlag:=", "Model"],
+        ["NAME:Selections", "Selections:=", "${selBefore}", "NewPartsModelFlag:=", "Model"],
         ["NAME:DuplicateToMirrorParameters",
-         "DuplicateMirrorBaseX:=", "${baseXExpr}",
-         "DuplicateMirrorBaseY:=", "${baseYExpr}",
+         "DuplicateMirrorBaseX:=", "0um",
+         "DuplicateMirrorBaseY:=", "0um",
          "DuplicateMirrorBaseZ:=", "0um",
          "DuplicateMirrorNormalX:=", "${nx}",
          "DuplicateMirrorNormalY:=", "${ny}",
          "DuplicateMirrorNormalZ:=", "0"],
         ["NAME:Options", "DuplicateAssignments:=", False],
         ["CreateGroupsForNewObjects:=", False])
+    oEditor.Move(
+        ["NAME:Selections", "Selections:=", "${selAfter}", "NewPartsModelFlag:=", "Model"],
+        ["NAME:TranslateParameters",
+         "TranslateVectorX:=", "${tvxBack}",
+         "TranslateVectorY:=", "${tvyBack}",
+         "TranslateVectorZ:=", "0um"])
 except Exception as e:
-    oDesktop.AddMessage("", "", 1, "DuplicateMirror failed for ${selStr}: " + str(e))
+    oDesktop.AddMessage("", "", 1, "DuplicateMirror failed for ${selBefore}: " + str(e))
 `;
         if (t.includeOriginal === false) {
           code += `# NOTE: 'includeOriginal=false' on canvas; HFSS keeps the original. Delete ${partIds[0]} manually if needed.\n`;
         }
-        // Extend the active selection with the mirrored copies. HFSS's
-        // DuplicateMirror uses the same next-available-suffix collision
-        // rule as DuplicateAlongLine, so a mirror following a 10-clone
-        // repeat names the first new object `S_10` (not `S_1`, which is
-        // already taken). `nextCloneName` mirrors that rule.
-        const newNames = activePartIds.map(b => nextCloneName(b));
         activePartIds = [...activePartIds, ...newNames];
         selStr = activePartIds.join(',');
         // Advance tracked centroid to the cluster centroid (midpoint of
