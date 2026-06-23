@@ -533,6 +533,7 @@ Custom REAL8 binary encoder. Each component emits BOUNDARY records using `shapeI
 
 ## Common bug patterns to avoid
 
+- **`evalExpr` must scale with the EXPRESSION, not `paramValues`.** It substitutes only the identifiers that appear in the expression (via `tokenizeIdents`), NOT every key of `paramValues`. `solveLayout` grows a `workingPV` with 4 synthetic `_comp_<id>_*` params PER component, so on a large/flattened scene `paramValues` holds thousands of keys; a full-key scan made `evalExpr` O(#params) per call and quadratic in scene size (the 2-line wizard froze ~24 s on a 1216-component meander flatten — fixed to ~0.14 s). Never reintroduce an all-keys loop in `evalExpr`; guard: `tests/params.test.js` "scales with EXPRESSION size".
 - **`str_replace` edits that orphan function bodies.** Always parse-check after structural edits: `node -e "require('@babel/parser').parse(require('fs').readFileSync('src/PhotonicLayout.jsx', 'utf8'), { sourceType: 'module', plugins: ['jsx'] })"`.
 - **TDZ errors from `useEffect` dep arrays referencing later-declared `const` functions.** Use refs (`useRef`) to break the cycle: declare the ref first, set its current in an effect, reference the ref in the dep array.
 - **Booleans with literal `w='0'`, `h='0'` for anchor math.** Always look up the SOLVED instance, never the scene component, when reading boolean bboxes.

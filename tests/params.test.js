@@ -155,6 +155,31 @@ describe('tokenizeComponentExprs', () => {
   });
 });
 
+describe('evalExpr scales with EXPRESSION size, not paramValues size', () => {
+  it('ignores thousands of unrelated params (correctness + no O(#params) blowup)', () => {
+    // Simulate solveLayout's workingPV on a large/flattened scene: thousands of
+    // synthetic _comp_* entries the expression never references. Old evalExpr
+    // scanned + regex-replaced EVERY key per call → quadratic freeze (the 2-line
+    // wizard hang). It must substitute only the idents actually in the expression.
+    const pv = { a: 3, b: 4 };
+    for (let i = 0; i < 6000; i++) pv[`_comp_x${i}_cx`] = i;
+    expect(evalExpr('a*a + b*b', pv)).toBe(25); // correct despite 6000 extra keys
+    const t0 = Date.now();
+    for (let i = 0; i < 5000; i++) evalExpr('a*a + b*b', pv);
+    const ms = Date.now() - t0;
+    // 5000 calls × ~2 idents ≈ tens of ms now; the old O(#params) form was
+    // 5000 × 6000 regex ops ≈ many seconds. Generous bound to avoid CI flake.
+    expect(ms).toBeLessThan(1500);
+  });
+
+  it('still substitutes overlapping identifier names correctly', () => {
+    // Word boundaries keep `m` distinct from `m_n` regardless of order; the
+    // longest-first sort is belt-and-suspenders.
+    expect(evalExpr('m_n + m', { m: 2, m_n: 10 })).toBe(12);
+    expect(evalExpr('m + m_n', { m: 2, m_n: 10 })).toBe(12);
+  });
+});
+
 describe('RESERVED_IDENTS', () => {
   it('contains the common math functions / constants', () => {
     for (const name of ['sin', 'cos', 'tan', 'sqrt', 'abs', 'pi', 'PI']) {

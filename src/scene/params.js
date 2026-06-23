@@ -225,10 +225,19 @@ export function evalExpr(expr, paramValues) {
     // sim time). In-app evaluation is always in µm, so the suffix is a
     // no-op. Match \d.um or )um — only directly after a number or ).
     s = s.replace(/(\d|\))\s*um\b/g, '$1');
-    const keys = Object.keys(paramValues).sort((a, b) => b.length - a.length);
-    for (const k of keys) {
-      const re = new RegExp(`\\b${k}\\b`, 'g');
-      s = s.replace(re, `(${paramValues[k]})`);
+    // Substitute ONLY the params that actually appear in the expression. Scanning
+    // EVERY key of paramValues made evalExpr O(#params) per call — and paramValues
+    // can hold THOUSANDS of synthetic `_comp_*` entries for a large/flattened scene
+    // (solveLayout adds 4 per component), making this quadratic in scene size and
+    // the cause of multi-second freezes (e.g. the 2-line wizard on a big meander:
+    // ~5000 params × thousands of calls). The result is identical — a key absent
+    // from the string never matched anyway. Longest-first (a value is numeric, so
+    // it can't be re-substituted); `\b` handles distinct overlapping names.
+    const present = [...new Set(tokenizeIdents(s))]
+      .filter((id) => Object.prototype.hasOwnProperty.call(paramValues, id))
+      .sort((a, b) => b.length - a.length);
+    for (const k of present) {
+      s = s.replace(new RegExp(`\\b${k}\\b`, 'g'), `(${paramValues[k]})`);
     }
     // Translate common math functions to their JS Math equivalents BEFORE the
     // safety check, so expressions like "abs(x)" or "tan(x)" resolve correctly.
