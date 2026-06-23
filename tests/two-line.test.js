@@ -11,11 +11,11 @@ import { describe, it, expect } from 'vitest';
 import { execSync } from 'child_process';
 import { writeFileSync, mkdirSync } from 'fs';
 import {
-  buildTwoLineScene, twoLineOutputVariables, twoLineExtractNumeric, trlEeffBounds,
+  buildTwoLineScene, twoLineOutputVariables, twoLineExtractNumeric,
   TL_L1, TL_L2, TL_DL,
 } from '../src/scene/twoLine.js';
 import { generateHfssNative } from '../src/export/hfss-native.js';
-import { generateQ3DCapacitance, generateZ0TransferScript } from '../src/export/q3d.js';
+import { generateQ3DCapacitance } from '../src/export/q3d.js';
 import { makeDefaultScene, normalizeScene, paramsForStack } from '../src/scene/schema.js';
 import { resolveParams, evalExpr } from '../src/scene/params.js';
 import { solveLayout } from '../src/scene/solver.js';
@@ -417,14 +417,15 @@ describe('generateHfssNative options.twoLine — script emits the εeff/α math'
     expect(noC).not.toContain('"Z0 vs Freq"');
   });
 
-  it('bundled q3d: appends a Q3D design in the same project + C placeholder; parses', () => {
+  it('bundled q3d: appends a Q3D design + AUTO-TRANSFERS C → Z0 in the same script; parses', () => {
     const single = makeLineScene(500);
     const { scene, portIndices, dLMeters } = buildTwoLineScene(single, {
       lengthParam: 'Lc', l1: 300, l2: 900,
     });
     const pv = resolveParams(scene.params).values;
     const py = generateHfssNative(scene, pv, {
-      twoLine: { portIndices, dLMeters, q3d: { scene: single, conductorIds: ['line'], thicknessUm: 0.2, freqStartGHz: 1, freqStopGHz: 40, freqPoints: 101 } },
+      // 2 conductors → 2 nets → differential C → the auto-transfer is emitted.
+      twoLine: { portIndices, dLMeters, q3d: { scene: single, conductorIds: ['line', 'padL'], thicknessUm: 0.2, freqStartGHz: 1, freqStopGHz: 40, freqPoints: 101 } },
     });
     expect(py).toContain('InsertDesign("HFSS"');            // the 2-line design
     expect(py).toContain('InsertDesign("Q3D Extractor"');   // bundled in same project
@@ -433,6 +434,15 @@ describe('generateHfssNative options.twoLine — script emits the εeff/α math'
     expect(py).toContain('AssignSignalNet');                // explicit nets
     expect(py).toContain('SweepAlongVector');               // thin conductors
     expect(py).toContain('InsertSweep');                    // freq sweep
+    // Auto-transfer block (no separate script/button): read C, set the post-proc
+    // var, plot Re/Im Z0 — all in ONE generated script.
+    expect(py).toContain('oDesign.ExportMatrixData(');
+    expect(py).toContain('"Capacitance Matrix"');
+    expect(py).toContain('_d[("net_line", "net_padL")]');   // C12 by net name
+    expect(py).toContain('((_C11 + _C22) / 2.0 - _C12) / 2.0'); // differential C
+    expect(py).toContain('1e-12 < _z0_C < 1e-8');           // loud sanity bound
+    expect(py).toContain('CreateReport("Z0 re+im (from Q3D C)"');
+    expect(py).toContain('["tl_Z0_re", "tl_Z0_im"]');
     expect(py).toMatch(/SetActiveDesign\("Layout"\)/);      // leaves HFSS design active
     mkdirSync('tests/out', { recursive: true });
     writeFileSync('tests/out/two_line_q3d.py', py);
@@ -526,83 +536,3 @@ describe('generateQ3DCapacitance — meander C extraction script', () => {
   });
 });
 
-// "Z0 from Q3D C" transfer + plot script: run on the SOLVED combined project.
-// Reads the Q3D C matrix (ExportMatrixData CSV), sets tl_C_F_per_m as a
-// post-processing var on the HFSS design, plots Re/Im Z0.
-describe('generateZ0TransferScript — Q3D C → HFSS Z0 post-processing transfer', () => {
-  it('reads the Q3D matrix, sets a post-processing C var, plots Re/Im Z0; parses', () => {
-    const scene = makeLineScene(500);
-    const pv = resolveParams(scene.params).values;
-    const s = generateZ0TransferScript(scene, pv, {
-      conductorIds: ['line', 'padL'], thicknessUm: 0.2, lengthUm: 500,
-    });
-    // 1. Reads the Q3D matrix via ExportMatrixData and parses the whitespace-
-    //    delimited, net-name-labeled square block.
-    expect(s).toContain('oProject.SetActiveDesign("q3d_cap")');
-    expect(s).toContain('oDesign.ExportMatrixData(');
-    expect(s).toContain('"Capacitance Matrix"');
-    expect(s).toContain('"Conductance Matrix"');
-    expect(s).toContain('_d[("net_line", "net_line")]');     // C11 by net name
-    expect(s).toContain('_d[("net_padL", "net_padL")]');     // C22
-    expect(s).toContain('_d[("net_line", "net_padL")]');     // C12
-    expect(s).toContain('((_C11 + _C22) / 2.0 - _C12) / 2.0'); // differential C
-    expect(s).toContain('1e-15 / 0.0005');                   // fF→F, ÷ length(m=500µm)
-    expect(s).toContain('1e-12 < C_per_m < 1e-8');           // loud sanity bound
-    // 2. Sets tl_C_F_per_m as a POST-PROCESSING var on the HFSS design (no re-solve).
-    expect(s).toContain('oProject.SetActiveDesign("Layout")');
-    expect(s).toContain('def _tl_pp_var(');
-    expect(s).toContain('"PostProcessingVariableProp"');
-    expect(s).toContain('_tl_pp_var("tl_C_F_per_m"');
-    // 3. Plots Re/Im Z0 vs Freq from the existing output vars.
-    expect(s).toContain('CreateReport("Z0 re+im (from Q3D C)"');
-    expect(s).toContain('"Setup1 : Sweep"');                 // HFSS solution name
-    expect(s).toContain('["tl_Z0_re", "tl_Z0_im"]');
-    mkdirSync('tests/out', { recursive: true });
-    writeFileSync('tests/out/z0_from_q3d.py', s);
-    execSync('python3 -c "import ast; ast.parse(open(\'tests/out/z0_from_q3d.py\').read())"');
-  });
-
-  it('throws when fewer than 2 conductors are selected (differential C undefined)', () => {
-    const scene = makeLineScene(500);
-    const pv = resolveParams(scene.params).values;
-    expect(() => generateZ0TransferScript(scene, pv, { conductorIds: ['line'] }))
-      .toThrow(/2 line conductors|2 nets/i);
-  });
-});
-
-// Wizard TRL phase-window hint: εeff bounds for βΔl in [20°, 160°].
-describe('trlEeffBounds — TRL 20°–160° phase window', () => {
-  const C = 2.99792458e8;
-  // phase difference βΔl (deg) for a given εeff at frequency fGHz, length dL_um
-  const degOf = (eeff, fGHz, dL_um) =>
-    (2 * Math.PI * (fGHz * 1e9) * Math.sqrt(eeff) / C) * (dL_um * 1e-6) * 180 / Math.PI;
-
-  it('eeffMax → exactly 160° at f_stop and eeffMin → 20° at f_start', () => {
-    const { eeffMin, eeffMax } = trlEeffBounds(600, 1, 40); // Δl=600µm, 1–40 GHz
-    expect(degOf(eeffMax, 40, 600)).toBeCloseTo(160, 6);
-    expect(degOf(eeffMin, 1, 600)).toBeCloseTo(20, 6);
-  });
-
-  it('upper bound at 180° reproduces the legacy (c/(2·f·Δl))² unwrap limit', () => {
-    const { eeffMax } = trlEeffBounds(600, 1, 40, 20, 180); // hiDeg=180
-    const dL_m = 600e-6, f = 40e9;
-    expect(eeffMax).toBeCloseTo((C / (2 * f * dL_m)) ** 2, 9);
-  });
-
-  it('returns null bounds for non-positive Δl or frequency', () => {
-    expect(trlEeffBounds(0, 1, 40)).toEqual({ eeffMin: null, eeffMax: null });
-    expect(trlEeffBounds(-5, 1, 40)).toEqual({ eeffMin: null, eeffMax: null });
-    expect(trlEeffBounds(600, 0, 40).eeffMin).toBe(null);
-    expect(trlEeffBounds(600, 1, 0).eeffMax).toBe(null);
-  });
-
-  it('a wide band (f_stop/f_start ≫ 8) inverts the window: eeffMin > eeffMax', () => {
-    const { eeffMin, eeffMax } = trlEeffBounds(600, 1, 50); // 50× span > 8× window
-    expect(eeffMin).toBeGreaterThan(eeffMax);
-  });
-
-  it('a narrow band (≤8× span) keeps eeffMin ≤ eeffMax (a usable window)', () => {
-    const { eeffMin, eeffMax } = trlEeffBounds(600, 10, 40); // 4× span < 8×
-    expect(eeffMin).toBeLessThanOrEqual(eeffMax);
-  });
-});

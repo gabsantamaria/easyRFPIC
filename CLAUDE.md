@@ -410,32 +410,28 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
   (AssignSignalNet / InsertSetup "Matrix" / InsertSweep / ExportMatrixData) are
   pyAEDT-validated (AEDT 2023 R-series) but still wrapped defensively. Stack-Z via
   a local group-aware `computeLayerZ` mirroring `layerZ`.
-- **Z₀ transfer script (`generateZ0TransferScript`, q3d.js)**: a SEPARATE
-  standalone script (`<base>_z0_from_q3d.py`; wizard "Z₀-from-Q3D script…" button,
-  enabled at ≥2 selected conductors) that the user runs on the SOLVED combined
-  project. It (1) reads the `q3d_cap` C matrix by RE-EXPORTING via
-  `ExportMatrixData` to a CSV and PARSING it (whitespace-delimited, net-name-
-  labeled SQUARE block between the literal markers `Capacitance Matrix` /
-  `Conductance Matrix`, values in fF, Maxwell signs — verified against
-  qiskit-metal's `readin_q3d_matrix`), computes the differential per-length C =
-  `((C11+C22)/2 − C12)/2 · 1e-15 / <length_m>` (F/m, length baked in metres),
-  (2) sets `tl_C_F_per_m` as a POST-PROCESSING var on `Layout` via the same
-  `_tl_pp_var` helper (no re-solve), and (3) `CreateReport`s "Z0 re+im (from Q3D
-  C)" plotting `tl_Z0_re`/`tl_Z0_im` vs `Setup1 : Sweep`. The computed C is ECHOED
-  with a sane-range bound (1e-12–1e-8 F/m) so a mis-read (wrong net names /
-  length / parse) is LOUD, not silent — which is why the original in-line
-  auto-transfer was left commented. Reuses `buildQ3DBody` only for the net names +
-  length; assumes the combined-script design names (`q3d_cap`, `Layout`).
+- **Auto-transfer (bundled, `generateQ3DCombinedBlock` tail)**: when the Q3D
+  design is BUNDLED into the main 2-line script (`bundleQ3D` + ≥2 conductors), the
+  combined block — AFTER the Q3D solve — automatically (1) reads the `q3d_cap` C
+  matrix by RE-EXPORTING via `ExportMatrixData` to a CSV and PARSING it
+  (whitespace-delimited, net-name-labeled SQUARE block between the literal markers
+  `Capacitance Matrix` / `Conductance Matrix`, fF, Maxwell signs — verified
+  against qiskit-metal's `readin_q3d_matrix`), computes the differential per-length
+  C = `((C11+C22)/2 − C12)/2 · 1e-15 / <length_m>` (F/m, length baked), (2) sets
+  `tl_C_F_per_m` as a POST-PROCESSING var on `Layout` via the `_tl_pp_var` helper
+  (defined in the HFSS part above — NO re-solve), and (3) `CreateReport`s "Z0
+  re+im (from Q3D C)" plotting `tl_Z0_re`/`tl_Z0_im` vs `Setup1 : Sweep`. After
+  the user Analyzes the HFSS design the Z₀ reports use this C. The computed C is
+  ECHOED with a sane-range bound (1e-12–1e-8 F/m) so a mis-read is LOUD, not
+  silent. There is NO separate transfer script/button — it's part of the one
+  bundled script (the `q3d_cap`/`Layout` design names are assumed).
 - **`src/ui/TwoLineWizard.jsx`** — dialog (mount-on-open wrapper like
   `AiAssistantDialog`): length-param dropdown (user params, live values, sorted,
   `_comp_*` hidden), L1/L2 (re-seeded from the param's current value on
   change), separation (blank = auto), freq band (seeded from `simSetup`). LIVE
   runs `buildTwoLineScene` in a memo — surfaces the port-contract error or a
-  green "4 ports verified" + warnings, computes the TRL phase-window guidance via
-  `trlEeffBounds` (twoLine.js: `εeff` for βΔl=20° at f_start and βΔl=160° at
-  f_stop — `√εeff = φ°·c/(360·f·Δl)`; amber if a nominal εeff≈5 falls outside
-  `[eeffMin,eeffMax]`, incl. the wide-band case where the bounds INVERT), and
-  gates Generate. Also a
+  green "4 ports verified" + warnings, computes the βΔl phase-ambiguity guidance
+  (`εeff_max = (c/(2·f_max·Δl))²`; amber if < 5), and gates Generate. Also a
   "Characteristic impedance Z₀ (optional)" block: a C-per-length (F/m) field
   (→ `cFperM`, enables the Z₀ output vars) + a conductor checkbox picker, a
   "Bundle Q3D into the main script" checkbox, and a "Separate Q3D script" button
@@ -465,13 +461,8 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
   current design falls back to the first param; the L1/L2 re-seed-on-param-change
   is gated by a prev-value ref (NOT a mount-count flag) so it survives
   StrictMode's double-invoked mount effect and doesn't clobber restored values.
-- **Phase-window caveat (v1)**: β is unwrapped only while βΔl < π over the band,
-  and the TRL extraction is well-conditioned only for βΔl in **20°–160°**
-  (Engen–Hoer / NIST MultiCal). Since βΔl ∝ f, the 20° floor binds at f_start and
-  the 160° ceiling at f_stop — the wizard reports both `εeff` bounds. A single Δl
-  can only span an ~8× frequency ratio inside that window (160/20); a wider band
-  (e.g. 0.1–50 GHz) inverts the bounds → narrow the band or use multiple Δl
-  (multiline TRL). α and εeff-from-α are unaffected by the branch.
+- **Phase-ambiguity caveat (v1)**: β is unwrapped only while βΔl < π over the
+  band — pick L2−L1 small enough. α and εeff-from-α are unaffected by the branch.
 
 ## Settings & appearance themes
 

@@ -33,32 +33,6 @@ export const TL_L1 = 'tl_L1';
 export const TL_L2 = 'tl_L2';
 export const TL_DL = 'tl_dL';
 
-export const C_LIGHT = 2.99792458e8; // m/s
-
-// TRL / 2-line well-conditioning bounds on εeff for a line-length difference Δl
-// (µm) and a frequency band. The per-line electrical-length DIFFERENCE between
-// the two lines is βΔl = 2π f √εeff Δl / c; the Engen–Hoer / NIST-MultiCal rule
-// keeps it in [20°, 160°] — below ~20° the eigenvalue extraction is
-// ill-conditioned, above ~160° it nears the 180° point where β wraps (εeff/β
-// become ambiguous). βΔl GROWS with f, so the LOWER bound (≥loDeg) binds at
-// f_start and the UPPER bound (≤hiDeg) at f_stop:
-//     √εeff = φ_deg · c / (360 · f · Δl)
-// Returns { eeffMin, eeffMax } (each null if its frequency is non-positive).
-// For a wide band (f_stop/f_start ≳ hiDeg/loDeg = 8) eeffMin can EXCEED eeffMax:
-// a single Δl then cannot keep βΔl in [20°,160°] across the whole band — the
-// caller flags that (narrow the band / use multiple Δl).
-export function trlEeffBounds(dL_um, fStartGHz, fStopGHz, loDeg = 20, hiDeg = 160) {
-  const dL_m = Number(dL_um) * 1e-6;
-  if (!Number.isFinite(dL_m) || dL_m <= 0) return { eeffMin: null, eeffMax: null };
-  const eeffAt = (phiDeg, fGHz) => {
-    const fHz = Number(fGHz) * 1e9;
-    if (!Number.isFinite(fHz) || fHz <= 0) return null;
-    const sqrtEeff = (phiDeg * C_LIGHT) / (360 * fHz * dL_m);
-    return sqrtEeff * sqrtEeff;
-  };
-  return { eeffMin: eeffAt(loDeg, fStartGHz), eeffMax: eeffAt(hiDeg, fStopGHz) };
-}
-
 // Expand a number to a plain decimal string (no scientific exponent) so the
 // HFSS report-expression parser reads it unambiguously.
 function plainDecimal(x) {

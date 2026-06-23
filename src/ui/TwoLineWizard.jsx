@@ -15,9 +15,11 @@
 // variables, so the user can sweep the lengths in HFSS afterward.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Ruler, X as XIcon, AlertTriangle, Check, Download } from 'lucide-react';
-import { buildTwoLineScene, trlEeffBounds } from '../scene/twoLine.js';
+import { buildTwoLineScene } from '../scene/twoLine.js';
 import { evalExpr } from '../scene/params.js';
 import { loadTwoLinePrefs, saveTwoLinePrefs } from './twoLineSettings.js';
+
+const C_LIGHT = 2.99792458e8;
 
 // Thin wrapper so the stateful body MOUNTS fresh on each open (state
 // initializers re-run; nothing leaks across opens).
@@ -26,7 +28,7 @@ export function TwoLineWizard(props) {
   return <TwoLineWizardInner {...props} />;
 }
 
-function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerateQ3D, onGenerateZ0Transfer }) {
+function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerateQ3D }) {
   // Candidate length params: everything the user authored, minus the synthetic
   // per-component position/size params (_comp_*). Sorted for stable display.
   const paramNames = useMemo(() => Object.keys(scene.params || {})
@@ -145,21 +147,18 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
     }
   }, [scene, cfg, lengthParam]);
 
-  // TRL well-conditioning guidance (Engen–Hoer / NIST MultiCal): keep the
-  // per-line phase difference βΔl in 20°–160° over the band. βΔl grows with f,
-  // so the ≥20° floor binds at f_start (→ a MINIMUM εeff) and the ≤160° ceiling
-  // at f_stop (→ a MAXIMUM εeff). A typical substrate εeff (~5) outside
-  // [eeffMin, eeffMax] flags trouble; for a wide band the two bounds can invert.
-  const NOMINAL_EEFF = 5;
+  // Phase-ambiguity guidance: the eigenvalue β is only unwrapped while
+  // βΔl < π. With Δl = L2−L1 and the top sweep frequency, the largest εeff
+  // for which that holds is εeff_max = (c / (2·f_max·Δl))². If that's below a
+  // typical substrate εeff the user should shrink Δl.
   const phase = useMemo(() => {
     const dL_um = Number(l2) - Number(l1);
-    if (!Number.isFinite(dL_um) || dL_um <= 0) return null;
-    const { eeffMin, eeffMax } = trlEeffBounds(dL_um, Number(freqStart), Number(freqStop));
-    const tooHigh = eeffMax != null && eeffMax < NOMINAL_EEFF; // βΔl > 160° at f stop (β wraps)
-    const tooLow = eeffMin != null && eeffMin > NOMINAL_EEFF;  // βΔl < 20° at f start (ill-conditioned)
-    const wideBand = eeffMin != null && eeffMax != null && eeffMin > eeffMax;
-    return { dL_um, eeffMin, eeffMax, tooHigh, tooLow, wideBand, risky: tooHigh || tooLow || wideBand };
-  }, [l1, l2, freqStart, freqStop]);
+    const fmax = Number(freqStop) * 1e9;
+    if (!Number.isFinite(dL_um) || dL_um <= 0 || !Number.isFinite(fmax) || fmax <= 0) return null;
+    const dL_m = dL_um * 1e-6;
+    const eeffMax = (C_LIGHT / (2 * fmax * dL_m)) ** 2;
+    return { dL_um, eeffMax, risky: eeffMax < 5 };
+  }, [l1, l2, freqStop]);
 
   const cNum = cFperM.trim() === '' ? null : Number(cFperM);
   const cValid = cNum != null && Number.isFinite(cNum) && cNum > 0;
@@ -184,7 +183,6 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
     onClose();
   };
   const generateQ3D = () => onGenerateQ3D([...q3dPick], q3dOpts());
-  const generateZ0Transfer = () => onGenerateZ0Transfer([...q3dPick], q3dOpts());
 
   const fieldCls = 'w-full px-2 py-1 rounded bg-slate-800 border border-slate-700 text-slate-100 text-xs focus:outline-none focus:border-cyan-500';
   const labelCls = 'text-[11px] text-slate-400';
@@ -352,37 +350,21 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
                     <span className="text-[11px] text-cyan-400">↑ also built into the main script on Generate</span>
                   )}
                 </div>
-                {onGenerateZ0Transfer && (
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={generateZ0Transfer}
-                      disabled={q3dPick.size < 2}
-                      className="px-2.5 py-1 rounded text-[11px] font-medium border border-slate-600 hover:bg-slate-800 text-slate-200 disabled:opacity-40 disabled:cursor-not-allowed"
-                      title="Generate a SEPARATE 'Z₀ from Q3D C' script to run on the SOLVED combined project (Q3D + 2-line HFSS both solved). It reads the Q3D capacitance matrix, sets tl_C_F_per_m as a POST-PROCESSING variable on the HFSS design (no re-solve), and plots Re/Im Z₀ vs Freq. Needs ≥2 conductors (differential C). The computed C is echoed with sanity bounds so a mis-read is visible."
-                    >
-                      Z₀-from-Q3D script…
-                    </button>
-                    <span className="text-[11px] text-slate-500">run after solving both designs</span>
-                  </div>
+                {bundleQ3D && q3dPick.size >= 2 && (
+                  <p className="text-[10px] text-cyan-400">When bundled, the script also auto-sets <span className="font-mono">tl_C_F_per_m</span> from the Q3D solve and plots Re/Im Z₀ on the HFSS design (no re-solve).</p>
                 )}
               </div>
             )}
           </div>
 
-          {/* TRL phase-window guidance (well-conditioned for βΔl in 20°–160°) */}
+          {/* Phase-ambiguity guidance */}
           {phase && (
             <div className={`rounded border px-3 py-2 text-[11px] leading-relaxed ${phase.risky ? 'border-amber-700 bg-amber-950/30 text-amber-200' : 'border-slate-800 bg-slate-800/40 text-slate-400'}`}>
               {phase.risky && <AlertTriangle size={12} className="inline mr-1 -mt-0.5 text-amber-400" />}
-              Δl = {phase.dL_um} µm. TRL is well-conditioned while the per-line phase βΔl stays in 20°–160° over the band:{' '}
-              εeff ≳ <span className="font-mono">{phase.eeffMin != null ? phase.eeffMin.toFixed(1) : '—'}</span> (≥20° at {freqStart} GHz) and{' '}
-              εeff ≲ <span className="font-mono">{phase.eeffMax != null ? phase.eeffMax.toFixed(1) : '—'}</span> (≤160° at {freqStop} GHz).
-              {phase.wideBand
-                ? ' The band is too wide for one line pair to hold βΔl in 20°–160° throughout (the f-start floor exceeds the f-stop ceiling) — narrow the band, or characterise sub-bands with different L2−L1.'
-                : <>
-                    {phase.tooHigh && ' A typical substrate εeff exceeds the f-stop ceiling — shrink L2−L1 or lower f stop (β wraps past 180°; α is unaffected).'}
-                    {phase.tooLow && ' A typical substrate εeff is below the f-start floor — the lines are too close in length; increase L2−L1 or raise f start (per TRL).'}
-                    {!phase.risky && ' A typical substrate εeff sits comfortably in range.'}
-                  </>}
+              Δl = {phase.dL_um} µm. β is unambiguous while εeff &lt; {phase.eeffMax.toFixed(1)} over the band
+              (βΔl &lt; π at {freqStop} GHz). {phase.risky
+                ? 'That is below a typical substrate εeff — shrink L2−L1 or lower f stop, or the β/εeff trace will wrap (α is unaffected).'
+                : 'Comfortable margin for typical substrates.'}
             </div>
           )}
 
