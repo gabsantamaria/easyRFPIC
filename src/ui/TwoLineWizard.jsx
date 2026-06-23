@@ -87,19 +87,28 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
     return Number.isFinite(v) ? v : 0;
   }, [scene, paramValues]);
   const [q3dThk, setQ3dThk] = useState(() => (prefs && prefs.q3dThk ? prefs.q3dThk : (condThkResolved > 0 ? String(condThkResolved) : '')));
-  const [q3dLen, setQ3dLen] = useState(() => (prefs && prefs.q3dLen ? prefs.q3dLen : '')); // line physical length (µm); blank = geometry guess
+  // ACTUAL physical line length for C/length, as an EXPRESSION (becomes the Q3D
+  // variable q3d_line_len_um, so the plot tracks sweeps). Default = the Length
+  // parameter (the "length to sweep"); for a swept unit-cell COUNT, the user
+  // enters the length formula (e.g. N*(cell_w+cell_s)). Blank → geometry guess.
+  const [q3dLen, setQ3dLen] = useState(() => (prefs && prefs.q3dLen ? prefs.q3dLen : '')); // blank → uses the Length parameter (shown as placeholder, tracked live)
   // Q3D capacitance-setup convergence controls.
   const [q3dCg, setQ3dCg] = useState(() => (prefs && prefs.q3dCg ? prefs.q3dCg : '0.01'));      // CG % error (ΔC per pass)
   const [q3dMinP, setQ3dMinP] = useState(() => (prefs && prefs.q3dMinP ? prefs.q3dMinP : '15')); // min passes
   const [q3dMaxP, setQ3dMaxP] = useState(() => (prefs && prefs.q3dMaxP ? prefs.q3dMaxP : '20')); // max passes
   const thkNum = q3dThk.trim() === '' ? null : Number(q3dThk);
   const thkValid = thkNum != null && Number.isFinite(thkNum) && thkNum > 0;
-  const lenNum = q3dLen.trim() === '' ? null : Number(q3dLen);
+  // Evaluate the actual-length EXPRESSION to a number (for the dielectric
+  // footprint + the one-shot auto-transfer). Blank field → fall back to the
+  // Length parameter (tracked live), so changing the dropdown updates the default.
+  const lenEvaled = evalExpr(q3dLen.trim() || lengthParam || '0', paramValues || {});
+  const lenNum = Number.isFinite(lenEvaled) && lenEvaled > 0 ? lenEvaled : null;
   const numOr = (s, d) => { const v = Number(s); return Number.isFinite(v) && v > 0 ? v : d; };
   // Options bundle passed to the Q3D generators (thickness, optional length, band, convergence).
   const q3dOpts = () => ({
     thicknessUm: thkValid ? thkNum : undefined,
-    lengthUm: (lenNum != null && Number.isFinite(lenNum) && lenNum > 0) ? lenNum : undefined,
+    lengthExpr: q3dLen.trim() || lengthParam || '',
+    lengthUm: lenNum != null ? lenNum : undefined,
     freqStartGHz: freqStart.trim() === '' ? undefined : Number(freqStart),
     freqStopGHz: freqStop.trim() === '' ? undefined : Number(freqStop),
     freqPoints: freqPoints.trim() === '' ? undefined : Number(freqPoints),
@@ -313,11 +322,14 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
                       onChange={(e) => setQ3dThk(e.target.value)} />
                   </div>
                   <div className="space-y-1">
-                    <label className={labelCls}>Line physical length (µm)</label>
-                    <input className={fieldCls} value={q3dLen} placeholder="auto (geometry) — set unfolded length"
+                    <label className={labelCls}>Actual line length (µm)</label>
+                    <input className={fieldCls} value={q3dLen} placeholder={lengthParam || 'length variable or formula'}
                       onChange={(e) => setQ3dLen(e.target.value)} />
                   </div>
                 </div>
+                <p className="text-[10px] text-slate-500">
+                  C/length divides by this as the Q3D variable <span className="font-mono">q3d_line_len_um</span>, so the plot tracks sweeps. Default = the Length parameter (<span className="font-mono">{lengthParam || '—'}</span>). If you sweep a unit-cell COUNT, enter the length formula here, e.g. <span className="font-mono">N*(cell_w+cell_s)</span> — it must be a LENGTH expression (µm), not a bare count.
+                </p>
                 <div className="grid grid-cols-3 gap-3">
                   <div className="space-y-1">
                     <label className={labelCls}>CG error (%)</label>

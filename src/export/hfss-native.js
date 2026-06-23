@@ -4596,6 +4596,7 @@ except Exception as e:
           tlQ3DBlock = generateQ3DCombinedBlock(tlQ3D.scene, null, {
             conductorIds: tlQ3D.conductorIds,
             thicknessUm: tlQ3D.thicknessUm,
+            lengthExpr: tlQ3D.lengthExpr,
             lengthUm: tlQ3D.lengthUm,
             freqStartGHz: tlQ3D.freqStartGHz,
             freqStopGHz: tlQ3D.freqStopGHz,

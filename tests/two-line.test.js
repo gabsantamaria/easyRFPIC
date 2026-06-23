@@ -476,7 +476,7 @@ describe('generateQ3DCapacitance — meander C extraction script', () => {
     // Parametric design variables + geometry referencing them.
     expect(q).toContain('set_var("Lc"');            // scene param declared as a Q3D var
     expect(q).toContain('set_var("q3d_cond_thk", "0.2um")');
-    expect(q).toContain('set_var("q3d_line_len_um", "500")');
+    expect(q).toContain('set_var("q3d_line_len_um", "500um")'); // length-typed (bare number → um)
     expect(q).toContain('set_var("line_q3cx"');     // editable base position
     expect(q).toMatch(/\(line_q3cx\) \+ \(Lc\)\/2|\(Lc\)\/2/); // size from the line's w expr (Lc)
     // Thin conductor = swept sheet by the thickness VARIABLE.
@@ -504,13 +504,14 @@ describe('generateQ3DCapacitance — meander C extraction script', () => {
     expect(q).toContain('mtl_Cmatrix.csv');            // CSV named after the design
     expect(q).toContain('Results -> Solution Data -> Matrix');
     expect(q).toContain('((C11+C22)/2 - C12)/2');   // differential, in the message
-    // Auto-generated C-per-length PLOT. The report engine (unlike the design
-    // output-var parser) DOES accept C(net,net) arithmetic; baked length in
-    // metres → F/m. lengthUm=500 → /0.0005.
+    // Auto-generated C-per-length PLOT. The report engine accepts C(net,net)
+    // arithmetic and divides by the q3d_line_len_um VARIABLE (so the plot tracks
+    // geometry sweeps) — NOT a baked literal.
     expect(q).toContain('GetModule("ReportSetup")');
     expect(q).toContain('CreateReport("C_per_length_F_per_m", "Matrix", "Rectangular Plot"');
     expect(q).toContain('"Context:=", "Original"');
-    expect(q).toContain('((C(net_line,net_line)+C(net_padL,net_padL))/2-C(net_line,net_padL))/2)/0.0005');
+    expect(q).toContain('((C(net_line,net_line)+C(net_padL,net_padL))/2-C(net_line,net_padL))/2)/q3d_line_len_um');
+    expect(q).not.toMatch(/\)\/0\.000\d/); // not a baked /<metres> literal
     expect(q).not.toContain('CreateOutputVariable');
     expect(q).not.toMatch(/abs\(C\(/);
     // Resilience: guarded logger + existence-checked delete (the abnormal-
@@ -528,6 +529,16 @@ describe('generateQ3DCapacitance — meander C extraction script', () => {
     const pv = resolveParams(scene.params).values;
     const q = generateQ3DCapacitance(scene, pv, { conductorIds: ['line'] });
     expect(q).toContain('set_var("q3d_cond_thk", "0.8um")'); // swept by h_cond
+  });
+
+  it('uses the actual-length EXPRESSION as a swept Q3D variable for C/length', () => {
+    const scene = makeLineScene(500);
+    const pv = resolveParams(scene.params).values;
+    // The line length is driven by Lc; the user enters "Lc" (the actual length).
+    const q = generateQ3DCapacitance(scene, pv, { conductorIds: ['line', 'padL'], thicknessUm: 0.2, lengthExpr: 'Lc' });
+    expect(q).toContain('set_var("q3d_line_len_um", "Lc")');   // expression, not a baked number
+    expect(q).toContain(')/q3d_line_len_um');                  // report divides by the variable
+    expect(q).not.toMatch(/\)\/0\.000\d/);                     // no baked metres literal
   });
 
   it('throws when no conductor is selected', () => {

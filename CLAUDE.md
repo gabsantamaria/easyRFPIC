@@ -379,15 +379,22 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
   `oReportSetup.CreateReport(name, "Matrix", "Rectangular Plot", "Setup1 :
   Sweep1", ["Context:=","Original"], ["Freq:=",["All"]], ["X Component:=","Freq","Y
   Component:=",[<expr>]])` whose Y is `((C(a,a)+C(b,b))/2 − C(a,b))/2 /
-  <lengthMeters>`; then SOLVES (`Analyze`); and (2) **EXPORTS the C matrix to
+  q3d_line_len_um`; then SOLVES (`Analyze`); and (2) **EXPORTS the C matrix to
   `<project>/<design>_Cmatrix.csv`** (post-solve) via `oDesign.ExportMatrixData(
   file, "C", "", "Setup1 : LastAdaptive", "Original", "ohm","nH","fF","mSie",
   <fHz>, "Maxwell, Spice, Couple", 0, False)` (the 13-arg AEDT-2023 form;
   `problem_type="C"` for 3-D Q3D, NOT `"CG"`; freq is numeric Hz). **CRITICAL distinction:** the post-processing REPORT
   engine (`ReportSetup`) DOES accept `C(net,net)` arithmetic and resolves it in SI
-  **Farads** — so the trace is F/m directly (length BAKED in metres, same
-  anti-double-conversion lesson as the 2-line Δl literal; if a release resolves C
-  in fF the trace is off by ~1e15 → fall back to the CSV). It is only the DESIGN
+  **Farads**. The report divides by the Q3D VARIABLE `q3d_line_len_um` (the ACTUAL
+  line length), NOT a baked literal, so the plot **TRACKS geometry sweeps**.
+  `q3d_line_len_um` is declared from the wizard's "Actual line length" field — an
+  EXPRESSION (default = the Length parameter; for a swept unit-cell COUNT the user
+  enters the length formula, e.g. `N*(cell_w+cell_s)`). It's emitted LENGTH-TYPED
+  (a bare number → `"<n>um"`, an expression as-is) so it resolves to SI metres in
+  the report ⇒ `C[F]/len[m] = F/m`. Off by ~1e15 ⇒ C resolved in fF (use the CSV);
+  off by ~1e6 ⇒ `q3d_line_len_um` resolved in µm not metres (it's not length-typed
+  — don't pass a bare count). The one-shot auto-transfer still bakes the numeric
+  length (`evalExpr(lengthExpr)`) since it's a single scalar set on the HFSS var. It is only the DESIGN
   output-variable parser that rejects `C(...)` as "'C' is not a function name"
   ("C Matrix" report category ⇒ report type string `"Matrix"`, NOT "C Matrix").
   The matrix is also visible under Results → Solution Data → Matrix. The line C is

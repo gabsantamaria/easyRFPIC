@@ -275,8 +275,20 @@ ${sweepFn}("${name}", "q3d_cond_thk")  # thin conductor: sweep up by thickness`;
   }
   if (!Number.isFinite(bb.xMin)) throw new Error('Selected conductors have no resolvable geometry.');
 
-  const lengthUm = (Number.isFinite(opts.lengthUm) && opts.lengthUm > 0) ? opts.lengthUm : num(lineLengthUm);
-  varDecls.push(`set_var("q3d_line_len_um", "${dec(lengthUm)}")  # line PHYSICAL length (um) for C/length -- VERIFY (esp. meander)`);
+  // Numeric length (dielectric footprint + the one-shot auto-transfer).
+  const lengthExpr = String(opts.lengthExpr ?? '').trim();
+  let lengthUm = (Number.isFinite(opts.lengthUm) && opts.lengthUm > 0) ? opts.lengthUm
+    : (lengthExpr ? evalExpr(lengthExpr, pv) : 0);
+  if (!(Number.isFinite(lengthUm) && lengthUm > 0)) lengthUm = num(lineLengthUm);
+  // q3d_line_len_um is a Q3D VARIABLE = the ACTUAL line length, declared as the
+  // user's EXPRESSION so it TRACKS sweeps (e.g. a unit-cell count N → the report
+  // re-divides as N changes). A length-typed value (refs µm params, or a bare
+  // number → "<n>um") resolves to SI metres in a report expression, so the
+  // C/length report divides by it directly. A blank expr bakes the numeric guess.
+  const lenVar = lengthExpr
+    ? (/^-?\d+(?:\.\d+)?$/.test(lengthExpr) ? `${lengthExpr}um` : lengthExpr)
+    : `${dec(lengthUm)}um`;
+  varDecls.push(`set_var("q3d_line_len_um", "${ascii(lenVar)}")  # ACTUAL line length (tracks sweeps); C/length = C / q3d_line_len_um`);
 
   // ---- Dielectric stack: parametric Z, numeric footprint (generous pad) ----
   const spanX = bb.xMax - bb.xMin, spanY = bb.yMax - bb.yMin;
@@ -347,13 +359,14 @@ function q3dNetsSetupReports({ condNets, design, fAdaptGHz, lengthUm, sweep, cg 
   const b = groups.length >= 2 ? groups[1].net : null;
   const fHz = num((Number.isFinite(fAdaptGHz) ? fAdaptGHz : 4) * 1e9);
   const dname = (design || 'q3d_cap');
-  // Per-length differential C as a REPORT expression. In a Q3D report expression
-  // C(net,net) resolves in SI Farads, so dividing by the length BAKED in metres
-  // (NOT a unit-carrying variable — same anti-double-conversion lesson as the
-  // 2-line Δl literal) yields F/m directly.
-  const lengthM = dec((Number.isFinite(lengthUm) && lengthUm > 0 ? lengthUm : 1) * 1e-6);
+  // Per-length differential C as a REPORT expression. C(net,net) resolves in SI
+  // Farads in a Q3D report; we divide by the Q3D VARIABLE q3d_line_len_um (the
+  // ACTUAL line length) rather than a baked literal, so the plot TRACKS geometry
+  // sweeps. A length-typed variable resolves to SI metres in a report expression
+  // ⇒ C[F]/len[m] = F/m. (If the trace is off by ~1e6, q3d_line_len_um resolved
+  // in µm not metres — make it a length-typed expression, not a bare count.)
   const diffC = (a && b) ? `((C(${a},${a})+C(${b},${b}))/2-C(${a},${b}))/2` : '';
-  const perLen = `(${diffC})/${lengthM}`;
+  const perLen = `(${diffC})/q3d_line_len_um`;
 
   const extract = (a && b)
     ? `# Create the C-per-length PLOT BEFORE solving — with "Real time" update it then
@@ -361,14 +374,14 @@ function q3dNetsSetupReports({ condNets, design, fAdaptGHz, lengthUm, sweep, cg 
 # solved data: the C(net,net) quantities exist as soon as the nets are assigned,
 # and "Setup1 : Sweep1" is defined by InsertSweep above. The post-processing
 # REPORT engine (unlike the design output-variable parser) accepts C(net,net)
-# arithmetic and resolves it in SI Farads; the length is baked in metres, so the
-# trace is F/m directly. Flat vs Freq (capacitance is electrostatic).
+# arithmetic and resolves it in SI Farads; it's divided by the q3d_line_len_um
+# VARIABLE (actual length, metres in SI) so the trace is F/m AND tracks sweeps.
 try:
     oRpt = oDesign.GetModule("ReportSetup")
     oRpt.CreateReport("C_per_length_F_per_m", "Matrix", "Rectangular Plot",
         "Setup1 : Sweep1", ["Context:=", "Original"], ["Freq:=", ["All"]],
         ["X Component:=", "Freq", "Y Component:=", ["${perLen}"]])
-    q3d_msg(0, "Report 'C_per_length_F_per_m' created (F/m; updates live during the solve). Read the flat value, paste into the 2-line wizard 'C per length'. If it's off by ~1e15, C resolved in fF on your release; use the CSV / matrix instead.")
+    q3d_msg(0, "Report 'C_per_length_F_per_m' created (F/m; tracks q3d_line_len_um). If off by ~1e15, C resolved in fF (use the CSV); if off by ~1e6, q3d_line_len_um resolved in um not metres -- make it a length-typed expression, not a bare count.")
 except Exception as e:
     q3d_msg(1, "CreateReport failed (read the C matrix / CSV after solving): " + str(e))
 # Solve the (fast) electrostatic capacitance. Comment out to mesh/solve manually.
@@ -386,7 +399,7 @@ try:
 except Exception as e:
     q3d_msg(1, "ExportMatrixData failed; read Results -> Solution Data -> Matrix instead: " + str(e))
 q3d_msg(0, "C-matrix nets: 1=${a}, 2=${b}. Maxwell off-diagonal C12 is NEGATIVE (|.| = mutual).")
-q3d_msg(0, "Per-length line C (differential) = ((C11+C22)/2 - C12)/2 / (q3d_line_len_um*1e-6). Paste into the 2-line wizard 'C per length'.")`
+q3d_msg(0, "Per-length line C (differential) = ((C11+C22)/2 - C12)/2 / q3d_line_len_um (q3d_line_len_um is the actual length variable; edit it / sweep it). Paste C into the 2-line wizard 'C per length'.")`
     : '# (need >=2 conductor nets for a conductor-to-conductor capacitance — select >=2 line conductors in the wizard)';
 
   return `# ===== Nets (one signal net per conductor COMPONENT; all its sheets joined) =====
