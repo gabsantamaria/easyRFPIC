@@ -408,6 +408,10 @@ export default function App() {
   // for backup — that call is best-effort (permission may be denied or
   // unavailable; we silently fall back to localStorage-only).
   const [clipboard, setClipboard] = useState(null); // { components, snaps }
+  // Last cursor position over the canvas, in WORLD coords (updated on hover via
+  // the Canvas onHoverWorld callback). Used so ⌘V pastes at the cursor. A ref
+  // (not state) so the per-mousemove update never re-renders.
+  const cursorWorldRef = useRef(null);
   // Listen for cross-tab Copy events. The browser fires `storage` on
   // EVERY other tab on the same origin when one tab writes to
   // localStorage. We watch the clipboard key and hydrate the in-memory
@@ -1410,12 +1414,19 @@ export default function App() {
       cx: (Number.isFinite(c.cx) ? c.cx : 0) + dx,
       cy: (Number.isFinite(c.cy) ? c.cy : 0) + dy,
     }));
-    const newSnaps = (cb.snaps || []).map(s => ({
-      ...s,
-      id: `snap_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-      from: { ...s.from, compId: idMap[s.from.compId] },
-      to: { ...s.to, compId: idMap[s.to.compId] },
-    }));
+    // Keep ONLY snaps whose BOTH endpoints are inside the inserted set — links
+    // to shapes outside the fragment are dropped (and a stray external endpoint
+    // can't produce a broken snap with an undefined compId). buildSelectionFragment
+    // already filters this way; enforcing it here covers every fragment source
+    // (paste, upload, a hand-edited OS-clipboard payload).
+    const newSnaps = (cb.snaps || [])
+      .filter(s => idMap[s.from?.compId] && idMap[s.to?.compId])
+      .map(s => ({
+        ...s,
+        id: `snap_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        from: { ...s.from, compId: idMap[s.from.compId] },
+        to: { ...s.to, compId: idMap[s.to.compId] },
+      }));
     updateScene(prev => {
       const mergedParams = { ...prev.params };
       for (const [name, p] of Object.entries(cb.params || {})) {
@@ -1471,7 +1482,7 @@ export default function App() {
     setSaveStatus(s => s); // no-op, just to indicate user feedback could go here
   }, [selectedIds, buildSelectionFragment]);
 
-  const handlePaste = useCallback(async () => {
+  const handlePaste = useCallback(async (at) => {
     // Resolve the clipboard payload with a three-tier fallback so paste
     // works across tabs / after refresh / from the OS clipboard:
     //   1. The in-memory React clipboard (this tab's most recent Copy).
@@ -1519,9 +1530,11 @@ export default function App() {
       } catch { /* permission denied / not JSON / not our payload — give up */ }
     }
     if (!cb || cb.components.length === 0) return;
-    // Insert with fresh ids + the standard paste offset, params backfilled,
-    // and the new set selected (shared with "Upload shapes").
-    applyShapeFragment(cb);
+    // Paste centered on the cursor: an explicit `at` (right-click Paste) wins,
+    // else the last canvas hover position; if the cursor was never over the
+    // canvas, applyShapeFragment falls back to its grid offset.
+    const placeAt = at || cursorWorldRef.current;
+    applyShapeFragment(cb, (placeAt && Number.isFinite(placeAt.x) && Number.isFinite(placeAt.y)) ? { at: placeAt } : {});
     // Keep the in-memory cache hot so the NEXT paste skips the
     // localStorage / OS-clipboard lookup.
     setClipboard(cb);
@@ -2504,7 +2517,7 @@ export default function App() {
       { label: 'Upload shapes here…', icon: Upload, onClick: () => handleUploadShapes({ x: worldX, y: worldY }) },
     ];
     if (clipboard && Array.isArray(clipboard.components) && clipboard.components.length) {
-      items.push({ label: `Paste (${clipboard.components.length})`, icon: Copy, hint: '⌘V', onClick: () => handlePaste() });
+      items.push({ label: `Paste (${clipboard.components.length})`, icon: Copy, hint: '⌘V', onClick: () => handlePaste({ x: worldX, y: worldY }) });
     }
     setContextMenu({ x, y, items });
   };
@@ -7178,6 +7191,7 @@ export default function App() {
             commitDragAdd={commitDragAdd}
             onComponentContextMenu={openComponentContextMenu}
             onBackgroundContextMenu={openBackgroundContextMenu}
+            onHoverWorld={(wp) => { cursorWorldRef.current = wp; }}
             onSvgElement={(el) => { canvasSvgRef.current = el; }}
             flashAnchor={flashAnchor}
           />

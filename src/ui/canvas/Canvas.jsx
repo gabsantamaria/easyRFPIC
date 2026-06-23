@@ -1168,7 +1168,7 @@ function EditablePolyDims({ svgRef, viewport, cSel, verts, params, updateScene, 
 // =========================================================================
 // CANVAS
 // =========================================================================
-export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelection, viewport, setViewport, snapMode, setSnapMode, gridSize, gridSnapEnabled, showGrid = true, paramValues, addParam, updateParamExpr, rulerMode, setRulerMode, rulerMeasurements, setRulerMeasurements, rulerInProgress, setRulerInProgress, rulerSnapPoint, setRulerSnapPoint, alertDialog, setInteractionStatus, showDimensions, editDims = false, commitExpr = null, renameParam = null, addMode, setAddMode, commitDragAdd, onComponentContextMenu, onBackgroundContextMenu, onSvgElement, flashAnchor = null, canvasTheme = DEFAULT_CANVAS_THEME }) {
+export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelection, viewport, setViewport, snapMode, setSnapMode, gridSize, gridSnapEnabled, showGrid = true, paramValues, addParam, updateParamExpr, rulerMode, setRulerMode, rulerMeasurements, setRulerMeasurements, rulerInProgress, setRulerInProgress, rulerSnapPoint, setRulerSnapPoint, alertDialog, setInteractionStatus, showDimensions, editDims = false, commitExpr = null, renameParam = null, addMode, setAddMode, commitDragAdd, onComponentContextMenu, onBackgroundContextMenu, onHoverWorld = null, onSvgElement, flashAnchor = null, canvasTheme = DEFAULT_CANVAS_THEME }) {
   // Drop a single committed ruler measurement by id.
   const deleteRuler = (id) => setRulerMeasurements((prev) => prev.filter((m) => m.id !== id));
   const svgRef = useRef(null);
@@ -2297,6 +2297,9 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
   };
 
   const onMouseMove = (e) => {
+    // Report the cursor's WORLD position to the parent (for ⌘V paste-at-cursor).
+    // Cheap: one screenToWorld + a ref write upstream, no re-render.
+    if (onHoverWorld) onHoverWorld(screenToWorld(e.clientX, e.clientY));
     // C3: vertex-handle drag — live preview through local state only; the
     // scene commit happens once on mouseup (single undo step). Grid snap
     // applies to the dragged vertex's world position (Cmd disables, same
