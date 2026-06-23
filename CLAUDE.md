@@ -301,6 +301,15 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
       are left intact + warned (rare on the port path). The shared
       exporter/detector are UNTOUCHED. `buildTwoLineScene` returns `dLMeters`
       (Δl in metres) alongside `portIndices` for the exporter.
+    - **Δl is the ACTUAL physical length difference**, NOT `L2 − L1` of the raw
+      param values. When the length param is a unit-cell COUNT N (not a µm
+      length), `L2 − L1` is a count difference, so Δl would be wrong (εeff off by
+      that ratio², α by the ratio). `cfg.lengthExpr` (default = the length param;
+      from the wizard's "Actual line length" field) gives the µm length as a
+      function of the param; buildTwoLineScene evaluates it with the param = l1
+      and = l2 (re-resolving the param closure so DERIVED params like `TL_L =
+      N·pitch` update) and differences. This SAME `lengthExpr` is COMMON to εeff/α
+      (Δl), Z₀ (via the per-length C), and Q3D (`q3d_line_len_um`).
   - `twoLineOutputVariables(pi, dLMeters)` — the ORDERED list of HFSS Output
     Variables (dependency order; each `{name, expr, note}`) implementing the
     extraction: per-line wave-cascade T from its 2-port S-block (T11=−detS/S21,

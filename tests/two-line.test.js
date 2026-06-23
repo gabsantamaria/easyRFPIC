@@ -230,6 +230,20 @@ describe('buildTwoLineScene — 4-port two-line design', () => {
     expect(scene.simSetup.minPasses).toBe('12'); // clamped down
   });
 
+  it('Δl uses the ACTUAL-length expression (default = the param) — fixes the count-param case', () => {
+    const scene = makeLineScene(500); // length param Lc (a direct µm length)
+    // Default lengthExpr = the param itself ⇒ Δl = L2 − L1 (correct for a direct length).
+    const r1 = buildTwoLineScene(scene, { lengthParam: 'Lc', l1: 300, l2: 900 });
+    expect(r1.dLMeters).toBeCloseTo((900 - 300) * 1e-6, 12);
+    // If the param were a COUNT and the actual length were 10× it, Δl must use
+    // the EXPRESSION (10*Lc), not the raw L2−L1: 10× larger.
+    const r2 = buildTwoLineScene(scene, { lengthParam: 'Lc', l1: 300, l2: 900, lengthExpr: '10*Lc' });
+    expect(r2.dLMeters).toBeCloseTo(10 * (900 - 300) * 1e-6, 12);
+    // A derived param re-resolves when the length param is overridden at L1/L2.
+    const r3 = buildTwoLineScene(scene, { lengthParam: 'Lc', l1: 300, l2: 900, lengthExpr: 'Lc/2' });
+    expect(r3.dLMeters).toBeCloseTo(0.5 * (900 - 300) * 1e-6, 12);
+  });
+
   it('rejects a length param the line does not use', () => {
     expect(() => buildTwoLineScene(makeLineScene(), { lengthParam: 'nope', l1: 300, l2: 900 }))
       .toThrow(/not a parameter/i);

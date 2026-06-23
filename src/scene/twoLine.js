@@ -376,7 +376,22 @@ export function buildTwoLineScene(scene, cfg) {
   const portNames = ports.map((c) => `LumpedPort_${c.id.replace(/[^A-Za-z0-9_]/g, '_')}`);
   // Δl in METRES for the in-HFSS εeff/α math — baked as a literal (see
   // twoLineOutputVariables) so HFSS variable-unit handling can't double-convert.
-  const dLMeters = (evalExpr(TL_L2, pv) - evalExpr(TL_L1, pv)) * 1e-6;
+  // Δl = the ACTUAL physical length DIFFERENCE between line A and line B. The
+  // length param P may be a unit-cell COUNT, so L2−L1 (raw param values) is NOT
+  // the length difference. cfg.lengthExpr (default = P) gives the actual µm length
+  // as a function of P; evaluate it with P=l1 and P=l2 (re-resolving the param
+  // closure so DERIVED params like TL_L = N·pitch update) and take the difference.
+  // Empty/non-finite → fall back to the raw param values as µm (legacy behaviour
+  // when P is already a direct length). This Δl drives εeff/α and (via the C the
+  // user feeds back) Z₀, so it MUST be the physical length, not a count.
+  const lenExpr = String(cfg.lengthExpr ?? '').trim() || P;
+  const lenAtParam = (val) => {
+    if (!src.params[P]) return Number(val);
+    const p2 = { ...src.params, [P]: { ...src.params[P], expr: String(val) } };
+    const v = evalExpr(lenExpr, resolveParams(p2).values);
+    return Number.isFinite(v) ? v : Number(val);
+  };
+  const dLMeters = (lenAtParam(cfg.l2) - lenAtParam(cfg.l1)) * 1e-6;
   return { scene: out, portIndices, portNames, dLMeters, warnings };
 }
 

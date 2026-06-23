@@ -138,6 +138,10 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
   const cfg = useMemo(() => ({
     lengthParam,
     l1: l1.trim(), l2: l2.trim(),
+    // ACTUAL physical line length (µm) as a function of the length param — COMMON
+    // to εeff/α (Δl), Z₀, and Q3D. Blank → the length param itself (correct when
+    // it's already a direct µm length; for a unit-cell COUNT, enter the formula).
+    lengthExpr: q3dLen.trim() || lengthParam,
     separation: separation.trim() === '' ? null : Number(separation),
     freqStart: freqStart.trim() === '' ? null : Number(freqStart),
     freqStop: freqStop.trim() === '' ? null : Number(freqStop),
@@ -146,7 +150,7 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
     // the bundled Q3D CG solve uses (so both sims share one pass budget).
     minPass: numOr(q3dMinP, 15),
     maxPass: numOr(q3dMaxP, 20),
-  }), [lengthParam, l1, l2, separation, freqStart, freqStop, freqPoints, q3dMinP, q3dMaxP]);
+  }), [lengthParam, l1, l2, q3dLen, separation, freqStart, freqStop, freqPoints, q3dMinP, q3dMaxP]);
 
   // Live build + validate (the same call Generate runs). Errors block; warnings
   // inform.
@@ -160,18 +164,18 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
     }
   }, [scene, cfg, lengthParam]);
 
-  // Phase-ambiguity guidance: the eigenvalue β is only unwrapped while
-  // βΔl < π. With Δl = L2−L1 and the top sweep frequency, the largest εeff
-  // for which that holds is εeff_max = (c / (2·f_max·Δl))². If that's below a
-  // typical substrate εeff the user should shrink Δl.
+  // Phase-ambiguity guidance: the eigenvalue β is only unwrapped while βΔl < π.
+  // Use the ACTUAL Δl the build computed (dLMeters — correct even when the length
+  // param is a unit-cell count) and the top sweep frequency; the largest εeff for
+  // which βΔl<π holds is εeff_max = (c/(2·f_max·Δl))². Below a typical substrate
+  // εeff ⇒ shrink Δl.
   const phase = useMemo(() => {
-    const dL_um = Number(l2) - Number(l1);
+    const dL_m = build.ok ? build.ok.dLMeters : NaN;
     const fmax = Number(freqStop) * 1e9;
-    if (!Number.isFinite(dL_um) || dL_um <= 0 || !Number.isFinite(fmax) || fmax <= 0) return null;
-    const dL_m = dL_um * 1e-6;
+    if (!Number.isFinite(dL_m) || dL_m <= 0 || !Number.isFinite(fmax) || fmax <= 0) return null;
     const eeffMax = (C_LIGHT / (2 * fmax * dL_m)) ** 2;
-    return { dL_um, eeffMax, risky: eeffMax < 5 };
-  }, [l1, l2, freqStop]);
+    return { dL_um: dL_m * 1e6, eeffMax, risky: eeffMax < 5 };
+  }, [build, freqStop]);
 
   const cNum = cFperM.trim() === '' ? null : Number(cFperM);
   const cValid = cNum != null && Number.isFinite(cNum) && cNum > 0;
@@ -244,16 +248,27 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
             )}
           </div>
 
-          {/* L1 / L2 */}
+          {/* L1 / L2 — the two VALUES of the length parameter (µm for a direct
+              length; a unit-cell count when the param is a count) */}
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1">
-              <label className={labelCls}>Short line L1 (µm)</label>
+              <label className={labelCls}>Short line L1 ({lengthParam || 'value'})</label>
               <input className={fieldCls} value={l1} onChange={(e) => setL1(e.target.value)} />
             </div>
             <div className="space-y-1">
-              <label className={labelCls}>Long line L2 (µm)</label>
+              <label className={labelCls}>Long line L2 ({lengthParam || 'value'})</label>
               <input className={fieldCls} value={l2} onChange={(e) => setL2(e.target.value)} />
             </div>
+          </div>
+
+          {/* Actual physical length — COMMON to εeff/α (Δl), Z₀, and Q3D */}
+          <div className="space-y-1">
+            <label className={labelCls}>Actual line length (µm)</label>
+            <input className={fieldCls} value={q3dLen} placeholder={lengthParam || 'length variable or formula'}
+              onChange={(e) => setQ3dLen(e.target.value)} />
+            <p className="text-[10px] text-slate-500">
+              The REAL physical length as a function of the length parameter — used for <span className="font-mono">Δl</span> (εeff/α), Z₀, AND the Q3D C/length. Blank = the Length parameter (<span className="font-mono">{lengthParam || '—'}</span>), correct only if it's already a µm length. If you sweep a unit-cell COUNT, enter the length formula, e.g. <span className="font-mono">N*(cell_w+cell_s)</span>.{phase && <> Current Δl = <span className="font-mono">{Math.round(phase.dL_um)}</span> µm.</>}
+            </p>
           </div>
 
           {/* Separation + freq band */}
@@ -314,22 +329,13 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
                     </label>
                   ))}
                 </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="space-y-1">
-                    <label className={labelCls}>Conductor thickness (µm)</label>
-                    <input className={fieldCls} value={q3dThk}
-                      placeholder={condThkResolved > 0 ? `h_cond = ${condThkResolved}` : 'required (h_cond = 0)'}
-                      onChange={(e) => setQ3dThk(e.target.value)} />
-                  </div>
-                  <div className="space-y-1">
-                    <label className={labelCls}>Actual line length (µm)</label>
-                    <input className={fieldCls} value={q3dLen} placeholder={lengthParam || 'length variable or formula'}
-                      onChange={(e) => setQ3dLen(e.target.value)} />
-                  </div>
+                <div className="space-y-1">
+                  <label className={labelCls}>Conductor thickness (µm)</label>
+                  <input className={fieldCls} value={q3dThk}
+                    placeholder={condThkResolved > 0 ? `h_cond = ${condThkResolved}` : 'required (h_cond = 0)'}
+                    onChange={(e) => setQ3dThk(e.target.value)} />
+                  <p className="text-[10px] text-slate-500">C/length uses the <span className="font-mono">Actual line length</span> field above (the Q3D variable <span className="font-mono">q3d_line_len_um</span>), shared with εeff/α &amp; Z₀.</p>
                 </div>
-                <p className="text-[10px] text-slate-500">
-                  C/length divides by this as the Q3D variable <span className="font-mono">q3d_line_len_um</span>, so the plot tracks sweeps. Default = the Length parameter (<span className="font-mono">{lengthParam || '—'}</span>). If you sweep a unit-cell COUNT, enter the length formula here, e.g. <span className="font-mono">N*(cell_w+cell_s)</span> — it must be a LENGTH expression (µm), not a bare count.
-                </p>
                 <div className="grid grid-cols-3 gap-3">
                   <div className="space-y-1">
                     <label className={labelCls}>CG error (%)</label>
