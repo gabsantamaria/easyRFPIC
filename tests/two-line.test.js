@@ -11,7 +11,7 @@ import { describe, it, expect } from 'vitest';
 import { execSync } from 'child_process';
 import { writeFileSync, mkdirSync } from 'fs';
 import {
-  buildTwoLineScene, twoLineOutputVariables, twoLineExtractNumeric,
+  buildTwoLineScene, twoLineOutputVariables, twoLineExtractNumeric, trlEeffBounds,
   TL_L1, TL_L2, TL_DL,
 } from '../src/scene/twoLine.js';
 import { generateHfssNative } from '../src/export/hfss-native.js';
@@ -545,5 +545,42 @@ describe('generateZ0TransferScript — Q3D C → HFSS Z0 post-processing transfe
     const pv = resolveParams(scene.params).values;
     expect(() => generateZ0TransferScript(scene, pv, { conductorIds: ['line'] }))
       .toThrow(/2 line conductors|2 nets/i);
+  });
+});
+
+// Wizard TRL phase-window hint: εeff bounds for βΔl in [20°, 160°].
+describe('trlEeffBounds — TRL 20°–160° phase window', () => {
+  const C = 2.99792458e8;
+  // phase difference βΔl (deg) for a given εeff at frequency fGHz, length dL_um
+  const degOf = (eeff, fGHz, dL_um) =>
+    (2 * Math.PI * (fGHz * 1e9) * Math.sqrt(eeff) / C) * (dL_um * 1e-6) * 180 / Math.PI;
+
+  it('eeffMax → exactly 160° at f_stop and eeffMin → 20° at f_start', () => {
+    const { eeffMin, eeffMax } = trlEeffBounds(600, 1, 40); // Δl=600µm, 1–40 GHz
+    expect(degOf(eeffMax, 40, 600)).toBeCloseTo(160, 6);
+    expect(degOf(eeffMin, 1, 600)).toBeCloseTo(20, 6);
+  });
+
+  it('upper bound at 180° reproduces the legacy (c/(2·f·Δl))² unwrap limit', () => {
+    const { eeffMax } = trlEeffBounds(600, 1, 40, 20, 180); // hiDeg=180
+    const dL_m = 600e-6, f = 40e9;
+    expect(eeffMax).toBeCloseTo((C / (2 * f * dL_m)) ** 2, 9);
+  });
+
+  it('returns null bounds for non-positive Δl or frequency', () => {
+    expect(trlEeffBounds(0, 1, 40)).toEqual({ eeffMin: null, eeffMax: null });
+    expect(trlEeffBounds(-5, 1, 40)).toEqual({ eeffMin: null, eeffMax: null });
+    expect(trlEeffBounds(600, 0, 40).eeffMin).toBe(null);
+    expect(trlEeffBounds(600, 1, 0).eeffMax).toBe(null);
+  });
+
+  it('a wide band (f_stop/f_start ≫ 8) inverts the window: eeffMin > eeffMax', () => {
+    const { eeffMin, eeffMax } = trlEeffBounds(600, 1, 50); // 50× span > 8× window
+    expect(eeffMin).toBeGreaterThan(eeffMax);
+  });
+
+  it('a narrow band (≤8× span) keeps eeffMin ≤ eeffMax (a usable window)', () => {
+    const { eeffMin, eeffMax } = trlEeffBounds(600, 10, 40); // 4× span < 8×
+    expect(eeffMin).toBeLessThanOrEqual(eeffMax);
   });
 });
