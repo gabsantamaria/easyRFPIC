@@ -26,6 +26,11 @@ import { makeCellFromSelection, instantiateCell } from './cells.js';
 import { resolveParams, evalExpr } from './params.js';
 import { solveLayout } from './solver.js';
 import { detectPortIntegrationLine } from './lumpedPort.js';
+// Reuses the HFSS export's snap-DAG → parametric-position-expression walker so a
+// flattened replica's operands carry a LIVE position (cell geometry stays
+// parametric in HFSS). The hfss-native ↔ twoLine import is a cycle, but every
+// use is at call time on hoisted function declarations, so it resolves safely.
+import { computeParametricPositions } from '../export/hfss-native.js';
 
 // New top-level param names the wizard injects. Prefixed `tl_` so they can't
 // collide with a user param literally named L1/L2/dL.
@@ -169,21 +174,34 @@ export function findLumpedPortOrder(solved, paramValues) {
 // from the kept chain (they're already materialized into the replica positions).
 
 // Per-instance translation offsets for a repeat/displace transform chain
-// (mirrors expandTransforms' translation behaviour). Returns { offs, hasRot }.
+// (mirrors expandTransforms' translation behaviour). Each entry carries the
+// NUMERIC offset (dx/dy, for baking positions) AND the symbolic offset
+// EXPRESSION (dxExpr/dyExpr, for the parametric cxExpr/cyExpr the HFSS export
+// reads — so a cell-pitch param sweeps the replica spacing in HFSS, not just on
+// the canvas). Returns { offs, hasRot }.
 function translationOffsets(transforms, pv) {
-  let offs = [{ dx: 0, dy: 0 }];
+  let offs = [{ dx: 0, dy: 0, dxExpr: '0', dyExpr: '0' }];
   let hasRot = false;
+  const sum = (a, b) => (a === '0' ? b : (b === '0' ? a : `(${a}) + (${b})`));
   for (const t of (transforms || [])) {
     if (t.enabled === false) continue;
     if (t.kind === 'displace') {
       const dx = evalExpr(t.dx, pv) || 0, dy = evalExpr(t.dy, pv) || 0;
-      offs = offs.map((o) => ({ dx: o.dx + dx, dy: o.dy + dy }));
+      const dxE = String(t.dx ?? '0'), dyE = String(t.dy ?? '0');
+      offs = offs.map((o) => ({ dx: o.dx + dx, dy: o.dy + dy, dxExpr: sum(o.dxExpr, dxE), dyExpr: sum(o.dyExpr, dyE) }));
     } else if (t.kind === 'repeat') {
       const n = Math.max(0, Math.round(evalExpr(t.n, pv) || 0));
       const dx = evalExpr(t.dx, pv) || 0, dy = evalExpr(t.dy, pv) || 0;
+      const dxE = String(t.dx ?? '0'), dyE = String(t.dy ?? '0');
       const inc = t.includeOriginal !== false;
       const out = [];
-      for (const o of offs) for (let i = (inc ? 0 : 1); i <= n; i++) out.push({ dx: o.dx + i * dx, dy: o.dy + i * dy });
+      for (const o of offs) for (let i = (inc ? 0 : 1); i <= n; i++) {
+        out.push({
+          dx: o.dx + i * dx, dy: o.dy + i * dy,
+          dxExpr: sum(o.dxExpr, i === 0 ? '0' : `${i}*(${dxE})`),
+          dyExpr: sum(o.dyExpr, i === 0 ? '0' : `${i}*(${dyE})`),
+        });
+      }
       offs = out;
     } else if (t.kind === 'rotate') {
       hasRot = true;
@@ -214,9 +232,22 @@ function clusterOf(c, byId, acc = []) {
 
 // Flatten translation replicas of every top-level component (and its boolean
 // cluster) into distinct static components. `components` should be SOLVED
-// (resolved cx/cy) so baked positions account for any snap chain. Returns
-// { components, warnings }.
-export function flattenReplicas(components, pv) {
+// (resolved cx/cy) so baked positions account for any snap chain.
+//
+// `pp` (optional) is the parametric-position map from
+// `computeParametricPositions(components, snaps, pv)` (the SAME walker the HFSS
+// export uses). When given, each flattened PRIMITIVE gets a `cxExpr`/`cyExpr` =
+// its base operand's parametric snap-chain position PLUS the symbolic replica
+// offset (k·pitch). The export reads these (the operand has no snap and its
+// boolean has no incoming snap, so it's a "free root" → rootPosExpr honors
+// cxExpr/cyExpr), so the meander cell geometry stays FULLY parametric in HFSS —
+// changing a cell dimension repositions the bars (and the inter-cell pitch)
+// instead of just resizing them about baked centers (the "cells deform in HFSS"
+// bug). Numeric cx/cy are still baked (solver/port-detection fallback, and the
+// expr evaluates to exactly the baked value at the current params). Without
+// `pp` (e.g. the Q3D baker) positions stay baked — unchanged behaviour.
+// Returns { components, warnings }.
+export function flattenReplicas(components, pv, pp) {
   const byId = Object.fromEntries(components.map((c) => [c.id, c]));
   const tops = components.filter((c) => !c.consumedBy); // operands ride their boolean
   const info = [];
@@ -224,7 +255,7 @@ export function flattenReplicas(components, pv) {
   for (const c of tops) {
     const { offs, hasRot } = translationOffsets(c.transforms, pv);
     const members = clusterOf(c, byId);
-    const useOffs = hasRot ? [{ dx: 0, dy: 0 }] : offs;
+    const useOffs = hasRot ? [{ dx: 0, dy: 0, dxExpr: '0', dyExpr: '0' }] : offs;
     info.push({ root: c, members, offs: useOffs, hasRot });
     for (const m of members) idK[m.id] = useOffs.length;
   }
@@ -243,9 +274,17 @@ export function flattenReplicas(components, pv) {
     } else if (hasRot) {
       warnings.push(`${root.id}: rotate transform left intact (not auto-expanded).`);
     }
+    // In parametric mode (pp given), the operands reposition under a sweep but a
+    // mirror PLANE is the union-boolean centroid, which is baked at the current
+    // value (it can't be expressed parametrically). For a symmetric meander cell
+    // the cross-section centroid is invariant to cell height, so it's exact; flag
+    // it so the user verifies any param that shifts that centroid on this line.
+    if (pp && (root.transforms || []).some((t) => t.enabled !== false && (t.kind === 'mirror' || t.kind === 'duplicate_mirror'))) {
+      warnings.push(`${root.id}: mirrored — operands stay parametric, but the mirror plane is baked at the current cell centroid. Verify the mirrored line if you sweep a param that shifts its cross-section centroid.`);
+    }
     offs.forEach((o, k) => {
       for (const m of members) {
-        out.push({
+        const comp = {
           ...m,
           id: newId(m.id, k),
           cx: (Number.isFinite(m.cx) ? m.cx : 0) + o.dx,
@@ -257,7 +296,16 @@ export function flattenReplicas(components, pv) {
           consumedBy: m.consumedBy ? remapRef(m.consumedBy, k) : m.consumedBy,
           cloneOf: m.cloneOf ? remapRef(m.cloneOf, k) : m.cloneOf,
           operandIds: Array.isArray(m.operandIds) ? m.operandIds.map((id) => remapRef(id, k)) : m.operandIds,
-        });
+        };
+        // Parametric position = base snap-chain expr + symbolic replica offset.
+        // Booleans derive their AABB from operands (the export ignores a
+        // boolean's cxExpr), and the rotate path stays un-materialized — skip both.
+        const base = pp && pp[m.id];
+        if (base && m.kind !== 'boolean' && !hasRot && base.cxExpr && base.cyExpr) {
+          comp.cxExpr = o.dxExpr === '0' ? base.cxExpr : `(${base.cxExpr}) + (${o.dxExpr})`;
+          comp.cyExpr = o.dyExpr === '0' ? base.cyExpr : `(${base.cyExpr}) + (${o.dyExpr})`;
+        }
+        out.push(comp);
       }
     });
   }
@@ -364,7 +412,11 @@ export function buildTwoLineScene(scene, cfg) {
   // for the in-HFSS Δl math.
   const pv = resolveParams(out.params || {}).values;
   const preSolved = solveLayout(out.components, out.snaps, pv);
-  const { components: flatComps, warnings: flatWarn } = flattenReplicas(preSolved, pv);
+  // Parametric position of every base component (from the snap chain) so the
+  // flattened replicas keep LIVE positions in HFSS — changing a cell dimension
+  // repositions the bars instead of just resizing them about baked centers.
+  const pp = computeParametricPositions(preSolved, out.snaps, pv);
+  const { components: flatComps, warnings: flatWarn } = flattenReplicas(preSolved, pv, pp);
   warnings.push(...flatWarn);
   const enabledComps = autoEnableFlankedPorts(flatComps, [], pv);
   out = normalizeScene({ ...out, components: enabledComps, snaps: [], groups: [], mirrors: [] });

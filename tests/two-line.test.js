@@ -389,6 +389,62 @@ describe('buildTwoLineScene — auto-handles repeat-replica ports', () => {
   });
 });
 
+describe('buildTwoLineScene — flattened replicas keep PARAMETRIC positions', () => {
+  // Bug: flattenReplicas baked operand CENTERS numerically while keeping sizes
+  // parametric, so a cell-dimension sweep (e.g. cell_h) resized the bars about
+  // fixed centers → "cells deform in HFSS" (unlike the canvas). Fix: each
+  // flattened operand carries cxExpr/cyExpr = its snap-chain position + the
+  // symbolic replica offset, so the export emits LIVE positions.
+  function paramCellScene(L = 200) {
+    const comp = (id, extra) => ({ id, kind: 'rect', cutouts: [], transforms: [], ...extra });
+    const rep = (id) => [{ id, kind: 'repeat', enabled: true, n: '1', dx: 'L', dy: '0', includeOriginal: true }];
+    const components = [
+      comp('p', { layer: 'port', cx: 0, cy: 0, w: '4', h: '4', transforms: rep('rp0') }),
+      comp('wE', { layer: 'electrode', cx: -7, cy: 0, w: '10', h: '4', transforms: rep('rp1') }),
+      comp('eE', { layer: 'electrode', cx: 7, cy: 0, w: '10', h: '4', transforms: rep('rp2') }),
+      // A 2-rect cell: the bar is snapped ABOVE the anchor by the PARAMETRIC
+      // cell_h, and the union repeats twice with a parametric pitch.
+      comp('anchor', { layer: 'electrode', cx: 0, cy: 30, w: '6', h: '2', consumedBy: 'cb' }),
+      comp('bar', { layer: 'electrode', cx: 0, cy: 40, w: '6', h: '2', consumedBy: 'cb' }),
+      { id: 'cb', kind: 'boolean', op: 'union', operandIds: ['anchor', 'bar'], layer: 'electrode', cx: 0, cy: 35, w: '0', h: '0', cutouts: [], label: '',
+        transforms: [{ id: 'cbr', kind: 'repeat', enabled: true, n: '2', dx: 'cell_w', dy: '0', includeOriginal: true }] },
+    ];
+    return normalizeScene({
+      params: { ...paramsForStack(defaults.stack), L: { expr: String(L), unit: 'µm', desc: '' }, cell_h: { expr: '10', unit: 'µm', desc: '' }, cell_w: { expr: '20', unit: 'µm', desc: '' } },
+      components,
+      snaps: [{ id: 's', from: { compId: 'anchor', anchor: 'C' }, to: { compId: 'bar', anchor: 'C' }, dx: '0', dy: 'cell_h' }],
+      mirrors: [], groups: [], booleans: [],
+      stack: defaults.stack, stackName: defaults.stackName, simSetup: defaults.simSetup,
+    });
+  }
+
+  it('operands carry cxExpr/cyExpr that reference the cell params and evaluate to the baked center', () => {
+    const { scene } = buildTwoLineScene(paramCellScene(200), { lengthParam: 'L', l1: 200, l2: 600, freqStart: 1, freqStop: 40, freqPoints: 101 });
+    const pv = resolveParams(scene.params).values;
+    const bar = scene.components.find((c) => c.id === 'lineA_bar');
+    const barR1 = scene.components.find((c) => c.id === 'lineA_bar__r1');
+    expect(bar).toBeTruthy();
+    expect(barR1).toBeTruthy();
+    // The bar's cy is parametric in cell_h (it's snapped above the anchor by it).
+    expect(bar.cyExpr).toMatch(/lineA_cell_h/);
+    // cxExpr/cyExpr evaluate EXACTLY to the baked center at current params.
+    expect(evalExpr(bar.cxExpr, pv)).toBeCloseTo(bar.cx, 6);
+    expect(evalExpr(bar.cyExpr, pv)).toBeCloseTo(bar.cy, 6);
+    // Replica r1's x is offset by ONE parametric pitch (cell_w) from the base.
+    expect(barR1.cxExpr).toMatch(/lineA_cell_w/);
+    expect(evalExpr(barR1.cxExpr, pv) - evalExpr(bar.cxExpr, pv)).toBeCloseTo(pv.lineA_cell_w, 6);
+    // Sweep cell_h → the bar's exported cy MOVES (parametric), not just its size.
+    const pv2 = resolveParams({ ...scene.params, lineA_cell_h: { ...scene.params.lineA_cell_h, expr: '40' } }).values;
+    expect(evalExpr(bar.cyExpr, pv2)).not.toBeCloseTo(bar.cy, 1);
+    // And the HFSS create call for the bar (a 3-D electrode box) references
+    // cell_h in its Y position — i.e. the position is LIVE, not baked numeric.
+    const py = generateHfssNative(scene, pv, { twoLine: { portIndices: { a1: 1, a2: 2, b1: 3, b2: 4 } } });
+    const block = py.match(/safe_create_box\(\s*\["NAME:BoxParameters",[\s\S]*?"Name:=", "lineA_bar"/);
+    expect(block).toBeTruthy();
+    expect(block[0]).toMatch(/YPosition:=", "[^"]*lineA_cell_h/);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // The cell closure only captures params referenced by component EXPRESSIONS, so
 // stack thickness params (h_cond, h_wg, …) that nothing references would be

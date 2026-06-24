@@ -296,9 +296,30 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
       components, remapping cross-cluster refs (a punch clone's `cloneOf`
       pointing at the port) to the SAME replica index via a global registry;
       then `autoEnableFlankedPorts` enables a lumped port on every port-layer
-      rect the detector flanks. Geometry POSITIONS bake numeric (the method uses
-      two FIXED lengths — exact); line-size exprs stay live. Rotate transforms
-      are left intact + warned (rare on the port path). In-place `mirror` /
+      rect the detector flanks. **Flattened operand POSITIONS stay PARAMETRIC**:
+      `buildTwoLineScene` computes `pp = computeParametricPositions(solved, snaps,
+      pv)` (the SAME snap-DAG walker the HFSS export uses, imported from
+      `hfss-native.js` — a call-time-only import cycle) and passes it to
+      `flattenReplicas`, which sets each flattened PRIMITIVE's `cxExpr`/`cyExpr` =
+      its base operand's parametric snap-chain position + the SYMBOLIC replica
+      offset (`k·pitch`, from `translationOffsets`' new `dxExpr`/`dyExpr`). The
+      export reads these (the operand has no snap and its boolean has no incoming
+      snap → "free root" → `rootPosExpr` honors `cxExpr`/`cyExpr`), so the meander
+      cell geometry is FULLY parametric in HFSS — changing a cell dimension
+      repositions the bars (and the inter-cell pitch tracks cell_w+cell_s) instead
+      of just resizing them about baked centers (the "cells deform in HFSS" bug).
+      The numeric `cx`/`cy` stay baked (solver/port-detection fallback; the expr
+      evaluates to EXACTLY the baked value at the current params, so geometry is
+      unchanged there). The line LENGTH (cell COUNT) is still fixed (the method
+      uses two FIXED lengths). Booleans get no `cxExpr` (their AABB derives from
+      operands); the Q3D baker calls `flattenReplicas` WITHOUT `pp` (numeric, as
+      before). CAVEAT: a mirrored boolean's mirror PLANE is the union-boolean
+      centroid, which can't be expressed parametrically (needs min/max over
+      operands) → it's baked at the current centroid. Operands still reposition
+      parametrically (cells don't deform); only a param that shifts the cell's
+      cross-section centroid would shift the mirrored line under sweep (for a
+      symmetric meander, cell_h leaves the centroid invariant, so it's exact).
+      Rotate transforms are left intact + warned (rare on the port path). In-place `mirror` /
       `duplicate_mirror` transforms are PRESERVED on each materialized replica's
       root (only repeat/displace are baked into positions via `keepForExport`),
       so the exporter emits its (origin-sandwich) Mirror PER replica — reflecting
