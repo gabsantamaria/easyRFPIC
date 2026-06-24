@@ -442,6 +442,18 @@ describe('buildTwoLineScene — flattened replicas keep PARAMETRIC positions', (
     const block = py.match(/safe_create_box\(\s*\["NAME:BoxParameters",[\s\S]*?"Name:=", "lineA_bar"/);
     expect(block).toBeTruthy();
     expect(block[0]).toMatch(/YPosition:=", "[^"]*lineA_cell_h/);
+    // REGRESSION GUARD: a lumped PORT (and its replica) must stay BAKED — its
+    // sheet is created at the component position while the integration line is
+    // emitted as baked numeric endpoints; parametrizing the port desynced them
+    // ("Both endpoints of port lines must lie on the port") and cascaded into
+    // every S(i,j) output-variable failing. Only union cells go parametric.
+    const portR1 = scene.components.find((c) => c.id === 'lineA_p__r1');
+    expect(portR1).toBeTruthy();
+    expect(portR1.cxExpr).toBeUndefined();
+    expect(portR1.cyExpr).toBeUndefined();
+    // The exported port-position variable is a plain baked number, not a deep expr.
+    const pvar = py.match(/set_var\("lineA_p__r1_cx", "([^"]*)"/);
+    if (pvar) expect(pvar[1]).toMatch(/^\(?-?[\d.]+um\)?$/);
   });
 });
 

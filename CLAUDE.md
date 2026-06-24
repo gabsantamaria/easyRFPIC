@@ -300,20 +300,29 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
       `buildTwoLineScene` computes `pp = computeParametricPositions(solved, snaps,
       pv)` (the SAME snap-DAG walker the HFSS export uses, imported from
       `hfss-native.js` — a call-time-only import cycle) and passes it to
-      `flattenReplicas`, which sets each flattened PRIMITIVE's `cxExpr`/`cyExpr` =
-      its base operand's parametric snap-chain position + the SYMBOLIC replica
-      offset (`k·pitch`, from `translationOffsets`' new `dxExpr`/`dyExpr`). The
-      export reads these (the operand has no snap and its boolean has no incoming
-      snap → "free root" → `rootPosExpr` honors `cxExpr`/`cyExpr`), so the meander
-      cell geometry is FULLY parametric in HFSS — changing a cell dimension
+      `flattenReplicas`, which sets `cxExpr`/`cyExpr` ONLY on operands consumed by
+      a multi-operand UNION boolean (the meander CELLS — the geometry that
+      deforms) = the operand's parametric snap-chain position + the SYMBOLIC
+      replica offset (`k·pitch`, from `translationOffsets`' new `dxExpr`/`dyExpr`).
+      The export reads these (the operand has no snap and its boolean has no
+      incoming snap → "free root" → `rootPosExpr` honors `cxExpr`/`cyExpr`), so the
+      meander cell geometry is FULLY parametric in HFSS — changing a cell dimension
       repositions the bars (and the inter-cell pitch tracks cell_w+cell_s) instead
       of just resizing them about baked centers (the "cells deform in HFSS" bug).
       The numeric `cx`/`cy` stay baked (solver/port-detection fallback; the expr
       evaluates to EXACTLY the baked value at the current params, so geometry is
       unchanged there). The line LENGTH (cell COUNT) is still fixed (the method
-      uses two FIXED lengths). Booleans get no `cxExpr` (their AABB derives from
-      operands); the Q3D baker calls `flattenReplicas` WITHOUT `pp` (numeric, as
-      before). CAVEAT: a mirrored boolean's mirror PLANE is the union-boolean
+      uses two FIXED lengths). **SCOPE is union-cells ONLY — standalone components,
+      lumped PORTS, and punch/subtract operands (feeds, port holes) stay BAKED.**
+      A lumped port's sheet is created at the component position but its
+      integration line is emitted as BAKED numeric endpoints (it does NOT track
+      params), so parametrizing a port sheet DESYNCED them → HFSS rejected every
+      replica port ("Both endpoints of port lines must lie on the port") and
+      cascaded into every `S(i,j)` output variable failing (`'S' is not a function
+      name` — only 2 of 4 ports survived). Keeping the port + feed baked keeps the
+      sheet and integration line byte-consistent. Booleans get no `cxExpr` (their
+      AABB derives from operands); the Q3D baker calls `flattenReplicas` WITHOUT
+      `pp` (numeric, as before). CAVEAT: a mirrored boolean's mirror PLANE is the union-boolean
       centroid, which can't be expressed parametrically (needs min/max over
       operands) → it's baked at the current centroid. Operands still reposition
       parametrically (cells don't deform); only a param that shifts the cell's

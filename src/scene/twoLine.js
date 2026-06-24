@@ -298,10 +298,23 @@ export function flattenReplicas(components, pv, pp) {
           operandIds: Array.isArray(m.operandIds) ? m.operandIds.map((id) => remapRef(id, k)) : m.operandIds,
         };
         // Parametric position = base snap-chain expr + symbolic replica offset.
-        // Booleans derive their AABB from operands (the export ignores a
-        // boolean's cxExpr), and the rotate path stays un-materialized — skip both.
+        // SCOPE: ONLY operands consumed by a multi-operand UNION boolean (the
+        // meander cells — the geometry that deforms). Standalone components and
+        // punch/subtract operands stay BAKED, because:
+        //   - a lumped PORT's sheet is created at the component position but its
+        //     integration line is emitted as BAKED numeric endpoints (it does NOT
+        //     track params); parametrizing the port sheet desynced them →
+        //     "Both endpoints of port lines must lie on the port" + every
+        //     downstream S(i,j) output var failed.
+        //   - punch/subtract operands (feeds, port holes) feed the port geometry
+        //     the integration line references, so they must stay baked too.
+        // Booleans derive their AABB from operands (export ignores a boolean's
+        // cxExpr); the rotate path stays un-materialized. Skip all of those.
         const base = pp && pp[m.id];
-        if (base && m.kind !== 'boolean' && !hasRot && base.cxExpr && base.cyExpr) {
+        const consumer = m.consumedBy ? byId[m.consumedBy] : null;
+        const isUnionCell = consumer && consumer.kind === 'boolean' && consumer.op === 'union';
+        if (base && m.kind !== 'boolean' && !hasRot && isUnionCell
+            && m.layer !== 'port' && !m.lumpedPort && base.cxExpr && base.cyExpr) {
           comp.cxExpr = o.dxExpr === '0' ? base.cxExpr : `(${base.cxExpr}) + (${o.dxExpr})`;
           comp.cyExpr = o.dyExpr === '0' ? base.cyExpr : `(${base.cyExpr}) + (${o.dyExpr})`;
         }
