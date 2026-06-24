@@ -157,6 +157,16 @@ export function findLumpedPortOrder(solved, paramValues) {
 // registry, so the detector's clone/sameBbox match works at every replica.
 // Rotate transforms are left intact (a warning is emitted) — they're rare on
 // the port path and not needed for the 2-line method.
+//
+// In-place MIRROR / DUPLICATE_MIRROR transforms are NOT baked into positions
+// here — they're a geometry reflection the translation flattener can't express,
+// and baking them per shape would duplicate the exporter's mirror logic. Instead
+// they're PRESERVED on each materialized replica's root component so
+// generateHfssNative emits its (origin-sandwich) Mirror per replica — reflecting
+// the actual united geometry, correct for any operand shape. Dropping them was a
+// real bug: a meander line whose second copy is mirror-flipped exported
+// UN-mirrored in HFSS (no Mirror command at all). repeat/displace are removed
+// from the kept chain (they're already materialized into the replica positions).
 
 // Per-instance translation offsets for a repeat/displace transform chain
 // (mirrors expandTransforms' translation behaviour). Returns { offs, hasRot }.
@@ -180,6 +190,18 @@ function translationOffsets(transforms, pv) {
     }
   }
   return { offs, hasRot };
+}
+
+// Transforms a materialized replica still needs the EXPORTER to apply.
+// repeat/displace are baked into the replica positions by flattenReplicas, but
+// an in-place mirror / duplicate_mirror reflects geometry the flattener doesn't
+// bake — keep those so generateHfssNative emits the (origin-sandwich) Mirror per
+// replica. Anything else (repeat/displace) is dropped; the rotate path is
+// handled separately (it keeps the whole chain un-materialized).
+function keepForExport(transforms) {
+  return (transforms || []).filter(
+    (t) => t && t.enabled !== false && (t.kind === 'mirror' || t.kind === 'duplicate_mirror')
+  );
 }
 
 // A boolean's consumed operand subtree (the cluster that moves together).
@@ -228,7 +250,10 @@ export function flattenReplicas(components, pv) {
           id: newId(m.id, k),
           cx: (Number.isFinite(m.cx) ? m.cx : 0) + o.dx,
           cy: (Number.isFinite(m.cy) ? m.cy : 0) + o.dy,
-          transforms: hasRot ? m.transforms : [],
+          // Keep mirror/duplicate_mirror for the exporter; repeat/displace are
+          // already baked into the replica positions above. (hasRot path keeps
+          // the whole chain un-materialized — see translationOffsets.)
+          transforms: hasRot ? m.transforms : keepForExport(m.transforms),
           consumedBy: m.consumedBy ? remapRef(m.consumedBy, k) : m.consumedBy,
           cloneOf: m.cloneOf ? remapRef(m.cloneOf, k) : m.cloneOf,
           operandIds: Array.isArray(m.operandIds) ? m.operandIds.map((id) => remapRef(id, k)) : m.operandIds,

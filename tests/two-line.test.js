@@ -335,6 +335,58 @@ describe('buildTwoLineScene — auto-handles repeat-replica ports', () => {
     const py = generateHfssNative(scene, pv, { twoLine: { portIndices } });
     expect((py.match(/AssignLumpedPort/g) || []).length).toBe(4);
   });
+
+  // (3) a mirrored electrode boolean (the meander analog) alongside the ports.
+  // Bug: flattenReplicas materialized the repeat but DROPPED the in-place mirror,
+  // so the stamped line exported UN-mirrored in HFSS (no Mirror command at all).
+  function mirroredBoolScene(L = 200) {
+    const comp = (id, extra) => ({ id, kind: 'rect', cutouts: [], transforms: [], ...extra });
+    const rep = (id) => [{ id, kind: 'repeat', enabled: true, n: '1', dx: 'L', dy: '0', includeOriginal: true }];
+    const components = [
+      comp('p', { layer: 'port', cx: 0, cy: 0, w: '4', h: '4', transforms: rep('rp0') }),
+      comp('wE', { layer: 'electrode', cx: -7, cy: 0, w: '10', h: '4', transforms: rep('rp1') }),
+      comp('eE', { layer: 'electrode', cx: 7, cy: 0, w: '10', h: '4', transforms: rep('rp2') }),
+      // Vertically ASYMMETRIC union (top + bottom bar at different cy) so a
+      // y-mirror is geometrically observable; repeat THEN mirror, like a meander.
+      comp('mtop', { layer: 'electrode', cx: 0, cy: 22, w: '6', h: '2', consumedBy: 'mb' }),
+      comp('mbot', { layer: 'electrode', cx: 0, cy: 14, w: '6', h: '2', consumedBy: 'mb' }),
+      { id: 'mb', kind: 'boolean', op: 'union', operandIds: ['mtop', 'mbot'], layer: 'electrode',
+        cx: 0, cy: 18, w: '0', h: '0', cutouts: [], label: '', transforms: [
+          { id: 'mbrep', kind: 'repeat', enabled: true, n: '1', dx: 'L', dy: '0', includeOriginal: true },
+          { id: 'mbmir', kind: 'mirror', enabled: true, axis: 'y', pivot: 'C' },
+        ] },
+    ];
+    return normalizeScene({
+      params: { ...paramsForStack(defaults.stack), L: { expr: String(L), unit: 'µm', desc: 'length' } },
+      components, snaps: [], mirrors: [], groups: [], booleans: [],
+      stack: defaults.stack, stackName: defaults.stackName, simSetup: defaults.simSetup,
+    });
+  }
+
+  it('preserves an in-place mirror through replica flattening → HFSS emits Mirror (regression)', () => {
+    const { scene, portIndices } = buildTwoLineScene(mirroredBoolScene(200), {
+      lengthParam: 'L', l1: 200, l2: 600, freqStart: 1, freqStop: 40, freqPoints: 101,
+    });
+    // Every materialized replica of the mirrored boolean (base + __rN) keeps the
+    // mirror but NOT the repeat (which is baked into the replica positions).
+    const mbRoots = scene.components.filter((c) => c.kind === 'boolean' && c.id.startsWith('lineA_mb'));
+    expect(mbRoots.length).toBeGreaterThanOrEqual(2); // base + at least one replica
+    for (const r of mbRoots) {
+      const kinds = (r.transforms || []).map((t) => t.kind);
+      expect(kinds).toContain('mirror');
+      expect(kinds).not.toContain('repeat');
+    }
+    // The export emits a Mirror per replica, always about the trivial origin base
+    // (the parametric centroid lives in the surrounding Move calls).
+    const pv = resolveParams(scene.params).values;
+    const py = generateHfssNative(scene, pv, { twoLine: { portIndices } });
+    expect((py.match(/oEditor\.Mirror\(/g) || []).length).toBeGreaterThan(0);
+    const mBaseY = [...py.matchAll(/"MirrorBaseY:=",\s*"([^"]*)"/g)].map((x) => x[1]);
+    expect(mBaseY.length).toBeGreaterThan(0);
+    expect(mBaseY.every((v) => v === '0um')).toBe(true);
+    // And the 4-port contract still holds (the mirror is on the electrode, not a port).
+    expect((py.match(/AssignLumpedPort/g) || []).length).toBe(4);
+  });
 });
 
 // ---------------------------------------------------------------------------

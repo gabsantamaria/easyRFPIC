@@ -298,7 +298,13 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
       then `autoEnableFlankedPorts` enables a lumped port on every port-layer
       rect the detector flanks. Geometry POSITIONS bake numeric (the method uses
       two FIXED lengths — exact); line-size exprs stay live. Rotate transforms
-      are left intact + warned (rare on the port path). The shared
+      are left intact + warned (rare on the port path). In-place `mirror` /
+      `duplicate_mirror` transforms are PRESERVED on each materialized replica's
+      root (only repeat/displace are baked into positions via `keepForExport`),
+      so the exporter emits its (origin-sandwich) Mirror PER replica — reflecting
+      the actual united geometry, correct for any operand shape. Dropping them was
+      a real bug: a meander line whose copy is mirror-flipped exported UN-mirrored
+      in HFSS (no Mirror command at all in the modeler tree). The shared
       exporter/detector are UNTOUCHED. `buildTwoLineScene` returns `dLMeters`
       (Δl in metres) alongside `portIndices` for the exporter.
     - **Δl is the ACTUAL physical length difference**, NOT `L2 − L1` of the raw
