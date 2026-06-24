@@ -642,5 +642,38 @@ describe('generateQ3DCapacitance — meander C extraction script', () => {
     writeFileSync('tests/out/q3d_bool.py', q);
     execSync('python3 -c "import ast; ast.parse(open(\'tests/out/q3d_bool.py\').read())"');
   });
+
+  it('applies an in-place mirror to a BOOLEAN conductor footprint (Q3D C uses the flipped geometry)', () => {
+    // ASYMMETRIC cell: a WIDE bar on top (cy 20, w 10) + a NARROW bar on the
+    // bottom (cy 8, w 4); union centroid (0, 14). A y-mirror swaps them, so the
+    // wide bar moves to the BOTTOM. The Q3D footprint must reflect this — the
+    // mirror was previously dropped (only warned), giving a wrong C.
+    const rect = (id, extra) => ({ id, kind: 'rect', layer: 'electrode', cutouts: [], transforms: [], ...extra });
+    const mk = (withMirror) => normalizeScene({
+      params: paramsForStack(defaults.stack),
+      components: [
+        rect('a1', { cx: 0, cy: 20, w: '10', h: '2', consumedBy: 'condM' }),
+        rect('a2', { cx: 0, cy: 8, w: '4', h: '2', consumedBy: 'condM' }),
+        { id: 'condM', kind: 'boolean', op: 'union', operandIds: ['a1', 'a2'], layer: 'electrode', cx: 0, cy: 14, w: '0', h: '0', cutouts: [], label: '',
+          transforms: withMirror ? [{ id: 'm', kind: 'mirror', enabled: true, axis: 'y', pivot: 'C' }] : [] },
+        rect('g1', { cx: 60, cy: 14, w: '6', h: '26', consumedBy: 'condG' }),
+        { id: 'condG', kind: 'boolean', op: 'union', operandIds: ['g1'], layer: 'electrode', cx: 60, cy: 14, w: '0', h: '0', cutouts: [], label: '', transforms: [] },
+      ],
+      snaps: [], mirrors: [], groups: [], booleans: [],
+      stack: defaults.stack, stackName: defaults.stackName, simSetup: defaults.simSetup,
+    });
+    const plPts = (q) => [...q.matchAll(/"X:=", "(-?[\d.]+)um", "Y:=", "(-?[\d.]+)um"/g)].map((m) => [parseFloat(m[1]), parseFloat(m[2])]);
+    const sMir = mk(true), sNo = mk(false);
+    const opts = { conductorIds: ['condM', 'condG'], thicknessUm: 0.2, lengthUm: 80, designName: 'mtl' };
+    const qMir = generateQ3DCapacitance(sMir, resolveParams(sMir.params).values, opts);
+    const qNo = generateQ3DCapacitance(sNo, resolveParams(sNo.params).values, opts);
+    // The mirror is APPLIED now — no "NOT applied" warning for it.
+    expect(qMir).not.toMatch(/mirror[^\n]*NOT applied/i);
+    // A wide-bar corner (|x| = 5) near the BOTTOM (y ≈ 7–9) exists ONLY when the
+    // cell is mirrored; un-mirrored, the bottom bar is narrow (|x| = 2).
+    const wideBottom = (pts) => pts.some(([x, y]) => Math.abs(Math.abs(x) - 5) < 0.6 && y > 6 && y < 10);
+    expect(wideBottom(plPts(qMir))).toBe(true);
+    expect(wideBottom(plPts(qNo))).toBe(false);
+  });
 });
 

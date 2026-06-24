@@ -425,8 +425,12 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
   under ONE `net_<boolean_id>` (one physical conductor). Operands are grouped to
   their boolean by the replica-remapped `consumedBy` chain (`__r<k>` suffix
   stripped). Boolean geometry is numeric (parametric emission isn't feasible for a
-  multi-operand union); a `mirror`/`rotate` on the boolean is NOT materialized
-  (flattenReplicas drops it) → a `# WARNING` comment is emitted. The wizard's
+  multi-operand union). An in-place `mirror` on the boolean IS now applied to the
+  baked footprint: each operand ring is reflected about its REPLICA's own bbox
+  centroid (pivot C) — or the origin (pivot origin) — matching the per-replica
+  Mirror the HFSS exporter emits; reflecting ring POINTS is exact for any operand
+  shape. (`rotate`/`duplicate_mirror` are still NOT materialized → a `# WARNING`.)
+  The wizard's
   conductor picker therefore lists TOP-LEVEL electrode objects (`layer ===
   'electrode' && !consumedBy` — booleans INCLUDED, consumed operands hidden) so
   the user can pick the whole meander. Feeds/launches are EXCLUDED on purpose

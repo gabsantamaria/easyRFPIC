@@ -207,15 +207,47 @@ ${sweepFn}("${name}", "q3d_cond_thk")  # thin conductor: sweep up by thickness`;
       // thin-conductor sheet, all under ONE net (the boolean is one physical
       // conductor). Geometry is BAKED numeric (parametric emission isn't feasible
       // for a multi-operand boolean).
-      if ((c.transforms || []).some((t) => t.enabled !== false && (t.kind === 'mirror' || t.kind === 'rotate'))) {
-        condWarnings.push(`${c.id}: a mirror/rotate transform on the boolean was NOT applied to the Q3D geometry (repeat/displace ARE) — verify the conductor footprint before trusting C.`);
+      const tEnabled = (c.transforms || []).filter((t) => t && t.enabled !== false);
+      const mirrorT = tEnabled.find((t) => t.kind === 'mirror');
+      // Rotate / duplicate_mirror are still not materialized into the Q3D footprint.
+      if (tEnabled.some((t) => t.kind === 'rotate' || t.kind === 'duplicate_mirror')) {
+        condWarnings.push(`${c.id}: a rotate/duplicate_mirror transform on the boolean was NOT applied to the Q3D geometry (repeat/displace + in-place mirror ARE) — verify the conductor footprint before trusting C.`);
       }
       const mine = flat.filter((p) => p.kind !== 'boolean' && rootCompId(p) === c.id);
+      const replicaKey = (id) => (String(id).match(/__r(\d+)$/) || [, 'base'])[1];
+      // An in-place mirror reflects geometry the translation flattener doesn't bake
+      // (flattenReplicas keeps it on the root for the HFSS exporter; the Q3D path
+      // bakes operands numerically, so apply it to the rings here). pivot='C'
+      // reflects each REPLICA about its OWN bbox centroid (matching the per-replica
+      // Mirror the HFSS exporter emits); 'origin' reflects about 0. Reflecting ring
+      // POINTS is exact for any operand shape.
+      let reflectRing = null;
+      if (mirrorT) {
+        const axis = mirrorT.axis === 'y' ? 'y' : 'x';
+        if (mirrorT.pivot === 'origin') {
+          reflectRing = (ring) => ring.map(([x, y]) => (axis === 'y' ? [x, -y] : [-x, y]));
+        } else {
+          const bnds = {}; // replicaKey -> {lo, hi} along the mirror axis
+          for (const p of mine) {
+            const inst0 = expandTransforms([p], pv)[0];
+            if (!inst0 || !Number.isFinite(inst0.w) || inst0.w <= 0) continue;
+            const r0 = shapeInstanceToRing(inst0);
+            if (!r0 || r0.length < 3) continue;
+            const rk = replicaKey(p.id);
+            const b = (bnds[rk] ||= { lo: Infinity, hi: -Infinity });
+            for (const [x, y] of r0) { const v = axis === 'y' ? y : x; b.lo = Math.min(b.lo, v); b.hi = Math.max(b.hi, v); }
+          }
+          const ctr = {};
+          for (const rk of Object.keys(bnds)) ctr[rk] = (bnds[rk].lo + bnds[rk].hi) / 2;
+          reflectRing = (ring, rk) => { const c2 = ctr[rk] ?? 0; return ring.map(([x, y]) => (axis === 'y' ? [x, 2 * c2 - y] : [2 * c2 - x, y])); };
+        }
+      }
       mine.forEach((p, k) => {
         const inst = expandTransforms([p], pv)[0];
         if (!inst || !Number.isFinite(inst.w) || inst.w <= 0) return;
-        const ring = shapeInstanceToRing(inst);
+        let ring = shapeInstanceToRing(inst);
         if (!ring || ring.length < 3) return;
+        if (reflectRing) ring = reflectRing(ring, replicaKey(p.id));
         for (const [x, y] of ring) { bb.xMin = Math.min(bb.xMin, x); bb.xMax = Math.max(bb.xMax, x); bb.yMin = Math.min(bb.yMin, y); bb.yMax = Math.max(bb.yMax, y); }
         const w = Math.abs(inst.w), h = Math.abs(inst.h);
         if (Number.isFinite(w) && w > 0) lineLengthUm = Math.max(lineLengthUm, w, h);
