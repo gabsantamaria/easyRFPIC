@@ -124,7 +124,7 @@ function parametricOffsets(transforms, pv) {
 
 // Shared geometry/material body. boxFn/polyFn/sweepFn are Python helper names.
 // opts: { conductorIds, thicknessUm, lengthUm }.
-function buildQ3DBody(scene, paramValues, opts, boxFn, polyFn, sweepFn) {
+function buildQ3DBody(scene, paramValues, opts, boxFn, polyFn, sweepFn, uniteFn) {
   const src = normalizeScene(scene);
   const pv = paramValues || resolveParams(src.params || {}).values;
   const solved = solveLayout(src.components, src.snaps, pv);
@@ -172,6 +172,19 @@ function buildQ3DBody(scene, paramValues, opts, boxFn, polyFn, sweepFn) {
   const condNets = []; // {net, objects[]} grouped by COMPONENT — one physical
                        // conductor each (a repeat/meander → many sheets, ONE net)
   const condBlocks = [];
+  // Finish a physical conductor: Unite all its operand sheets into ONE solid (so
+  // Q3D meshes it as a single net body — no internal intersection faces from
+  // touching/overlapping sheets) and point the net at the single survivor (Unite
+  // keeps the first object's name). A one-sheet conductor needs no Unite.
+  const finalizeConductor = (cid, compObjs) => {
+    if (compObjs.length === 0) return;
+    if (compObjs.length >= 2) {
+      condBlocks.push(`${uniteFn}([${compObjs.map((o) => `"${o}"`).join(', ')}])`);
+      condNets.push({ net: `net_${cid}`, objects: [compObjs[0]] });
+    } else {
+      condNets.push({ net: `net_${cid}`, objects: compObjs });
+    }
+  };
   let bb = { xMin: Infinity, xMax: -Infinity, yMin: Infinity, yMax: -Infinity };
   let lineLengthUm = 0;
 
@@ -257,7 +270,7 @@ ${sweepFn}("${name}", "q3d_cond_thk")  # thin conductor: sweep up by thickness`;
         condBlocks.push(polySheet(name, ring.map(([x, y]) => [`${num(x)}um`, `${num(y)}um`])));
       });
       if (compObjs.length === 0) condWarnings.push(`${c.id}: no operand geometry resolved for the Q3D conductor.`);
-      if (compObjs.length) condNets.push({ net: `net_${cid}`, objects: compObjs });
+      finalizeConductor(cid, compObjs);
       continue;
     }
     const insts = expandTransforms([c], pv);
@@ -303,7 +316,7 @@ ${sweepFn}("${name}", "q3d_cond_thk")  # thin conductor: sweep up by thickness`;
         condBlocks.push(polySheet(name, ring.map(([x, y]) => [`${num(x)}um`, `${num(y)}um`])));
       });
     }
-    if (compObjs.length) condNets.push({ net: `net_${cid}`, objects: compObjs });
+    finalizeConductor(cid, compObjs);
   }
   if (!Number.isFinite(bb.xMin)) throw new Error('Selected conductors have no resolvable geometry.');
 
@@ -472,7 +485,7 @@ const Q3D_MSG_DEF = `def q3d_msg(sev, text):
     except:
         pass`;
 
-const Q3D_HELPERS = (boxFn, polyFn, sweepFn, delFn) => `def _existing_objs():
+const Q3D_HELPERS = (boxFn, polyFn, sweepFn, delFn, uniteFn) => `def _existing_objs():
     objs = set()
     for grp in ("Solids", "Sheets", "Unclassified"):
         try:
@@ -511,11 +524,28 @@ def ${sweepFn}(name, dz):
              "CheckFaceFaceIntersection:=", False,
              "SweepVectorX:=", "0um", "SweepVectorY:=", "0um", "SweepVectorZ:=", dz])
     except Exception as e:
-        q3d_msg(1, "Sweep " + name + " failed: " + str(e))`;
+        q3d_msg(1, "Sweep " + name + " failed: " + str(e))
+def ${uniteFn}(names):
+    # Unite a physical conductor's operand sheets into ONE solid so Q3D meshes it
+    # as a single net body. Overlapping/touching operand sheets otherwise leave
+    # internal intersection faces the user must Unite by hand before the matrix
+    # solves. Filter to EXISTING objects first (uniting a missing object raises a
+    # modal error IronPython try/except cannot catch); Unite keeps the FIRST
+    # selected object's name, which the net then references.
+    have = _existing_objs()
+    sel = [n for n in names if n in have]
+    if len(sel) < 2:
+        return
+    try:
+        oEditor.Unite(
+            ["NAME:Selections", "Selections:=", ",".join(sel)],
+            ["NAME:UniteParameters", "KeepOriginals:=", False])
+    except Exception as e:
+        q3d_msg(1, "Unite " + sel[0] + " failed: " + str(e))`;
 
 // Standalone Q3D capacitance script (own project + design).
 export function generateQ3DCapacitance(scene, paramValues, opts = {}) {
-  const body = buildQ3DBody(scene, paramValues, opts, 'safe_create_box', 'safe_create_polyline', 'safe_sweep_z');
+  const body = buildQ3DBody(scene, paramValues, opts, 'safe_create_box', 'safe_create_polyline', 'safe_sweep_z', 'safe_unite');
   const design = (opts.designName || 'q3d_cap').replace(/[^A-Za-z0-9_]/g, '_');
   const sweep = { startGHz: opts.freqStartGHz, stopGHz: opts.freqStopGHz, points: opts.freqPoints };
   const code = `# -*- coding: utf-8 -*-
@@ -551,7 +581,7 @@ def set_var(name, value):
                   "UserDef:=", True, "Value:=", value]]]])
         except Exception as e:
             q3d_msg(1, "set_var " + name + " failed: " + str(e))
-${Q3D_HELPERS('safe_create_box', 'safe_create_polyline', 'safe_sweep_z', '_del')}
+${Q3D_HELPERS('safe_create_box', 'safe_create_polyline', 'safe_sweep_z', '_del', 'safe_unite')}
 def define_material(name, eps_r, mu_r, sigma, tand):
     try:
         oProject.GetDefinitionManager().AddMaterial(
@@ -583,7 +613,7 @@ q3d_msg(0, "Parametric Q3D capacitance built + solved. C matrix exported to <pro
 
 // A Python block adding a parametric Q3D design to the EXISTING 2-line project.
 export function generateQ3DCombinedBlock(scene, paramValues, opts = {}) {
-  const body = buildQ3DBody(scene, paramValues, opts, 'q3d_box', 'q3d_poly', 'q3d_sweep');
+  const body = buildQ3DBody(scene, paramValues, opts, 'q3d_box', 'q3d_poly', 'q3d_sweep', 'q3d_unite');
   const design = (opts.designName || 'q3d_cap').replace(/[^A-Za-z0-9_]/g, '_');
   const hfss = (opts.hfssDesignName || 'Layout').replace(/[^A-Za-z0-9_]/g, '_');
   const cVar = (opts.cVarName || 'tl_C_F_per_m');
@@ -657,7 +687,7 @@ try:
 except Exception as e:
     q3d_msg(2, "Q3D design create failed: " + str(e))
 
-${Q3D_HELPERS('q3d_box', 'q3d_poly', 'q3d_sweep', '_q3d_del')}
+${Q3D_HELPERS('q3d_box', 'q3d_poly', 'q3d_sweep', '_q3d_del', 'q3d_unite')}
 
 # ===== Design variables (on the Q3D design) =====
 ${body.varDecls.join('\n')}

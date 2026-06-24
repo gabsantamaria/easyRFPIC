@@ -378,13 +378,21 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
   (`parametricOffsets`), stack Z from `computeLayerZ`'s `zBottomExpr`, plus
   `q3d_cond_thk` and `q3d_line_len_um` — so width/gap/thickness/dielectric sweep
   in Q3D and re-Analyze. Non-rect / rotated conductors fall back to baked numeric
-  geometry. **Nets are grouped by CONDUCTOR COMPONENT**, NOT per sheet: each
-  selected component gets ONE `AssignSignalNet` carrying ALL its sheets/repeat
-  instances (`["NAME:net_<cid>", "Objects:=", [<all its objects>]]` — the
-  pyAEDT-validated multi-object form). A meander that expands via `repeat` into
-  many sheets is therefore ONE net, so the C matrix is conductor-to-conductor and
-  the differential formula (which assumes exactly 2 nets) holds. (One-net-PER-SHEET
-  was a real bug — it made the matrix N×N and broke the formula.) Emits a
+  geometry. **Each physical conductor's operand sheets are UNITED into ONE solid**
+  (`<uniteFn>` helper → guarded `oEditor.Unite`, existence-filtered to dodge the
+  uncatchable modal-error trap, `KeepOriginals:=False` so the FIRST sheet's name
+  survives). Touching/overlapping operand sheets (a meander's rails+frames+bars, or
+  adjacent repeat cells) otherwise leave internal intersection faces that Q3D won't
+  mesh until the user Unites them by hand — so the script does it automatically. A
+  one-sheet conductor skips the Unite. **Nets are grouped by CONDUCTOR COMPONENT**,
+  NOT per sheet: each selected component gets ONE `AssignSignalNet` referencing the
+  single united survivor (`["NAME:net_<cid>", "Objects:=", ["<cid>_b0"]]` — the
+  Unite ran first, so the other sheet names are consumed; the per-conductor
+  `finalizeConductor` emits the Unite then points the net at `<cid>_b0`). A meander
+  that expands via `repeat` into many sheets is therefore ONE solid + ONE net, so
+  the C matrix is conductor-to-conductor and the differential formula (which assumes
+  exactly 2 nets) holds. (One-net-PER-SHEET was a real bug — it made the matrix N×N
+  and broke the formula.) Emits a
   capacitance setup (with wizard CG convergence controls — `PerError` %,
   `MinPass`, `MaxPass`, defaults 0.01/15/20) + a **frequency sweep**
   (`InsertSweep`, same band as the 2-line wizard). The C result comes out TWO

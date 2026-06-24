@@ -633,10 +633,15 @@ describe('generateQ3DCapacitance — meander C extraction script', () => {
     });
     const pv = resolveParams(scene.params).values;
     const q = generateQ3DCapacitance(scene, pv, { conductorIds: ['condA', 'condB'], thicknessUm: 0.2, lengthUm: 80, designName: 'mtl' });
-    // condA = 2 operands × 3 repeats = 6 sheets, all in ONE net; condB = 2 sheets.
-    expect(q).toMatch(/q3d_signal_net\("net_condA", \[[^\]]*"condA_b0"[^\]]*"condA_b5"[^\]]*\]\)/);
-    expect(q).toContain('q3d_signal_net("net_condB"');
-    expect((q.match(/condA_b\d+/g) || []).filter((s, i, a) => a.indexOf(s) === i).length).toBe(6);
+    // condA = 2 operands × 3 repeats = 6 sheets — UNITED into ONE solid so Q3D
+    // meshes it as a single net body (no internal intersection faces), then the
+    // net references just the survivor (Unite keeps the first object's name).
+    expect(q).toMatch(/safe_unite\(\["condA_b0"(?:, "condA_b\d+"){5}\]\)/); // all 6 united
+    expect(q).toMatch(/q3d_signal_net\("net_condA", \["condA_b0"\]\)/);     // net → survivor only
+    expect(q).toMatch(/safe_unite\(\["condB_b0", "condB_b1"\]\)/);          // condB's 2 sheets united
+    expect(q).toMatch(/q3d_signal_net\("net_condB", \["condB_b0"\]\)/);
+    expect((q.match(/condA_b\d+/g) || []).filter((s, i, a) => a.indexOf(s) === i).length).toBe(6); // all 6 still created
+    expect(q).toContain('def safe_unite(');
     expect(q).toContain('((C11+C22)/2 - C12)/2'); // 2 nets → differential C
     mkdirSync('tests/out', { recursive: true });
     writeFileSync('tests/out/q3d_bool.py', q);
