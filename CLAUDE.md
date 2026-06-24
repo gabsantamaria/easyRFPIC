@@ -482,14 +482,23 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
   (→ `cFperM`, enables the Z₀ output vars) + a conductor checkbox picker, a
   "Bundle Q3D into the main script" checkbox, and a "Separate Q3D script" button
   (`onGenerateQ3D(conductorIds)` → `handleExportQ3DCap` → `generateQ3DCapacitance`
-  → `<base>_q3d_cap.py`). Wired in `PhotonicLayout.jsx`:
-  `handleExportTwoLine(builtScene, portIndices, dLMeters, cFperM, q3dConductorIds)`
+  → `<base>_q3d_cap.py`). A **"Sheet impedance (conductor thickness = 0)"** block
+  appears ONLY when the stack's conductor layer resolves to zero thickness
+  (`condIsSheet = !(condThkResolved > 0)`): two fields `Rs` (`sheetRs`) + `Xs`
+  (`sheetXs`) for the zero-thickness sheet surface impedance (Ω/sq). They're passed
+  VERBATIM into `generateHfssNative`'s `options.sheetImpedance` →
+  `AssignImpedance` Resistance/Reactance on the `PEC_sheets` boundary, so they may
+  be HFSS expressions using the intrinsic `Freq` (Hz) + `pi` — e.g. a kinetic
+  inductance `Lk = 10 pH/sq` is `Xs = 2*pi*Freq*10e-12`. Blank → the near-PEC
+  default (R=0.001, X=0). Wired in `PhotonicLayout.jsx`:
+  `handleExportTwoLine(builtScene, portIndices, dLMeters, cFperM, bundle, sheetImpedance)`
   — when bundle is on it passes `q3d: { scene: normalizeScene(scene),
   conductorIds }` (the CANVAS single-line scene) so one script holds both
-  designs. Generates from the BUILT scene (not the canvas scene) →
+  designs, and threads `sheetImpedance` into the top-level export options. Generates from the BUILT scene (not the canvas scene) →
   preview/download as `<base>_2line_hfss.py`. **All last-used field values
   persist** (lengthParam, L1/L2, separation, freq band, C, Q3D thickness/length,
-  the conductor selection, the bundle toggle, and the CG convergence controls) —
+  the conductor selection, the bundle toggle, the CG convergence controls, and the
+  zero-thickness sheet impedance `sheetRs`/`sheetXs`) —
   saved on every field CHANGE via a useEffect (NOT only on Generate), so values
   survive closing without generating or while the build is invalid (Generate
   disabled). Persistence is LAYERED (`src/ui/twoLineSettings.js`, key
@@ -570,6 +579,14 @@ Transform chain emission uses the same logic as pyAEDT (separate helper `emitTra
 `options.twoLine = { portIndices }` appends the 2-line-method εeff/α
 output-variable + report block before `oProject.Save()` (see "2-line method
 wizard"). Absent the option, output is byte-identical to before.
+
+`options.sheetImpedance = { resistance, reactance }` overrides the zero-thickness
+conductor sheet boundary (`PEC_sheets` `AssignImpedance`): the two strings are
+emitted VERBATIM into the Resistance/Reactance fields (Ω/sq), so they may be HFSS
+expressions using the intrinsic `Freq` (Hz) + `pi` + any design variable — e.g.
+a kinetic inductance `Lk` pH/sq is `Xs = 2*pi*Freq*Lk*1e-12`. Empty/absent →
+near-PEC default (`R=0.001, X=0`). Double-quotes in the expr are sanitized to `'`
+so they can't break the emitted Python literal.
 
 **Per-layer Z (`layerZ` walk, mirrored numerically in pyAEDT's `numericLayerZ`)**: the stack is grouped by `coplanarGroup` id (NOT device role). Adjacent layers sharing a group id are coplanar — they share `zBottom`; the cursor advances past a group by its **cladding top** (`advanceLayerOf` = thickest cladding member, else thickest member for a malformed group with no cladding), so a layer ABOVE a coplanar group (e.g. a conductor in a different/no group) starts at the group's cladding top, not its `zBottom`. Layers with no `coplanarGroup` stack sequentially. Both walks `migrateStackCoplanarGroups` the stack first (defensive — matches in-app normalization), and pin Z=0 at the first device-role or grouped layer (substrates below go negative). The advance is the cladding's own `thicknessExpr`, so single-cladding groups (the norm) are parametrically exact under sweeps.
 

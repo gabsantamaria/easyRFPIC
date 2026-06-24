@@ -5013,7 +5013,7 @@ export default function App() {
   // at L1 and L2, 4 lumped ports) + the verified S-index map. Generate the
   // native HFSS script directly from that scene with the εeff/α output-variable
   // block enabled — NOT from the current canvas scene.
-  const handleExportTwoLine = async (builtScene, portIndices, dLMeters, cFperM, bundle) => {
+  const handleExportTwoLine = async (builtScene, portIndices, dLMeters, cFperM, bundle, sheetImpedance) => {
     let content;
     try {
       const normalized = normalizeScene(builtScene);
@@ -5022,7 +5022,11 @@ export default function App() {
       const q3d = (bundle && Array.isArray(bundle.conductorIds) && bundle.conductorIds.length)
         ? { scene: normalizeScene(scene), ...bundle }
         : undefined;
-      content = generateHfssNative(normalized, pv, { twoLine: { portIndices, dLMeters, cFperM, q3d } });
+      // Zero-thickness conductor sheets get a custom surface impedance (Rs+jXs,
+      // HFSS expressions that may use Freq) when the wizard supplies one.
+      const si = (sheetImpedance && (String(sheetImpedance.resistance ?? '').trim() || String(sheetImpedance.reactance ?? '').trim()))
+        ? sheetImpedance : undefined;
+      content = generateHfssNative(normalized, pv, { twoLine: { portIndices, dLMeters, cFperM, q3d }, sheetImpedance: si });
     } catch (e) {
       console.error('Two-line generator error:', e);
       await alertDialog('Error generating 2-line script: ' + e.message, 'Export error');

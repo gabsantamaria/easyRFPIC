@@ -4091,22 +4091,44 @@ except Exception as e:
   // accurate sheet resistance is wanted.
   if (zeroThicknessSheets.length > 0) {
     const objList = zeroThicknessSheets.map(n => `"${n}"`).join(', ');
-    code += `
-# ===== Zero-thickness conductor sheets: impedance boundary =====
-# All conductor sheets (from layers with thickness=0) get a near-PEC
+    // Surface impedance Rs + j*Xs (Ohm/sq). Default = near-PEC (R=0.001, X=0).
+    // A caller (e.g. the 2-line wizard, for a zero-thickness superconductor)
+    // may override BOTH with arbitrary HFSS expressions — these are passed
+    // VERBATIM into AssignImpedance's Resistance/Reactance fields, so they can
+    // reference HFSS's intrinsic `Freq` (Hz) and `pi` plus any design variable.
+    // E.g. a kinetic inductance Lk = 10 pH/sq is Xs = "2*pi*Freq*10e-12".
+    const si = (options && options.sheetImpedance) || null;
+    const clean = (v, fallback) => {
+      const s = String(v ?? '').trim();
+      return s ? s.replace(/"/g, "'") : fallback;
+    };
+    const rsExpr = si ? clean(si.resistance, '0.001') : '0.001';
+    const xsExpr = si ? clean(si.reactance, '0') : '0';
+    const isCustom = rsExpr !== '0.001' || xsExpr !== '0';
+    const note = isCustom
+      ? `# All conductor sheets (from layers with thickness=0) get a surface
+# impedance Rs + j*Xs (Ohm/sq) from the wizard:
+#   Rs = ${rsExpr}
+#   Xs = ${xsExpr}
+# These are HFSS expressions (may use the intrinsic Freq in Hz, pi, and any
+# design variable) — e.g. a kinetic inductance Lk pH/sq is Xs = 2*pi*Freq*Lk*1e-12.`
+      : `# All conductor sheets (from layers with thickness=0) get a near-PEC
 # surface impedance: 0.001 Ohm/sq (R) + j 0 Ohm/sq (X). Exact
 # R=X=0 is rejected as singular by some HFSS releases, but 1 mOhm/sq
 # is numerically perfect-conductor-equivalent for any practical RF or
 # photonic-RF design. Edit the boundary in HFSS if you need a true
-# physical sheet resistance.
+# physical sheet resistance.`;
+    code += `
+# ===== Zero-thickness conductor sheets: impedance boundary =====
+${note}
 try:
     oBoundarySetup_imp = oDesign.GetModule("BoundarySetup")
     _delete_boundary_if_exists("PEC_sheets")
     oBoundarySetup_imp.AssignImpedance(
         ["NAME:PEC_sheets",
          "Objects:=", [${objList}],
-         "Resistance:=", "0.001",
-         "Reactance:=", "0",
+         "Resistance:=", "${rsExpr}",
+         "Reactance:=", "${xsExpr}",
          "InfGroundPlane:=", False])
 except Exception as e:
     try:

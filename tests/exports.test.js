@@ -563,6 +563,34 @@ describe('generateHfssNative', () => {
     }
   });
 
+  it('options.sheetImpedance overrides the zero-thickness sheet boundary (Rs+jXs, may use Freq)', () => {
+    // A superconductor trace (h_cond = 0) gets a custom surface impedance.
+    // The Reactance can be a frequency-dependent HFSS expression — e.g. a
+    // kinetic inductance Lk = 10 pH/sq is Xs = 2*pi*Freq*10e-12. The
+    // expressions pass through VERBATIM into AssignImpedance.
+    const zeroScene = {
+      ...scene,
+      params: { ...scene.params, h_cond: { ...(scene.params.h_cond || {}), expr: '0' } },
+    };
+    const { values: pv } = resolveParams(zeroScene.params);
+    const out = generateHfssNative(zeroScene, pv, {
+      sheetImpedance: { resistance: '0', reactance: '2*pi*Freq*10e-12' },
+    });
+    expect(out).toContain('AssignImpedance');
+    expect(out).toMatch(/"Resistance:=", "0"/);
+    expect(out).toMatch(/"Reactance:=", "2\*pi\*Freq\*10e-12"/);
+    // The near-PEC default must NOT appear when a custom value is given.
+    expect(out).not.toMatch(/"Resistance:=", "0\.001"/);
+    // A double-quote in an expression can't break the emitted Python string.
+    const out2 = generateHfssNative(zeroScene, pv, { sheetImpedance: { resistance: 'a"b', reactance: '' } });
+    expect(out2).toMatch(/"Resistance:=", "a'b"/); // quote sanitized to keep the literal valid
+    expect(out2).toMatch(/"Reactance:=", "0"/);     // blank Xs → default 0
+    // No sheetImpedance → unchanged near-PEC default.
+    const out3 = generateHfssNative(zeroScene, pv);
+    expect(out3).toMatch(/"Resistance:=", "0\.001"/);
+    expect(out3).toMatch(/"Reactance:=", "0"/);
+  });
+
   it('Subtract on a NESTED boolean (union with repeat) lists every clone as Blank Parts', () => {
     // Nested case: U = union(A, B) carries its own repeat n=2 transform
     // (so U expands to 3 HFSS parts: U, U_1, U_2 after DuplicateAlongLine).

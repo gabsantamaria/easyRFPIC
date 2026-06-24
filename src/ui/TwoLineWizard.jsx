@@ -96,6 +96,15 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
   const [q3dCg, setQ3dCg] = useState(() => (prefs && prefs.q3dCg ? prefs.q3dCg : '0.01'));      // CG % error (ΔC per pass)
   const [q3dMinP, setQ3dMinP] = useState(() => (prefs && prefs.q3dMinP ? prefs.q3dMinP : '15')); // min passes
   const [q3dMaxP, setQ3dMaxP] = useState(() => (prefs && prefs.q3dMaxP ? prefs.q3dMaxP : '20')); // max passes
+  // Zero-thickness conductor (h_cond = 0): the HFSS export models each conductor
+  // as a 2-D sheet with a surface-impedance boundary (default near-PEC). For a
+  // superconductor, the user supplies Rs + j·Xs (Ω/sq) as HFSS expressions that
+  // may use the intrinsic Freq (Hz) — e.g. a kinetic inductance Lk pH/sq is
+  // Xs = 2*pi*Freq*Lk*1e-12. Only meaningful (and shown) when the conductor layer
+  // resolves to zero thickness.
+  const condIsSheet = !(condThkResolved > 0);
+  const [sheetRs, setSheetRs] = useState(() => (prefs && prefs.sheetRs ? prefs.sheetRs : ''));
+  const [sheetXs, setSheetXs] = useState(() => (prefs && prefs.sheetXs ? prefs.sheetXs : ''));
   const thkNum = q3dThk.trim() === '' ? null : Number(q3dThk);
   const thkValid = thkNum != null && Number.isFinite(thkNum) && thkNum > 0;
   // Evaluate the actual-length EXPRESSION to a number (for the dielectric
@@ -188,15 +197,21 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
     saveTwoLinePrefs({
       lengthParam, l1, l2, separation, freqStart, freqStop, freqPoints, cFperM,
       q3dThk, q3dLen, bundleQ3D, q3dIds: [...q3dPick], q3dCg, q3dMinP, q3dMaxP,
+      sheetRs, sheetXs,
     });
-  }, [lengthParam, l1, l2, separation, freqStart, freqStop, freqPoints, cFperM, q3dThk, q3dLen, bundleQ3D, q3dPick, q3dCg, q3dMinP, q3dMaxP]);
+  }, [lengthParam, l1, l2, separation, freqStart, freqStop, freqPoints, cFperM, q3dThk, q3dLen, bundleQ3D, q3dPick, q3dCg, q3dMinP, q3dMaxP, sheetRs, sheetXs]);
 
   const generate = () => {
     if (!build.ok) return;
     const bundle = (bundleQ3D && q3dPick.size > 0 && thkValid)
       ? { conductorIds: [...q3dPick], ...q3dOpts() }
       : undefined;
-    onGenerate(build.ok.scene, build.ok.portIndices, build.ok.dLMeters, cValid ? cNum : undefined, bundle);
+    // Custom zero-thickness sheet impedance only when the conductor is a sheet
+    // and the user typed something (else the export keeps its near-PEC default).
+    const sheetImpedance = (condIsSheet && (sheetRs.trim() || sheetXs.trim()))
+      ? { resistance: sheetRs.trim(), reactance: sheetXs.trim() }
+      : undefined;
+    onGenerate(build.ok.scene, build.ok.portIndices, build.ok.dLMeters, cValid ? cNum : undefined, bundle, sheetImpedance);
     onClose();
   };
   const generateQ3D = () => onGenerateQ3D([...q3dPick], q3dOpts());
@@ -290,6 +305,30 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
               <input className={fieldCls} value={freqPoints} onChange={(e) => setFreqPoints(e.target.value)} />
             </div>
           </div>
+
+          {/* Zero-thickness conductor: surface impedance (shown only when h_cond = 0) */}
+          {condIsSheet && (
+            <div className="rounded border border-slate-800 px-3 py-2 space-y-2" style={{ background: 'rgba(30,41,59,0.5)' }}>
+              <p className="text-[10px] uppercase tracking-wider text-slate-500">Sheet impedance (conductor thickness = 0)</p>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                The conductor layer resolves to <span className="font-mono">0</span> thickness, so each trace is a 2-D sheet with a
+                surface-impedance boundary <span className="font-mono">Rs + j·Xs</span> (Ω/sq). Blank → near-PEC
+                (<span className="font-mono">Rs = 0.001, Xs = 0</span>). Entries are HFSS expressions and may use the intrinsic
+                <span className="font-mono"> Freq</span> (Hz) and <span className="font-mono">pi</span> — e.g. a kinetic inductance
+                <span className="font-mono"> Lk = 10 pH/sq</span> is <span className="font-mono">Xs = 2*pi*Freq*10e-12</span>.
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label className={labelCls}>Rs — real (Ω/sq)</label>
+                  <input className={`${fieldCls} font-mono`} value={sheetRs} placeholder="0.001" onChange={(e) => setSheetRs(e.target.value)} />
+                </div>
+                <div className="space-y-1">
+                  <label className={labelCls}>Xs — imag (Ω/sq)</label>
+                  <input className={`${fieldCls} font-mono`} value={sheetXs} placeholder="0  (e.g. 2*pi*Freq*10e-12)" onChange={(e) => setSheetXs(e.target.value)} />
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Characteristic impedance Z0 (optional) */}
           <div className="rounded border border-slate-800 px-3 py-2 space-y-2" style={{ background: 'rgba(30,41,59,0.5)' }}>

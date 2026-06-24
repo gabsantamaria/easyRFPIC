@@ -53,6 +53,9 @@ function normalize(p) {
     q3dCg: str(p.q3dCg),
     q3dMinP: str(p.q3dMinP),
     q3dMaxP: str(p.q3dMaxP),
+    // Zero-thickness conductor sheet surface impedance (HFSS exprs, may use Freq).
+    sheetRs: str(p.sheetRs),
+    sheetXs: str(p.sheetXs),
   };
 }
 

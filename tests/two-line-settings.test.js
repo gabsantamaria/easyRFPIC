@@ -50,6 +50,7 @@ const SAMPLE = {
   freqStart: '0.1', freqStop: '50', freqPoints: '500', cFperM: '',
   q3dThk: '0.8', q3dLen: '', bundleQ3D: true, q3dIds: ['cond1', 'cond2'],
   q3dCg: '0.01', q3dMinP: '15', q3dMaxP: '20',
+  sheetRs: '0', sheetXs: '2*pi*Freq*10e-12',
 };
 
 describe('save → load round-trip', () => {
