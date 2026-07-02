@@ -102,6 +102,13 @@ import { generateTemplateModuleSource } from './templates/_codify.js';
 
 // ── Pure helpers (module scope, exported for tests) ─────────────────────
 
+// Cross-tab save notifications. One channel per page; posting never delivers
+// to the posting tab itself. Guarded — BroadcastChannel is missing in some
+// test/SSR environments.
+const saveBroadcastChannel = (typeof BroadcastChannel !== 'undefined')
+  ? new BroadcastChannel('photonic_layout')
+  : null;
+
 // C4: expand a selection to the full boolean-cluster move set, matching
 // drag semantics (CLAUDE.md "Cluster drag"): a selected primitive that's
 // consumed by a boolean moves its WHOLE cluster (walk consumedBy up to
@@ -504,6 +511,49 @@ export default function App() {
     })();
     return () => { cancelled = true; };
   }, [workspace]);
+
+  // ----- Multi-tab writer election (Web Locks) -----
+  // Design payloads are whole-blob writes: two tabs on the same workspace
+  // were last-writer-wins — a stale tab's 2s autosave silently erased the
+  // other tab's snapshots. One tab per workspace now holds a session-long
+  // Web Lock and is the WRITER; any other tab goes read-only (banner shown,
+  // autosave / manual saves / flushes disabled) and automatically takes over
+  // the moment the writer tab closes. Browsers without navigator.locks keep
+  // the old behavior — the versions[] read-merge in saveDesign is the
+  // belt-and-braces there.
+  const [tabRole, setTabRole] = useState('writer');
+  const tabRoleRef = useRef('writer');
+  tabRoleRef.current = tabRole;
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !navigator.locks || !navigator.locks.request) {
+      setTabRole('writer');
+      return;
+    }
+    const controller = new AbortController();
+    let releaseHeld = null;
+    const lockName = `photonic_layout_ws_lock:${workspace || ''}`;
+    const holdForSession = () => new Promise((resolve) => { releaseHeld = resolve; });
+    navigator.locks.request(lockName, { ifAvailable: true, signal: controller.signal }, (lock) => {
+      if (!lock) {
+        // Another tab is the writer. Go read-only and QUEUE for the lock —
+        // when that tab closes (or switches workspace) we take over live.
+        setTabRole('readonly');
+        navigator.locks.request(lockName, { signal: controller.signal }, () => {
+          setTabRole('writer');
+          return holdForSession();
+        }).catch(() => { /* aborted on cleanup */ });
+        return; // resolves the ifAvailable request without holding
+      }
+      setTabRole('writer');
+      return holdForSession();
+    }).catch(() => { /* aborted on cleanup */ });
+    return () => {
+      controller.abort();
+      if (releaseHeld) releaseHeld();
+      setTabRole('writer'); // optimistic until the next election settles
+    };
+  }, [workspace]);
+
   // Stack library state: names of stacks saved in this workspace.
   const [stackList, setStackList] = useState([]);
   const refreshStackList = useCallback(async () => {
@@ -632,6 +682,22 @@ export default function App() {
     const list = await listSavedDesigns(workspace);
     setSavedList(list.sort());
   }, [workspace]);
+
+  // Cross-tab refresh: when ANOTHER tab persists something in this workspace
+  // (BroadcastChannel ping from its post-persist choke point), drop the cached
+  // lists so this tab doesn't render stale designs/snapshots. (Declared here,
+  // AFTER refreshSavedList — a const in this dep array above it would TDZ.)
+  useEffect(() => {
+    if (!saveBroadcastChannel) return;
+    const onMsg = (e) => {
+      const d = e && e.data;
+      if (!d || d.type !== 'saved' || (d.workspace || '') !== (workspace || '')) return;
+      refreshSavedList();
+      setVersionsByDesign({});
+    };
+    saveBroadcastChannel.addEventListener('message', onMsg);
+    return () => saveBroadcastChannel.removeEventListener('message', onMsg);
+  }, [workspace, refreshSavedList]);
 
   // On every workspace change (including the initial load): repopulate saved list,
   // load the active design for that workspace.
@@ -858,6 +924,11 @@ export default function App() {
   // Mirror the entire workspace to its linked file (if any). Called after
   // every successful save. Runs silently — failures don't block the save UI.
   const mirrorWorkspaceToFileIfLinked = useCallback(async () => {
+    // This is the post-persist choke point — every successful save/autosave/
+    // snapshot/flush call lands here. Ping other tabs on the same workspace
+    // so their SAVED DESIGNS list / version caches refresh instead of holding
+    // stale state (BroadcastChannel does NOT deliver to the posting tab).
+    try { saveBroadcastChannel?.postMessage({ type: 'saved', workspace: workspace || '' }); } catch { /* best-effort */ }
     if (!workspaceHandle) return;
     try {
       const bundle = await exportWorkspace(workspace);
@@ -878,7 +949,18 @@ export default function App() {
   // as-is (Save doesn't touch the version history — only Snapshot
   // does). Legacy payloads without a versions field stay that way
   // until the user takes a first snapshot.
+  // Shared read-only gate for the manual persist actions.
+  const blockIfReadOnly = useCallback(async () => {
+    if (tabRoleRef.current !== 'readonly') return false;
+    await alertDialog(
+      'This tab is read-only: the same workspace is open in another tab, and saving from both would overwrite each other\'s work.\n\nClose the other tab (this one takes over automatically) or save from there.',
+      'Read-only tab',
+    );
+    return true;
+  }, [alertDialog]);
+
   const handleSave = useCallback(async () => {
+    if (await blockIfReadOnly()) return;
     // A name that lists nowhere (leading '_' / contains ':') would save fine
     // and then be invisible in SAVED DESIGNS — an invisible-loss trap.
     const nameCheck = validateDesignName(designName);
@@ -895,7 +977,7 @@ export default function App() {
       console.error('Design save failed:', res);
       await alertDialog(describeSaveFailure(res), 'Save failed');
     }
-  }, [workspace, designName, scene, history, future, versions, currentVersionId, refreshSavedList, alertDialog, mirrorWorkspaceToFileIfLinked]);
+  }, [workspace, designName, scene, history, future, versions, currentVersionId, refreshSavedList, alertDialog, mirrorWorkspaceToFileIfLinked, blockIfReadOnly]);
 
   // Snapshot the current scene into the design's version history. The
   // user is prompted for a short description (commit message). Each
@@ -904,6 +986,7 @@ export default function App() {
   // current scene. The design's working state and updatedAt are
   // also saved atomically.
   const handleSnapshot = useCallback(async () => {
+    if (await blockIfReadOnly()) return;
     const description = await promptDialog(
       'Snapshot description (optional):',
       '',
@@ -931,9 +1014,10 @@ export default function App() {
       console.error('Snapshot save failed:', res);
       await alertDialog(describeSaveFailure(res), 'Snapshot failed');
     }
-  }, [workspace, designName, scene, history, future, versions, promptDialog, refreshSavedList, alertDialog, mirrorWorkspaceToFileIfLinked]);
+  }, [workspace, designName, scene, history, future, versions, promptDialog, refreshSavedList, alertDialog, mirrorWorkspaceToFileIfLinked, blockIfReadOnly]);
 
   const handleSaveAs = useCallback(async () => {
+    if (await blockIfReadOnly()) return;
     const name = await promptDialog('Save as new design name:', designName + ' copy', 'Save As');
     if (!name || !name.trim()) return;
     const nameCheck = validateDesignName(name);
@@ -959,7 +1043,7 @@ export default function App() {
       console.error('Save As failed:', res);
       await alertDialog(describeSaveFailure(res), 'Save As failed');
     }
-  }, [workspace, designName, scene, history, future, versions, currentVersionId, savedList, refreshSavedList, promptDialog, confirmDialog, alertDialog, mirrorWorkspaceToFileIfLinked]);
+  }, [workspace, designName, scene, history, future, versions, currentVersionId, savedList, refreshSavedList, promptDialog, confirmDialog, alertDialog, mirrorWorkspaceToFileIfLinked, blockIfReadOnly]);
 
 
   // Latest-value ref for flushCurrentBeforeSwitch — it's declared BELOW these
@@ -1074,6 +1158,14 @@ export default function App() {
   // We probe storage DIRECTLY (loadDesign) rather than the savedList cache.
   const flushCurrentBeforeSwitch = useCallback(async (targetLabel) => {
     if (!isDirtyRef.current) return true;
+    // Read-only tab: writing would stomp the writer tab. Be honest — the
+    // only options are keep working here or discard.
+    if (tabRoleRef.current === 'readonly') {
+      return await confirmDialog(
+        `This tab is read-only (the workspace is open in another tab), so your changes here can't be saved.\n\nDiscard them and load ${targetLabel}?`,
+        'Read-only tab', { confirmLabel: 'Discard & load', confirmTone: 'danger' },
+      );
+    }
     const name = (designNameRef.current || '').trim();
     const payload = {
       scene: sceneRef.current, history: historyRef.current, future: futureRef.current,
@@ -1229,7 +1321,9 @@ export default function App() {
       ? resolveCurrentVersionId(null, nextVersions)
       : d.currentVersionId;
     {
-      const r = await saveDesign(workspace, name, { ...d, versions: nextVersions, currentVersionId: nextCurrent });
+      // mergeVersions:false — the default versions-union in saveDesign would
+      // read the stored payload and RESURRECT the version we're deleting.
+      const r = await saveDesign(workspace, name, { ...d, versions: nextVersions, currentVersionId: nextCurrent }, { mergeVersions: false });
       if (!r.ok) console.error('Delete-version save failed:', describeSaveFailure(r), r);
     }
     if (name === designName) {
@@ -1654,6 +1748,10 @@ export default function App() {
     // for any dirty-but-not-persisted window.
     if (saveStatus !== 'unsaved') return;
     if (!designName) return;
+    // Read-only tab (workspace open elsewhere): autosaving here would stomp
+    // the writer tab's state — the exact multi-tab data loss the election
+    // prevents. Edits stay in memory; the banner explains why.
+    if (tabRole === 'readonly') return;
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     autosaveTimerRef.current = setTimeout(async () => {
       const name = (designName || '').trim();
@@ -1687,7 +1785,7 @@ export default function App() {
     return () => {
       if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     };
-  }, [workspace, scene, history, future, versions, currentVersionId, designName, saveStatus, mirrorWorkspaceToFileIfLinked]);
+  }, [workspace, scene, history, future, versions, currentVersionId, designName, saveStatus, tabRole, mirrorWorkspaceToFileIfLinked]);
 
   // ----- Unload guard + emergency flush -----
   // Closing/refreshing the tab within the 2s autosave debounce silently
@@ -1716,6 +1814,7 @@ export default function App() {
     };
     const flushNow = () => {
       if (!unsavedNow()) return;
+      if (tabRoleRef.current === 'readonly') return; // never write from a read-only tab
       const name = (designNameRef.current || '').trim();
       if (!name || !savedListRef.current.includes(name)) return; // never-saved scratch — no storage home
       const seqAtStart = editSeqRef.current;
@@ -5264,6 +5363,15 @@ export default function App() {
 
   return (
     <div className="h-screen w-full flex flex-col relative" style={{ fontFamily: "'IBM Plex Sans', system-ui, sans-serif", background: 'var(--app-slate-900)', color: 'var(--app-slate-200)' }}>
+      {tabRole === 'readonly' && (
+        <div
+          className="w-full px-4 py-1.5 text-center text-xs font-medium border-b border-amber-700"
+          style={{ background: 'rgba(120, 53, 15, 0.55)', color: '#fcd34d' }}
+          title="Two tabs writing the same workspace would overwrite each other's saves and snapshots. This tab becomes writable automatically when the other closes."
+        >
+          Read-only — this workspace is open in another tab. Edits here won't be saved. Close the other tab to take over.
+        </div>
+      )}
       <header className="border-b border-slate-700" style={{ background: 'var(--app-slate-950)' }}>
         {/* Row 1 — primary tools and identity */}
         <div className="flex items-center justify-between px-4 py-2">

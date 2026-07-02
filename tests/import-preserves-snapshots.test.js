@@ -51,14 +51,19 @@ describe('import over an existing design name preserves its snapshots', () => {
   const storedScene = { components: [{ id: 'b' }] };
   const importedScene = { components: [{ id: 'imported' }] };
 
-  it('the OLD post-import autosave (versions=[]) wiped the snapshot chain', async () => {
+  it('a versions=[] save can no longer wipe the snapshot chain (saveDesign read-merge)', async () => {
     await freshShim();
     await saveDesign('', 'Foo', { scene: storedScene, versions: [v1, v2], currentVersionId: 'v2' });
     // What the buggy import + autosave did: persist the imported scene with an
-    // empty versions array under the same name.
+    // empty versions array under the same name. This USED to erase v1/v2
+    // (this test originally asserted length 0 to document the loss). The
+    // versions[] read-merge inside saveDesign now unions the stored snapshots
+    // back in, so the erasure is structurally impossible — from ANY caller,
+    // including a stale second tab.
     await saveDesign('', 'Foo', { scene: importedScene, versions: [], currentVersionId: null });
     const after = await loadDesign('', 'Foo');
-    expect(after.versions).toHaveLength(0); // ← the data loss this fix prevents
+    expect(after.versions.map((v) => v.id).sort()).toEqual(['v1', 'v2']); // snapshots survive
+    expect(after.scene.components[0].id).toBe('imported');                // payload's scene still wins
   });
 
   it('carrying the existing versions through the post-import save keeps every snapshot', async () => {

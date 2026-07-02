@@ -97,7 +97,32 @@ function isQuotaError(e) {
 // `breakdown` (write failures) reports the serialized size of each payload
 // part — history / future / versions usually dominate a bloated design and
 // explain a quota failure. Pair with describeSaveFailure() for the message.
-export async function saveDesign(workspace, name, payload) {
+// `opts.mergeVersions` (default true): before writing, union the payload's
+// versions[] with any snapshots ALREADY IN STORAGE that the payload doesn't
+// carry (by id). Design payloads are whole-blob writes, so a tab holding a
+// stale versions[] (another tab took snapshots since this one loaded) would
+// otherwise silently ERASE those snapshots on its next autosave — the
+// multi-tab last-writer-wins data-loss class. Snapshots are immutable, so a
+// union by id is always safe; the payload's copy wins on id collision (that
+// keeps description edits). Pass { mergeVersions: false } ONLY when the
+// caller is deliberately REMOVING a version (delete-version), else the
+// merge would resurrect it.
+export async function saveDesign(workspace, name, payload, opts = {}) {
+  if (opts.mergeVersions !== false && payload && Array.isArray(payload.versions)) {
+    try {
+      const existing = await loadDesign(workspace, name);
+      const stored = existing && Array.isArray(existing.versions) ? existing.versions : [];
+      if (stored.length > 0) {
+        const have = new Set(payload.versions.map((v) => v && v.id).filter(Boolean));
+        const missing = stored.filter((v) => v && v.id && !have.has(v.id));
+        if (missing.length > 0) {
+          const merged = [...payload.versions, ...missing]
+            .sort((a, b) => (b?.savedAt || 0) - (a?.savedAt || 0));
+          payload = { ...payload, versions: merged };
+        }
+      }
+    } catch { /* merge is best-effort; the write proceeds with the payload as-is */ }
+  }
   let json;
   try {
     json = JSON.stringify(payload);

@@ -148,6 +148,41 @@ describe('importWorkspace — replace mode writes first, prunes after', () => {
   });
 });
 
+describe('saveDesign versions[] read-merge (multi-tab snapshot-erasure guard)', () => {
+  const vA = { id: 'aaaa1111', versionNumber: 1, description: 'from tab A', scene: { components: [] }, savedAt: 100 };
+  const vB = { id: 'bbbb2222', versionNumber: 2, description: 'from tab B', scene: { components: [] }, savedAt: 200 };
+
+  it('a stale payload does NOT erase snapshots another tab stored', async () => {
+    const { workspace } = await freshModules();
+    // Tab A saves with snapshot vA+vB.
+    await workspace.saveDesign('', 'D', { scene: {}, versions: [vA, vB], currentVersionId: vB.id });
+    // Tab B (stale — loaded before vB existed) autosaves with only vA.
+    await workspace.saveDesign('', 'D', { scene: { edited: true }, versions: [vA], currentVersionId: vA.id });
+    const after = await workspace.loadDesign('', 'D');
+    // vB survives (unioned back in, newest-first), tab B's scene wins.
+    expect(after.versions.map((v) => v.id)).toEqual(['bbbb2222', 'aaaa1111']);
+    expect(after.scene.edited).toBe(true);
+  });
+
+  it('the payload copy wins on id collision (description edits stick)', async () => {
+    const { workspace } = await freshModules();
+    await workspace.saveDesign('', 'D', { scene: {}, versions: [vA], currentVersionId: vA.id });
+    await workspace.saveDesign('', 'D', { scene: {}, versions: [{ ...vA, description: 'edited' }], currentVersionId: vA.id });
+    const after = await workspace.loadDesign('', 'D');
+    expect(after.versions).toHaveLength(1);
+    expect(after.versions[0].description).toBe('edited');
+  });
+
+  it('mergeVersions:false allows a deliberate version DELETE to stick', async () => {
+    const { workspace } = await freshModules();
+    await workspace.saveDesign('', 'D', { scene: {}, versions: [vA, vB], currentVersionId: vB.id });
+    // Delete vA: write without it, merge disabled (else it resurrects).
+    await workspace.saveDesign('', 'D', { scene: {}, versions: [vB], currentVersionId: vB.id }, { mergeVersions: false });
+    const after = await workspace.loadDesign('', 'D');
+    expect(after.versions.map((v) => v.id)).toEqual(['bbbb2222']);
+  });
+});
+
 describe('workspace bundle round-trips the stack library', () => {
   it('exportWorkspace includes stacks; importWorkspace restores them', async () => {
     const { libraryItems, stacks } = await freshModules();
