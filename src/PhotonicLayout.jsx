@@ -1514,14 +1514,24 @@ export default function App() {
     const v = findVersionById(d.versions, versionId);
     if (!v) { await alertDialog('Version not found.', 'Error'); return; }
     // Loading a snapshot REPLACES the TARGET design's working state. If that
-    // working state has unsnapshotted edits, warn before discarding them —
-    // whether the target is the active design (live drift check) or another
-    // design (compare its STORED working scene to the snapshot its pointer is
-    // on). This is the prompt the user expects when clicking a design's own
-    // version row; clicking ANOTHER design's version never silently drops the
-    // edits of the design that owns it.
+    // working state has unsnapshotted edits, warn (and rescue-snapshot)
+    // before replacing it — whether the target is the active design (live
+    // drift check) or another design (compare its STORED working scene to
+    // the snapshot its pointer is on).
+    //
+    // This is a pure CONTENT check: information is lost only when the
+    // working scene actually DIFFERS from the snapshot it's based on.
+    // saveStatus is deliberately IGNORED — loading a version marks the
+    // design 'unsaved' (so Save commits it), and an edit-then-undo also
+    // leaves 'unsaved', yet in both cases the scene byte-equals a snapshot
+    // and can be replaced with ZERO loss: no prompt, no rescue snapshot.
+    // (Gating on saveStatus made hopping between snapshots nag every time.)
     const targetModified = sameDesign
-      ? (saveStatus === 'unsaved' || currentIsModified)
+      ? (currentVersionId
+          ? currentIsModified // deep-equal of live scene vs the pointed snapshot
+          // No version pointer to compare against (shouldn't happen when the
+          // design has versions, but stay conservative): fall back to status.
+          : saveStatus === 'unsaved')
       : (() => {
           if (!d.currentVersionId) return false;
           const cur = (d.versions || []).find(x => x && x.id === d.currentVersionId);
@@ -1569,7 +1579,7 @@ export default function App() {
     // back into the working state (vs. silently overwriting after
     // an autosave debounce).
     setSaveStatus('unsaved');
-  }, [workspace, designName, saveStatus, currentIsModified, flushCurrentBeforeSwitch, setSelection, confirmDialog, alertDialog]);
+  }, [workspace, designName, saveStatus, currentIsModified, currentVersionId, flushCurrentBeforeSwitch, setSelection, confirmDialog, alertDialog]);
 
   // Delete a single version from a design's history. The confirmation
   // explicitly recommends snapshotting the current state first so a
