@@ -2168,6 +2168,10 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           startH: h,
           wExpr: comp.w,
           hExpr: comp.h,
+          // First-class rotation at drag start: the move handler projects
+          // the pointer delta into this local frame so dragging a rotated
+          // handle resizes the right axis.
+          rot: compRotationDeg(comp, paramValues),
         });
         setSelection({ ids: new Set([compId]), primary: compId });
       }
@@ -2853,14 +2857,25 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         }));
       } else if (drag.kind === 'resize') {
         // Compute new width/height based on dragging anchor opposite to fixed corner
-        // Anchor names: NW, N, NE, W, E, SW, S, SE
+        // Anchor names: NW, N, NE, W, E, SW, S, SE.
+        // ROTATION-AWARE: project the pointer delta into the shape's LOCAL
+        // frame (ldx along local +X / width axis, ldy along local +Y /
+        // height axis) and accumulate the center shift in LOCAL coords,
+        // rotated back to world at the end. For rot = 0 this reduces
+        // EXACTLY to the old world-axis math (ldx = dx, ldy = dy).
         const dx = wp.x - drag.startMouse.x;
         const dy = wp.y - drag.startMouse.y;
+        const rot = drag.rot || 0;
+        const rotRad = (rot * Math.PI) / 180;
+        const caR = Math.cos(rotRad);
+        const saR = Math.sin(rotRad);
+        const ldx = dx * caR + dy * saR;
+        const ldy = -dx * saR + dy * caR;
         const a = drag.anchor;
         let newW = drag.startW;
         let newH = drag.startH;
-        let newCx = drag.startCx;
-        let newCy = drag.startCy;
+        let shiftLx = 0; // center shift along the local width axis
+        let shiftLy = 0; // center shift along the local height axis
 
         // Option/Alt = symmetric resize: the OPPOSITE edge mirrors the
         // dragged edge instead of staying fixed, so the rect grows/shrinks
@@ -2868,45 +2883,37 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // and cx/cy stay put.
         const symmetric = e.altKey;
 
-        // Horizontal direction
+        // Local width axis (E/W handles)
         if (a.includes('E')) {
-          if (symmetric) {
-            newW = Math.max(0.1, drag.startW + 2 * dx);
-            newCx = drag.startCx;
-          } else {
-            newW = Math.max(0.1, drag.startW + dx);
-            newCx = drag.startCx + dx / 2;
-          }
+          newW = Math.max(0.1, drag.startW + (symmetric ? 2 * ldx : ldx));
+          if (!symmetric) shiftLx = ldx / 2;
         } else if (a.includes('W')) {
-          if (symmetric) {
-            newW = Math.max(0.1, drag.startW - 2 * dx);
-            newCx = drag.startCx;
-          } else {
-            newW = Math.max(0.1, drag.startW - dx);
-            newCx = drag.startCx + dx / 2;
-          }
+          newW = Math.max(0.1, drag.startW - (symmetric ? 2 * ldx : ldx));
+          if (!symmetric) shiftLx = ldx / 2;
         }
-        // Vertical direction (y-up world)
+        // Local height axis (N/S handles)
         if (a.includes('N')) {
-          if (symmetric) {
-            newH = Math.max(0.1, drag.startH + 2 * dy);
-            newCy = drag.startCy;
-          } else {
-            newH = Math.max(0.1, drag.startH + dy);
-            newCy = drag.startCy + dy / 2;
-          }
+          newH = Math.max(0.1, drag.startH + (symmetric ? 2 * ldy : ldy));
+          if (!symmetric) shiftLy = ldy / 2;
         } else if (a.includes('S')) {
-          if (symmetric) {
-            newH = Math.max(0.1, drag.startH - 2 * dy);
-            newCy = drag.startCy;
-          } else {
-            newH = Math.max(0.1, drag.startH - dy);
-            newCy = drag.startCy + dy / 2;
-          }
+          newH = Math.max(0.1, drag.startH - (symmetric ? 2 * ldy : ldy));
+          if (!symmetric) shiftLy = ldy / 2;
         }
+        // Expression-bound dimensions don't resize (the commit below skips
+        // them) — zero their LOCAL center shift too, so the shape doesn't
+        // translate along an axis that isn't actually resizing. This works
+        // at any rotation; the world-coordinate restores in the commit are
+        // additionally gated to rot = 0 (a bound axis contributes to BOTH
+        // world coords once rotated).
+        if (isExprBoundDim(drag.wExpr)) shiftLx = 0;
+        if (isExprBoundDim(drag.hExpr)) shiftLy = 0;
+        let newCx = drag.startCx + shiftLx * caR - shiftLy * saR;
+        let newCy = drag.startCy + shiftLx * saR + shiftLy * caR;
 
-        // Grid snap on resize: snap the dragged anchor's position to grid
-        if (gridSnapEnabled && !modifier) {
+        // Grid snap on resize: snap the dragged anchor's position to grid.
+        // Skipped for rotated shapes — snapping a rotated corner to the
+        // world grid isn't separable into clean w/h adjustments.
+        if (gridSnapEnabled && !modifier && Math.abs(rot) < 1e-9) {
           // Snap the anchor's world position to grid, then back-compute w/h, cx/cy
           const anchorLoc = anchorLocal(a, newW, newH);
           const anchorWorldX = newCx + anchorLoc.x;
@@ -2958,9 +2965,12 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             // For expression-bound dimensions, also DON'T update cx/cy —
             // since the dimension didn't change, the center shouldn't drift
             // either (otherwise the user sees the rect translate without
-            // resizing, which is confusing).
-            if (wIsExpr) patch.cx = c.cx;
-            if (hIsExpr) patch.cy = c.cy;
+            // resizing, which is confusing). Rot ≠ 0: the local shift is
+            // already zeroed upstream, and a rotated bound axis maps onto
+            // BOTH world coords — clamping one would corrupt the other
+            // axis's legitimate motion, so the restore is rot-0-only.
+            if (wIsExpr && Math.abs(rot) < 1e-9) patch.cx = c.cx;
+            if (hIsExpr && Math.abs(rot) < 1e-9) patch.cy = c.cy;
             return { ...c, ...patch };
           });
           if (wIsParam) {
@@ -4758,9 +4768,12 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                 }
                 return elements;
               })()}
-              {/* Resize handles (only on primary selected) */}
+              {/* Resize handles (only on primary selected). Rotation-aware:
+                  handles sit on the ROTATED shape's corners/edges (matching
+                  the anchor dots); the drag math projects the pointer into
+                  the shape's local frame (see the 'resize' branch). */}
               {isPrimary && ANCHORS.filter(a => a !== 'C').map(a => {
-                const local = anchorLocal(a, w, h);
+                const local = anchorLocalRotated(a, w, h, compRotationDeg(c, paramValues));
                 const ax = c.cx + local.x;
                 const ay = -(c.cy + local.y);
                 // Expression-bound axes can't be resized by dragging (the

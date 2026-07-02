@@ -232,6 +232,16 @@ For non-rect shapes, `expandTransforms` propagates shape-specific fields (r, rx,
 - Alt+click a handle: deletes the vertex, keeping all DOWNSTREAM resolved positions (`deleteVertexFixDownstream`); enforces min vertex count (2 polyline / 3 polyshape).
 - Live preview goes through local state; the commit is ONE `updateScene` call.
 
+**Rotation-aware selection + resize**: the primary selection's resize
+handles sit on the ROTATED shape's corners/edges (`anchorLocalRotated` +
+`compRotationDeg` — same math as the snap dots), and the resize drag
+projects the pointer delta into the shape's LOCAL frame (`drag.rot`
+captured at init; center shift accumulated locally, rotated back to
+world; reduces EXACTLY to the old world-axis math at rot 0). The
+grid-snap-the-dragged-anchor refinement and the expr-bound cx/cy commit
+restores are rot-0-only (neither is axis-separable once rotated; the
+local shift is zeroed for bound axes at any angle instead).
+
 **Smart alignment guides** (`alignAxis`, exported): PLAIN move-drags only (never Alt-drag — that's parametric snap creation). Per axis, the dragged bbox's L/C/R (or B/C/T) values are tested against every other visible instance's edges/center within a threshold; the smallest delta wins, the position snaps to it (overriding grid snap on that axis), and full-viewport magenta guide lines are drawn for EVERY coordinate that aligns after the shift. This is a numeric literal alignment — the status bar reminds the user it creates no constraint.
 
 **Keyboard shortcuts** (window-level handler; suppressed when focus is in an input/textarea/select):
