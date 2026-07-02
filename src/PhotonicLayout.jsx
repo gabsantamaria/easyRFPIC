@@ -15,7 +15,7 @@ import { generateHfssNative } from './export/hfss-native.js';
 import { generateQ3DCapacitance } from './export/q3d.js';
 import { generateGdsfactory } from './export/gdsfactory.js';
 import { generateSvgFromElement, generatePdfFromElement } from './export/figure.js';
-import { defaultStack, normalizeScene, makeDefaultScene, makeBlankScene, paramsForStack, migrateStackCoplanarGroups } from './scene/schema.js';
+import { defaultStack, normalizeScene, makeDefaultScene, makeBlankScene, paramsForStack, migrateStackCoplanarGroups, scenesEqual } from './scene/schema.js';
 import { buildDesignExport, designExportFilename } from './scene/design-file.js';
 import {
   BASE_DESIGN_PREFIX, BASE_LIB_PREFIX, BASE_ARCHIVE_PREFIX, WORKSPACE_KEY,
@@ -1054,11 +1054,12 @@ export default function App() {
     if (!currentVersionId) return false;
     const v = versions.find(vv => vv && vv.id === currentVersionId);
     if (!v || !v.scene) return false;
-    try {
-      return JSON.stringify(scene) !== JSON.stringify(v.scene);
-    } catch {
-      return false;
-    }
+    // CANONICAL comparison (scenesEqual normalizes BOTH sides): the live
+    // scene is setScene(normalizeScene(v.scene)), so a raw stringify against
+    // the frozen v.scene false-positived whenever normalization injects a
+    // migration (e.g. the punch-clone pin snap on pre-migration snapshots) —
+    // flagging phantom "unsnapshotted edits" the moment a version loaded.
+    return !scenesEqual(scene, v.scene);
   }, [scene, versions, currentVersionId]);
 
   // Single "needs persisting" signal. `saveStatus` only tracks the last write
@@ -1536,7 +1537,9 @@ export default function App() {
           if (!d.currentVersionId) return false;
           const cur = (d.versions || []).find(x => x && x.id === d.currentVersionId);
           if (!cur || !cur.scene) return false;
-          try { return JSON.stringify(d.scene) !== JSON.stringify(cur.scene); } catch { return false; }
+          // Canonical compare — same normalization-vintage rationale as
+          // currentIsModified above.
+          return !scenesEqual(d.scene, cur.scene);
         })();
     if (targetModified) {
       // RESCUE SNAPSHOT instead of bare discard: the unsnapshotted working
@@ -1680,8 +1683,9 @@ export default function App() {
     // working scene to the snapshot its pointer is on. Cached so the SAVED
     // DESIGNS panel can show its "current" row even while it isn't active.
     const cur = (d.versions || []).find(v => v && v.id === curId);
-    let modified = false;
-    try { modified = !!(cur && cur.scene) && JSON.stringify(d.scene) !== JSON.stringify(cur.scene); } catch { modified = false; }
+    // Canonical compare (see currentIsModified) — a normalization-vintage
+    // difference must not paint a phantom "current (modified)" row.
+    const modified = !!(cur && cur.scene) && !scenesEqual(d.scene, cur.scene);
     setVersionsByDesign(prev => ({
       ...prev,
       [name]: { versions: sortedVersions(d.versions), currentVersionId: curId, modified },

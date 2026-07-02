@@ -356,7 +356,12 @@ export function normalizeScene(s) {
       const baseOp = migratedComponents.find(c => c.id === ids[0]);
       const layer = baseOp?.layer || 'waveguide';
       newDerived.push({
-        id: b.id || `migrated_${b.op}_${Math.random().toString(36).slice(2, 6)}`,
+        // DETERMINISTIC fallback id (operand[0]-keyed, not random):
+        // normalizeScene must be a pure function of its input — a random id
+        // made every normalize of the same legacy scene produce a DIFFERENT
+        // result, so a loaded snapshot never deep-equaled its frozen source
+        // and the version-restore flow flagged phantom "unsnapshotted edits".
+        id: b.id || `migrated_${b.op}_${ids[0] || 'x'}`,
         kind: 'boolean',
         op: b.op,
         operandIds: ids,
@@ -422,7 +427,14 @@ export function normalizeScene(s) {
       if (existingClonePins.has(c.id)) continue;
       if (!compById2[c.cloneOf]) continue;
       addedPinSnaps.push({
-        id: `snap_${Date.now()}_clonepin_${c.id}`,
+        // DETERMINISTIC id (clone-keyed, no Date.now()): one pin per clone,
+        // so the clone id alone is unique. The old timestamped id made
+        // normalizeScene non-idempotent for pre-migration scenes — loading
+        // an OLD snapshot added a pin snap whose id differed on every
+        // normalize, so the live scene never deep-equaled the frozen
+        // snapshot and version hopping nagged with phantom "unsnapshotted
+        // edits" (+ a pointless rescue snapshot) on every click.
+        id: `snap_clonepin_${c.id}`,
         from: { compId: c.cloneOf, anchor: 'C' },
         to: { compId: c.id, anchor: 'C' },
         dx: '0', dy: '0',
@@ -545,6 +557,25 @@ export function normalizeScene(s) {
     // self-contained when exported / shared. Pure passthrough.
     cells: (s.cells && typeof s.cells === 'object' && !Array.isArray(s.cells)) ? s.cells : {},
   };
+}
+
+// Canonical scene equality: compare through normalizeScene on BOTH sides so
+// schema migrations (defaults/snaps injected since one side was frozen —
+// e.g. the punch-clone pin snap on an old snapshot) and top-level key-order
+// differences never read as "edits". normalizeScene must stay DETERMINISTIC
+// and IDEMPOTENT for this to hold (no Date.now()/Math.random() ids in any
+// migration path) — a scene loaded FROM a snapshot via
+// setScene(normalizeScene(v.scene)) then compares equal to that snapshot
+// until a real edit lands. Used by the version-restore flow to decide
+// whether discarding "current" would actually lose information.
+export function scenesEqual(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  try {
+    return JSON.stringify(normalizeScene(a)) === JSON.stringify(normalizeScene(b));
+  } catch {
+    return false; // un-normalizable ⇒ treat as different (conservative: keeps the prompt)
+  }
 }
 
 // First-run demo scene. Returns a DEEP CLONE of the frozen JSON asset
