@@ -23,6 +23,7 @@ import { detectPortIntegrationLine } from '../../scene/lumpedPort.js';
 import { shapeInstanceToRing, clampCornerRadius, remapPointsToInstance } from '../../geometry/rings.js';
 import { buildRacetrackCenterline } from '../../geometry/racetrack.js';
 import { ringToSvgPath } from '../../geometry/paths.js';
+import { computeHiddenCompIds, EMPTY_HIDDEN_SET } from './layer-visibility.js';
 import {
   tessellatePolylinePath, taperedBandQuads, polylineIsTapered,
   tessellateArcFrom, synthArc90, resolvePolylineVertices,
@@ -1168,7 +1169,7 @@ function EditablePolyDims({ svgRef, viewport, cSel, verts, params, updateScene, 
 // =========================================================================
 // CANVAS
 // =========================================================================
-export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelection, viewport, setViewport, snapMode, setSnapMode, gridSize, gridSnapEnabled, showGrid = true, paramValues, addParam, updateParamExpr, rulerMode, setRulerMode, rulerMeasurements, setRulerMeasurements, rulerInProgress, setRulerInProgress, rulerSnapPoint, setRulerSnapPoint, alertDialog, setInteractionStatus, showDimensions, editDims = false, commitExpr = null, renameParam = null, addMode, setAddMode, commitDragAdd, onComponentContextMenu, onBackgroundContextMenu, onHoverWorld = null, onSvgElement, flashAnchor = null, canvasTheme = DEFAULT_CANVAS_THEME }) {
+export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelection, viewport, setViewport, snapMode, setSnapMode, gridSize, gridSnapEnabled, showGrid = true, paramValues, addParam, updateParamExpr, rulerMode, setRulerMode, rulerMeasurements, setRulerMeasurements, rulerInProgress, setRulerInProgress, rulerSnapPoint, setRulerSnapPoint, alertDialog, setInteractionStatus, showDimensions, editDims = false, commitExpr = null, renameParam = null, addMode, setAddMode, commitDragAdd, onComponentContextMenu, onBackgroundContextMenu, onHoverWorld = null, onSvgElement, flashAnchor = null, canvasTheme = DEFAULT_CANVAS_THEME, hiddenLayerKeys = EMPTY_HIDDEN_SET }) {
   // Drop a single committed ruler measurement by id.
   const deleteRuler = (id) => setRulerMeasurements((prev) => prev.filter((m) => m.id !== id));
   const svgRef = useRef(null);
@@ -1211,14 +1212,36 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     return m;
   }, [solved, paramValues]);
 
+  // Layer visibility: ids hidden by the LAYERS-panel eyes. CANVAS-ONLY —
+  // hidden components skip render + interaction below but stay fully in the
+  // scene / solver / exports (hiding is a viewing aid, never a geometry
+  // edit). Shares the EMPTY set when nothing is hidden, so the no-hide
+  // path stays referentially identical (and the interaction indexes below
+  // receive the ORIGINAL arrays — byte-identical to before the feature).
+  const hiddenCompIds = useMemo(
+    () => computeHiddenCompIds(scene.components, hiddenLayerKeys, scene.stack),
+    [scene.components, scene.stack, hiddenLayerKeys]
+  );
+  // Pre-filtered inputs for the interaction indexes (snap targets, alt-drag
+  // candidates, ruler snapping) — you can't snap/measure to what you can't
+  // see. Identity-pass-through when nothing is hidden.
+  const visibleSolved = useMemo(
+    () => (hiddenCompIds.size === 0 ? solved : solved.filter(c => !hiddenCompIds.has(c.id))),
+    [solved, hiddenCompIds]
+  );
+  const visibleTransformInstances = useMemo(
+    () => (hiddenCompIds.size === 0 ? transformInstances : transformInstances.filter(i => !hiddenCompIds.has(i.compId))),
+    [transformInstances, hiddenCompIds]
+  );
+
   // [F1] Spatial index over every anchor candidate findRulerSnap /
   // findAnchorSnap used to enumerate per call (9 rotated anchors per
   // transform instance + boolean operand cells + edge-projection rects).
   // Stable across mousemoves — the heavy consumers (ruler hover, polyline
   // draft, add-drag) don't mutate the scene while probing.
   const anchorSnapIndex = useMemo(
-    () => buildAnchorSnapIndex(transformInstances, solved),
-    [transformInstances, solved]
+    () => buildAnchorSnapIndex(visibleTransformInstances, visibleSolved),
+    [visibleTransformInstances, visibleSolved]
   );
 
   // [F1] Alt-drag target index (9 rotated anchors + bbox per solved,
@@ -1226,8 +1249,8 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
   // alt-drag that's once per committed move, still far cheaper than the
   // old per-tick solved × 81 anchor-pair scan.
   const altDragTargetIndex = useMemo(
-    () => buildAltDragTargetIndex(solved, paramValues, dimsByCompId, transformInstances),
-    [solved, paramValues, dimsByCompId, transformInstances]
+    () => buildAltDragTargetIndex(visibleSolved, paramValues, dimsByCompId, visibleTransformInstances),
+    [visibleSolved, paramValues, dimsByCompId, visibleTransformInstances]
   );
 
   // Group awareness. Members of a group = union of g.memberIds and every
@@ -2766,10 +2789,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           const alignThresh = 6 * (viewport.w / (svgRef.current?.clientWidth || 1));
           const targetsX = [];
           const targetsY = [];
-          for (const inst of transformInstances) {
+          for (const inst of visibleTransformInstances) {
             // Skip the dragged cluster itself and operands consumed by a
             // boolean (they don't render standalone — the boolean instance
-            // already contributes the composite bbox).
+            // already contributes the composite bbox). visibleTransform-
+            // Instances: can't align to a hidden layer you can't see.
             if (drag.clusterSet && drag.clusterSet.has(inst.compId)) continue;
             if (booleanClusters.operandIds.has(inst.compId)) continue;
             const iw = inst.w, ih = inst.h;
@@ -2993,7 +3017,9 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       const y2 = Math.max(marquee.startWorld.y, marquee.currentWorld.y);
       // Only commit if user dragged at least a tiny amount
       if (x2 - x1 > 0.001 || y2 - y1 > 0.001) {
-        const hits = solved.filter(c => {
+        // visibleSolved: hidden-layer components can't be marquee-selected —
+        // an invisible selection could then be nudged/deleted blind.
+        const hits = visibleSolved.filter(c => {
           const { w, h } = dimsByCompId[c.id]; // [F2]
           // intersection test (component bbox vs marquee bbox)
           const cx1 = c.cx - w / 2, cx2 = c.cx + w / 2;
@@ -3962,6 +3988,8 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // matching geometry (single Unite, then DuplicateAlongLine, then
         // Rotate on the whole cluster).
         return booleanClusters.booleanComps.flatMap((b) => {
+          // Layer visibility: a hidden boolean cluster renders nothing.
+          if (hiddenCompIds.has(b.id)) return [];
           // Determine the display fill color. Try the bound conductor
           // layer's color first (resolved recursively from operand[0]
           // so a union of layer-X rects renders in layer-X's color);
@@ -4056,6 +4084,8 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           click a dot to pick / commit a snap, and the same snap creation
           flow runs. */}
       {snapMode === 'creating' && booleanClusters.booleanComps.map(bScene => {
+        // Hidden layers offer no snap anchors (can't snap to the invisible).
+        if (hiddenCompIds.has(bScene.id)) return null;
         // The scene-side boolean has w='0', h='0' stored as placeholders.
         // Look up the SOLVED counterpart for the actual bbox-derived
         // numeric dimensions written by solveLayout/refreshBooleanBbox.
@@ -4140,7 +4170,10 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         const pass2 = [...solved]
           .filter(c => !isInPass1(c) && !isBoolOperand(c) && !isBoolComp(c))
           .sort((a, b) => stackPriority(a) - stackPriority(b));
-        const ordered = [...pass1, ...pass2];
+        // Layer visibility: hidden wins over everything (including selection)
+        // — this filter also removes hit-pads, per-shape snap anchors, and
+        // resize handles since they all render inside this map.
+        const ordered = [...pass1, ...pass2].filter(c => !hiddenCompIds.has(c.id));
         return ordered.map(c => {
           const { w, h } = dimsByCompId[c.id]; // [F2]
           const style = styleForComponent(c);
@@ -4810,8 +4843,8 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // least one alphabetic identifier. Pure numerics like "20" are not.
         const hasParam = (expr) => typeof expr === 'string' && /[A-Za-z_]/.test(expr);
         const dims = [];
-        // Component widths and heights
-        for (const c of solved) {
+        // Component widths and heights (visibleSolved: no dims on hidden layers)
+        for (const c of visibleSolved) {
           const { w, h } = dimsByCompId[c.id]; // [F2]
           if (!Number.isFinite(w) || !Number.isFinite(h)) continue;
           if (hasParam(c.w)) {
@@ -5137,6 +5170,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         const arrows = [];
         for (const c of solved) {
           if (c.layer !== 'port' || c.kind !== 'rect') continue;
+          if (hiddenCompIds.has(c.id)) continue; // hidden port layer → no arrow
           if (!c.lumpedPort || !c.lumpedPort.enabled) continue;
           const det = detectPortIntegrationLine(c, solved, paramValues);
           if (!det.direction) continue;
@@ -5372,7 +5406,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         const xMin = viewport.x - viewport.w / 2 - pad, xMax = viewport.x + viewport.w / 2 + pad;
         const yMin = viewport.y - viewport.h / 2 - pad, yMax = viewport.y + viewport.h / 2 + pad;
         const dots = [];
-        for (const inst of transformInstances) {
+        for (const inst of visibleTransformInstances) {
           if (consumed.has(inst.compId)) continue;
           if (drag?.clusterSet && drag.clusterSet.has(inst.compId)) continue;
           const iw = inst.w, ih = inst.h;

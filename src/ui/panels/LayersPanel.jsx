@@ -12,7 +12,7 @@
 //
 // Extracted from PhotonicLayout.jsx as Stage 4.9 of the planned refactor.
 import React from 'react';
-import { Trash2 } from 'lucide-react';
+import { Trash2, Eye, EyeOff } from 'lucide-react';
 import { evalExpr } from '../../scene/params.js';
 import { DeferredTextInput } from '../DeferredTextInput.jsx';
 
@@ -74,7 +74,7 @@ function swapWithinGroup(stack, idx, dir) {
   return next;
 }
 
-export function LayerCard({ layer, idx, scene, paramValues, updateScene, commitExpr, compact }) {
+export function LayerCard({ layer, idx, scene, paramValues, updateScene, commitExpr, compact, hiddenLayerKeys, onToggleLayerVisibility }) {
   const updateLayer = (patch) => updateScene(prev => ({
     ...prev,
     stack: prev.stack.map((l, i) => i === idx ? { ...l, ...patch } : l),
@@ -171,10 +171,29 @@ export function LayerCard({ layer, idx, scene, paramValues, updateScene, commitE
     });
   };
 
+  // Canvas visibility eye — only roles with a canvas footprint get one
+  // (conductor => that stack layer's electrodes; waveguide => all wg parts).
+  // Substrate/cladding have no plan-view footprint. CANVAS-ONLY: exports
+  // always include hidden layers.
+  const visKey = layer.role === 'conductor' ? `cond:${layer.id}`
+    : layer.role === 'waveguide' ? 'wg'
+    : null;
+  const isHidden = !!(visKey && hiddenLayerKeys && hiddenLayerKeys.has(visKey));
   return (
-    <div className="rounded border border-slate-700" style={{ background: '#1e293b' }}>
+    <div className="rounded border border-slate-700" style={{ background: '#1e293b', opacity: isHidden ? 0.55 : 1 }}>
       <div className="flex items-center gap-1 px-2 py-1 border-b border-slate-800">
         <div className="w-3 h-3 rounded-sm flex-shrink-0" style={{ background: layer.color }} />
+        {visKey && onToggleLayerVisibility && (
+          <button
+            onClick={() => onToggleLayerVisibility(visKey)}
+            className={isHidden ? 'text-slate-500 hover:text-slate-300' : 'text-cyan-400 hover:text-cyan-200'}
+            title={isHidden
+              ? 'Hidden on canvas — click to show. (Canvas-only: exports always include this layer.)'
+              : 'Visible on canvas — click to hide. (Canvas-only: exports always include this layer.)'}
+          >
+            {isHidden ? <EyeOff size={11} /> : <Eye size={11} />}
+          </button>
+        )}
         <input
           value={layer.name}
           onChange={(e) => updateLayer({ name: e.target.value })}
@@ -344,7 +363,7 @@ export function LayerCard({ layer, idx, scene, paramValues, updateScene, commitE
   );
 }
 
-export function LevelGroup({ level, scene, paramValues, updateScene, commitExpr }) {
+export function LevelGroup({ level, scene, paramValues, updateScene, commitExpr, hiddenLayerKeys, onToggleLayerVisibility }) {
   // Move the whole coplanar group up/down by swapping its level
   // with the adjacent level — using computeStackLevels so the
   // neighbor (which may itself be a coplanar group of N layers) is
@@ -408,6 +427,8 @@ export function LevelGroup({ level, scene, paramValues, updateScene, commitExpr 
               paramValues={paramValues}
               updateScene={updateScene}
               commitExpr={commitExpr}
+              hiddenLayerKeys={hiddenLayerKeys}
+              onToggleLayerVisibility={onToggleLayerVisibility}
             />
           ))}
         </div>
@@ -425,6 +446,8 @@ export function LevelGroup({ level, scene, paramValues, updateScene, commitExpr 
       paramValues={paramValues}
       updateScene={updateScene}
       commitExpr={commitExpr}
+      hiddenLayerKeys={hiddenLayerKeys}
+      onToggleLayerVisibility={onToggleLayerVisibility}
     />
   );
 }

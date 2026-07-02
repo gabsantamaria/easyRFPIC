@@ -80,6 +80,7 @@ import { TwoLineWizard } from './ui/TwoLineWizard.jsx';
 import { SettingsPanel } from './ui/SettingsPanel.jsx';
 import { DEFAULT_SETTINGS, loadSettings, saveSettings, hydrateSettings, buildSettingsExport, parseSettingsImport } from './ui/settings.js';
 import { getUiPref, setUiPrefs, hydrateUiPrefs } from './ui/ui-prefs.js';
+import { computeHiddenCompIds } from './ui/canvas/layer-visibility.js';
 import { resolveCanvasTheme, applyThemeAttr } from './ui/theme.js';
 import { applyFragment as applyAiGeometryFragment } from './ai/assistant.js';
 import { WorkspaceCreateRow, LibraryItemRow } from './ui/panels/LibraryPanelRows.jsx';
@@ -445,6 +446,38 @@ export default function App() {
   // The legacy `kind` field is kept as a fallback for any code that still
   // reads it.
   const [addMode, setAddMode] = useState(null);
+  // Layer visibility (LAYERS-panel eyes). EPHEMERAL per-session UI state —
+  // deliberately NOT in scene (would ride into design exports / undo
+  // history) and NOT in settings (global across designs; a hidden
+  // conductor key would silently blank every design sharing that stack
+  // id — an empty-canvas trap). Keys: 'wg' | 'port' | 'via' |
+  // 'cond:<stackLayerId>' (see src/ui/canvas/layer-visibility.js).
+  // CANVAS-ONLY: solver + every export always see the full scene.
+  const [hiddenLayerKeys, setHiddenLayerKeys] = useState(() => new Set());
+  // Ids hidden under the current keys (shared empty set when none — Canvas
+  // uses referential equality to keep the no-hide path byte-identical).
+  const hiddenCompIds = useMemo(
+    () => computeHiddenCompIds(scene.components, hiddenLayerKeys, scene.stack),
+    [scene.components, scene.stack, hiddenLayerKeys]
+  );
+  const toggleLayerVisibility = useCallback((key) => {
+    setHiddenLayerKeys(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }, []);
+  // Prune the selection whenever hiding changes — a ghost selection of
+  // hidden components could be nudged/deleted invisibly. Keyed on
+  // hiddenCompIds only (NOT selectedIds): pruning happens when hiding
+  // changes, never fights normal selection updates.
+  useEffect(() => {
+    if (hiddenCompIds.size === 0) return;
+    const kept = [...selectedIds].filter(id => !hiddenCompIds.has(id));
+    if (kept.length === selectedIds.size) return;
+    setSelection({ ids: new Set(kept), primary: kept.includes(selectedId) ? selectedId : (kept[kept.length - 1] ?? null) });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hiddenCompIds]);
   // Active layer choice for the shape buttons in the toolbar. Persists
   // across button clicks so the user can quickly add several shapes to
   // the same layer. Defaults to 'electrode' (the conductor) since most
@@ -2048,10 +2081,11 @@ export default function App() {
         e.preventDefault();
         if (selectedIds.size > 0) duplicateIdsRef.current?.(selectedIds);
       } else if ((e.metaKey || e.ctrlKey) && (e.key === 'a' || e.key === 'A')) {
-        // Select all non-consumed components (consumed operands live
-        // inside their boolean cluster and aren't standalone objects).
+        // Select all non-consumed, VISIBLE components (consumed operands
+        // live inside their boolean cluster; hidden-layer components can't
+        // be selected — an invisible selection could be deleted blind).
         e.preventDefault();
-        const all = scene.components.filter(c => !c.consumedBy).map(c => c.id);
+        const all = scene.components.filter(c => !c.consumedBy && !hiddenCompIds.has(c.id)).map(c => c.id);
         if (all.length > 0) setSelection({ ids: new Set(all), primary: all[all.length - 1] });
       } else if (e.key === 'Escape') {
         // Clear selection — but only when no canvas tool is active (the
@@ -2077,7 +2111,7 @@ export default function App() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [fitToView, zoomToSelection, nudgeSelected, selectedIds, gridSize, scene.components, setSelection, addMode, rulerMode, snapMode]);
+  }, [fitToView, zoomToSelection, nudgeSelected, selectedIds, gridSize, scene.components, setSelection, addMode, rulerMode, snapMode, hiddenCompIds]);
 
   // Refs so handlers always see the latest functions
   const undoRef = useRef(null);
@@ -6684,10 +6718,37 @@ export default function App() {
                       // still bind the layer via conductorLayerId.
                       updateScene={guardedStackUpdateScene}
                       commitExpr={commitExpr}
+                      hiddenLayerKeys={hiddenLayerKeys}
+                      onToggleLayerVisibility={toggleLayerVisibility}
                     />
                   ));
                 })()}
 
+                {/* Canvas pseudo-layers: ports + vias aren't stack layers but
+                    render on the canvas — give them show/hide eyes too.
+                    Canvas-only, like the stack eyes above. */}
+                <div className="rounded border border-slate-700 px-2 py-1.5 space-y-1" style={{ background: 'var(--app-slate-800)' }}>
+                  <p className="text-[9px] uppercase tracking-wider text-slate-500">Canvas overlays</p>
+                  {[
+                    { key: 'port', label: 'Ports', hint: 'port-layer rects + integration-line arrows' },
+                    { key: 'via', label: 'Vias', hint: 'vertical interconnects (plan-view circles)' },
+                  ].map(({ key, label, hint }) => {
+                    const off = hiddenLayerKeys.has(key);
+                    return (
+                      <div key={key} className="flex items-center gap-2 text-[11px]">
+                        <button
+                          onClick={() => toggleLayerVisibility(key)}
+                          className={off ? 'text-slate-500 hover:text-slate-300' : 'text-cyan-400 hover:text-cyan-200'}
+                          title={`${off ? 'Hidden on canvas — click to show' : 'Visible on canvas — click to hide'}. (Canvas-only: exports always include ${label.toLowerCase()}.)`}
+                        >
+                          {off ? <EyeOff size={11} /> : <Eye size={11} />}
+                        </button>
+                        <span className={off ? 'text-slate-500' : 'text-slate-300'}>{label}</span>
+                        <span className="text-[9px] text-slate-600 truncate">{hint}</span>
+                      </div>
+                    );
+                  })}
+                </div>
 
                 {scene.stack.length === 0 && (
                   <p className="text-xs text-slate-500 italic px-1">No layers in stack.</p>
@@ -7512,7 +7573,21 @@ export default function App() {
             onHoverWorld={(wp) => { cursorWorldRef.current = wp; }}
             onSvgElement={(el) => { canvasSvgRef.current = el; }}
             flashAnchor={flashAnchor}
+            hiddenLayerKeys={hiddenLayerKeys}
           />
+          {/* Hidden-layer indicator: a "blank" canvas must be self-explaining.
+              One click restores everything. */}
+          {hiddenLayerKeys.size > 0 && (
+            <button
+              onClick={() => setHiddenLayerKeys(new Set())}
+              className="absolute top-10 left-2 px-2 py-1 rounded text-[10px] font-medium border border-amber-600"
+              style={{ background: 'rgba(120,53,15,0.75)', color: '#fcd34d' }}
+              title="Layers hidden via the LAYERS-tab eyes (canvas-only — exports include everything). Click to show all."
+            >
+              <EyeOff size={10} className="inline mr-1 -mt-0.5" />
+              {hiddenLayerKeys.size} layer{hiddenLayerKeys.size === 1 ? '' : 's'} hidden — show all
+            </button>
+          )}
           <div className="absolute top-2 left-2 px-2 py-1 rounded text-[10px] font-mono pointer-events-none" style={{ background: 'rgba(15,23,42,0.85)', color: '#e2e8f0' }}>
             wheel = zoom · drag = pan/move · ⌥/Alt+drag = marquee · ⌘+click = toggle · ⌘+drag = no grid · F = fit · ⇧F = zoom sel · arrows = nudge (⇧ = 10×) · ⌘D = dup · ⌘A = all · Esc = deselect · ⌘Z/⇧Z = undo/redo · ⌘C/V = copy/paste · ⌘S = save
           </div>
