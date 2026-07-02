@@ -54,6 +54,29 @@ export async function loadDesign(workspace, name) {
   } catch { return null; }
 }
 
+// A design name that will round-trip through storage AND appear in every
+// list. Names starting with '_' are reserved for internals (listSavedDesigns
+// filters `prefix + '_'` — e.g. the `_active` pointer and `_clipboard`), and
+// ':' is the workspace prefix separator (a name containing it vanishes from
+// the default workspace's list and can shadow another workspace's keys).
+// Without this check such names SAVE fine and then never show up anywhere —
+// an invisible-loss trap. Returns { ok: true, name } (trimmed) or
+// { ok: false, reason }.
+export function validateDesignName(name) {
+  const trimmed = (name || '').trim();
+  if (!trimmed) return { ok: false, reason: 'Design name cannot be empty.' };
+  if (trimmed.startsWith('_')) return { ok: false, reason: 'Design name cannot start with "_" (reserved for internal keys).' };
+  if (trimmed.includes(':')) return { ok: false, reason: 'Design name cannot contain ":" (used as the workspace separator).' };
+  return { ok: true, name: trimmed };
+}
+
+// Sanitize an arbitrary (e.g. imported) name into a valid one rather than
+// rejecting it: strip leading underscores, replace ':' with '-'.
+export function sanitizeDesignName(name) {
+  const cleaned = (name || '').trim().replace(/^_+/, '').replace(/:/g, '-').trim();
+  return cleaned || 'Imported design';
+}
+
 // Detect a storage-quota error across browsers. Chrome/Safari throw a
 // DOMException named "QuotaExceededError" (code 22); Firefox throws
 // "NS_ERROR_DOM_QUOTA_REACHED" (code 1014). Match on name/message/code so

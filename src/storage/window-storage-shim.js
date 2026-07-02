@@ -188,6 +188,18 @@ export function installStorageShim() {
   if (typeof window === 'undefined') return; // SSR / Node
   if (window.storage) return;                // host-provided wins
 
+  // Ask the browser to mark this origin's storage DURABLE. IndexedDB is
+  // best-effort by default: the browser may evict the entire origin under
+  // disk pressure (and Safari evicts after 7 days of non-use) — silently
+  // deleting every design and snapshot. persist() is a one-line opt-out;
+  // fire-and-forget (the promise resolves to a grant/deny we can't act on
+  // here — the Settings panel can surface navigator.storage.persisted()).
+  try {
+    if (navigator.storage && navigator.storage.persist) {
+      navigator.storage.persist().catch(() => {});
+    }
+  } catch { /* older browsers */ }
+
   // Memoized backend init — every storage call awaits the same promise,
   // so concurrent first-use calls share one IndexedDB open + migration.
   let backendPromise = null;

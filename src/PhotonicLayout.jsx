@@ -23,6 +23,7 @@ import {
   listSavedDesigns, loadDesign, saveDesign, deleteDesignStored, describeSaveFailure,
   setActiveDesignName, getActiveDesignName,
   getStoredWorkspace, setStoredWorkspace, discoverWorkspaces,
+  validateDesignName,
 } from './storage/workspace.js';
 import { makeVersion, sortedVersions, findVersionById } from './storage/versions.js';
 
@@ -762,6 +763,14 @@ export default function App() {
   // Pending autosave timer (declared here so the save-before-switch flush can
   // cancel it; the autosave effect below sets it).
   const autosaveTimerRef = useRef(null);
+  // Monotonic edit counter — bumped by every updateScene. The autosave
+  // captures it BEFORE its write and only flips saveStatus to 'saved' when
+  // it is UNCHANGED at completion. Without this, an edit landing during an
+  // in-flight autosave was marked 'saved' (the completion setSaveStatus ran
+  // last), its re-armed 2s timer was killed by the effect cleanup, and — for
+  // a never-snapshotted design where isDirty degenerates to saveStatus —
+  // the newest edit was silently lost on switch / tab close.
+  const editSeqRef = useRef(0);
   sceneRef.current = scene;
   historyRef.current = history;
   futureRef.current = future;
@@ -803,6 +812,7 @@ export default function App() {
       return next;
     });
     setFuture([]); // any new edit clears redo
+    editSeqRef.current++; // marks this edit newer than any in-flight autosave
     setSaveStatus('unsaved');
   }, []);
 
@@ -869,6 +879,10 @@ export default function App() {
   // does). Legacy payloads without a versions field stay that way
   // until the user takes a first snapshot.
   const handleSave = useCallback(async () => {
+    // A name that lists nowhere (leading '_' / contains ':') would save fine
+    // and then be invisible in SAVED DESIGNS — an invisible-loss trap.
+    const nameCheck = validateDesignName(designName);
+    if (!nameCheck.ok) { await alertDialog(nameCheck.reason + '\n\nRename the design first.', 'Invalid design name'); return; }
     setSaveStatus('saving');
     const res = await saveDesign(workspace, designName, { scene, history, future, updatedAt: Date.now(), versions, currentVersionId });
     if (res.ok) {
@@ -922,7 +936,9 @@ export default function App() {
   const handleSaveAs = useCallback(async () => {
     const name = await promptDialog('Save as new design name:', designName + ' copy', 'Save As');
     if (!name || !name.trim()) return;
-    const trimmed = name.trim();
+    const nameCheck = validateDesignName(name);
+    if (!nameCheck.ok) { await alertDialog(nameCheck.reason, 'Invalid design name'); return; }
+    const trimmed = nameCheck.name;
     if (savedList.includes(trimmed)) {
       const ok = await confirmDialog(`"${trimmed}" already exists. Overwrite?`, 'Overwrite design');
       if (!ok) return;
@@ -946,13 +962,23 @@ export default function App() {
   }, [workspace, designName, scene, history, future, versions, currentVersionId, savedList, refreshSavedList, promptDialog, confirmDialog, alertDialog, mirrorWorkspaceToFileIfLinked]);
 
 
+  // Latest-value ref for flushCurrentBeforeSwitch — it's declared BELOW these
+  // callbacks (const + TDZ: naming it in their dep arrays would throw at
+  // definition time; the CLAUDE.md ref pattern breaks the cycle). Assigned
+  // right after the flush's definition; the callbacks only dereference it at
+  // CLICK time, long after initialization.
+  const flushBeforeSwitchRef = useRef(null);
+
   const handleNew = useCallback(async () => {
-    if (saveStatus === 'unsaved') {
-      const ok = await confirmDialog('Discard unsaved changes and start a new design?', 'New design');
-      if (!ok) return;
-    }
+    // Same contract as switching designs: a stored design's working state is
+    // FLUSHED silently (it's there when you come back); only a never-saved
+    // scratch design asks before discarding. The old gate-on-saveStatus
+    // discard confirm could silently drop autosave-raced edits.
+    if (flushBeforeSwitchRef.current && !(await flushBeforeSwitchRef.current('a new design'))) return;
     const name = await promptDialog('New design name:', 'Untitled', 'New design');
     if (!name || !name.trim()) return;
+    const nameCheck = validateDesignName(name);
+    if (!nameCheck.ok) { await alertDialog(nameCheck.reason, 'Invalid design name'); return; }
     const fresh = makeDefaultScene();
     setScene(fresh);
     setHistory([]);
@@ -960,47 +986,21 @@ export default function App() {
     setVersions([]);
     setCurrentVersionId(null);
     setSelection({ ids: new Set(), primary: null });
-    setDesignName(name.trim());
-    await setActiveDesignName(workspace, name.trim());
+    setDesignName(nameCheck.name);
+    await setActiveDesignName(workspace, nameCheck.name);
     setSaveStatus('unsaved');
-  }, [workspace, saveStatus, setSelection, confirmDialog, promptDialog]);
+  }, [workspace, setSelection, promptDialog, alertDialog]);
 
   // New BLANK design: completely empty scene (no default ring/electrode
   // example), but keep the default layer stack so add-tools work without
-  // setup. Offers to save the current design first if it has unsaved
-  // changes — saving uses the current name (or prompts for one if it's
-  // still "Untitled"). If the user declines to save, we still proceed.
+  // setup. The current design is flushed to storage first (same contract
+  // as design switches) — this replaced a confusing type-yes/no prompt.
   const handleNewBlank = useCallback(async () => {
-    if (saveStatus === 'unsaved') {
-      const action = await promptDialog(
-        'Save current design first?\n\nType "yes" to save it, "no" to discard, or cancel.',
-        'yes',
-        'New blank design'
-      );
-      if (action === null) return; // cancelled
-      const ans = (action || '').trim().toLowerCase();
-      if (ans === 'yes' || ans === 'y') {
-        // Save current design under its current name. If unnamed, prompt.
-        let nameToSave = designName;
-        if (!nameToSave || !nameToSave.trim() || nameToSave.trim() === 'Untitled') {
-          const proposed = await promptDialog('Save current design as:', designName || 'Untitled', 'Save current');
-          if (!proposed || !proposed.trim()) return;
-          nameToSave = proposed.trim();
-        }
-        const payload = { scene, history, future, savedAt: Date.now(), versions, currentVersionId };
-        const res = await saveDesign(workspace, nameToSave, payload);
-        if (!res.ok) {
-          console.error('Save-before-new failed:', res);
-          await alertDialog('Failed to save current design. Aborting.\n\n' + describeSaveFailure(res), 'Save error');
-          return;
-        }
-      } else if (ans !== 'no' && ans !== 'n') {
-        // Anything other than yes/no — treat as cancel for safety.
-        return;
-      }
-    }
+    if (flushBeforeSwitchRef.current && !(await flushBeforeSwitchRef.current('a new blank design'))) return;
     const name = await promptDialog('New blank design name:', 'Untitled', 'New blank design');
     if (!name || !name.trim()) return;
+    const nameCheck = validateDesignName(name);
+    if (!nameCheck.ok) { await alertDialog(nameCheck.reason, 'Invalid design name'); return; }
     const fresh = makeBlankScene();
     setScene(fresh);
     setHistory([]);
@@ -1008,10 +1008,10 @@ export default function App() {
     setVersions([]);
     setCurrentVersionId(null);
     setSelection({ ids: new Set(), primary: null });
-    setDesignName(name.trim());
-    await setActiveDesignName(workspace, name.trim());
+    setDesignName(nameCheck.name);
+    await setActiveDesignName(workspace, nameCheck.name);
     setSaveStatus('unsaved');
-  }, [workspace, saveStatus, designName, scene, history, future, versions, currentVersionId, setSelection, alertDialog, confirmDialog, promptDialog]);
+  }, [workspace, setSelection, alertDialog, promptDialog]);
 
   // ----- Single-design export / import (geometry only) -----
   // Export JUST the current canvas (the scene: params, components, snaps,
@@ -1099,6 +1099,10 @@ export default function App() {
       'Save failed',
     );
   }, [workspace, confirmDialog, mirrorWorkspaceToFileIfLinked]);
+  // Keep the earlier-declared ref pointing at the latest flush (handleNew /
+  // handleNewBlank / handleChangeWorkspace are declared before this const —
+  // see the TDZ note at flushBeforeSwitchRef).
+  flushBeforeSwitchRef.current = flushCurrentBeforeSwitch;
 
   const handleLoad = useCallback(async (name) => {
     if (name === designName) return; // already on this design — nothing to do
@@ -1150,12 +1154,33 @@ export default function App() {
           try { return JSON.stringify(d.scene) !== JSON.stringify(cur.scene); } catch { return false; }
         })();
     if (targetModified) {
+      // RESCUE SNAPSHOT instead of bare discard: the unsnapshotted working
+      // state used to have exactly one barrier — a danger confirm — after
+      // which the 2s autosave overwrote the ONLY copy in storage. Now the
+      // default path saves those edits as an automatic snapshot first, so
+      // loading an old version is always reversible (one extra versions[]
+      // entry). Bare discard remains only as the fallback if the rescue
+      // write itself fails.
       const subject = sameDesign ? 'Your working state' : `Design "${name}"`;
       const ok = await confirmDialog(
-        `${subject} has unsnapshotted edits ("current"). Loading this version will REPLACE them.\n\nDiscard those edits and load this version?`,
-        'Load version', { confirmLabel: 'Discard & load', confirmTone: 'danger' },
+        `${subject} has unsnapshotted edits ("current").\n\nThose edits will be saved as an automatic rescue snapshot first, then this version will load. Nothing is lost.`,
+        'Load version', { confirmLabel: 'Snapshot & load' },
       );
       if (!ok) return;
+      const rescueScene = sameDesign ? sceneRef.current : d.scene;
+      const rescue = makeVersion(rescueScene, `auto: before loading v${v.versionNumber}`, d.versions);
+      const newVersions = [rescue, ...(Array.isArray(d.versions) ? d.versions : [])];
+      const saveRes = await saveDesign(workspace, name, { ...d, versions: newVersions, updatedAt: Date.now() });
+      if (saveRes.ok) {
+        d.versions = newVersions; // the state setters below pick this up
+      } else {
+        console.error('Rescue-snapshot save failed:', saveRes);
+        const proceed = await confirmDialog(
+          `Could not save the rescue snapshot (${saveRes.message || 'storage error'}).\n\nDiscard the edits and load this version anyway?`,
+          'Snapshot failed', { confirmLabel: 'Discard & load', confirmTone: 'danger' },
+        );
+        if (!proceed) return;
+      }
     }
     setScene(normalizeScene(v.scene));
     setHistory([]);
@@ -1305,22 +1330,33 @@ export default function App() {
   }, [designName, versions, currentVersionId, currentIsModified]);
 
   const handleDeleteDesign = useCallback(async (name) => {
-    const ok = await confirmDialog(`Delete "${name}"? This cannot be undone.`, 'Delete design');
+    const ok = await confirmDialog(`Delete "${name}"? This cannot be undone.`, 'Delete design', { confirmLabel: 'Delete', confirmTone: 'danger' });
     if (!ok) return;
     await deleteDesignStored(workspace, name);
     // Drop the cached versions so a deleted design leaves no orphaned chip.
     setVersionsByDesign(prev => { if (!prev[name]) return prev; const next = { ...prev }; delete next[name]; return next; });
     await refreshSavedList();
     if (name === designName) {
-      // Stayed on the now-deleted design. Mark as unsaved so user can re-save under a new name.
+      // Stayed on the now-deleted design. Mark as unsaved so user can re-save
+      // under a new name — and CLEAR the active pointer, which still named the
+      // deleted design: a reload would land on the default scene while the
+      // pointer dangled. (The beforeunload guard protects the on-screen copy.)
       setSaveStatus('unsaved');
+      try { await setActiveDesignName(workspace, ''); } catch { /* pointer is advisory */ }
     }
   }, [workspace, designName, refreshSavedList, confirmDialog]);
 
   const handleRenameDesign = useCallback(async (oldName, newName) => {
     if (!newName || !newName.trim() || newName === oldName) return;
-    const trimmed = newName.trim();
+    const nameCheck = validateDesignName(newName);
+    if (!nameCheck.ok) { await alertDialog(nameCheck.reason, 'Rename failed'); return; }
+    const trimmed = nameCheck.name;
     if (savedList.includes(trimmed)) { await alertDialog('A design with that name already exists.', 'Rename failed'); return; }
+    // Kill any pending autosave for the OLD name: its existence probe could
+    // pass before the delete below, then its write lands after it — recreating
+    // the old key with the newest scene while the new key holds the pre-rename
+    // payload (two divergent copies).
+    if (autosaveTimerRef.current) { clearTimeout(autosaveTimerRef.current); autosaveTimerRef.current = null; }
     const d = await loadDesign(workspace, oldName);
     if (!d) return;
     // Write the new name FIRST, and only delete the old one if that write
@@ -1625,12 +1661,17 @@ export default function App() {
       try { exists = (await listSavedDesigns(workspace)).includes(name); } catch { exists = false; }
       if (!name || !exists) return; // brand-new/unsaved scratch design, or deleted — skip
       setSaveStatus('saving');
+      // Capture the edit counter BEFORE the write: if another edit lands
+      // while the save is in flight, we must NOT mark 'saved' at completion
+      // (the stored copy is already stale) — leaving 'unsaved' re-arms the
+      // debounce so the newer edit gets its own autosave.
+      const seqAtStart = editSeqRef.current;
       // Preserve versions[] and currentVersionId through autosave
       // too — otherwise the first autosave after a snapshot would
       // silently drop history / the current-version pointer.
       const res = await saveDesign(workspace, name, { scene, history, future, updatedAt: Date.now(), versions, currentVersionId });
       if (res.ok) {
-        setSaveStatus('saved');
+        setSaveStatus(editSeqRef.current === seqAtStart ? 'saved' : 'unsaved');
         setLastAutoSavedAt(Date.now());
         // Mirror the workspace bundle to the linked file (if any) — autosave
         // takes the same path as a manual save here.
@@ -1647,6 +1688,57 @@ export default function App() {
       if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     };
   }, [workspace, scene, history, future, versions, currentVersionId, designName, saveStatus, mirrorWorkspaceToFileIfLinked]);
+
+  // ----- Unload guard + emergency flush -----
+  // Closing/refreshing the tab within the 2s autosave debounce silently
+  // dropped those edits (and ALL work on a never-saved design). Two nets:
+  //   • beforeunload: browser "unsaved changes" prompt while edits are not
+  //     yet in storage. Keyed on saveStatus ('unsaved'/'saving'), NOT
+  //     isDirty — a scene that merely drifted from its snapshot but was
+  //     autosaved is already persisted, and prompting there would cry wolf
+  //     on every close.
+  //   • pagehide / visibilitychange→hidden: fire-and-forget saveDesign from
+  //     the latest-value refs (IDB transactions started before unload
+  //     usually commit). Existence-gated like the autosave so a scratch
+  //     design never silently creates a storage key.
+  const saveStatusRef = useRef(saveStatus);
+  saveStatusRef.current = saveStatus;
+  const savedListRef = useRef(savedList);
+  savedListRef.current = savedList;
+  const workspaceRef = useRef(workspace);
+  workspaceRef.current = workspace;
+  useEffect(() => {
+    const unsavedNow = () => saveStatusRef.current === 'unsaved' || saveStatusRef.current === 'saving';
+    const onBeforeUnload = (e) => {
+      if (!unsavedNow()) return;
+      e.preventDefault();
+      e.returnValue = ''; // required by some Chromium versions to show the prompt
+    };
+    const flushNow = () => {
+      if (!unsavedNow()) return;
+      const name = (designNameRef.current || '').trim();
+      if (!name || !savedListRef.current.includes(name)) return; // never-saved scratch — no storage home
+      const seqAtStart = editSeqRef.current;
+      saveDesign(workspaceRef.current, name, {
+        scene: sceneRef.current, history: historyRef.current, future: futureRef.current,
+        updatedAt: Date.now(), versions: versionsRef.current, currentVersionId: currentVersionIdRef.current,
+      }).then((res) => {
+        // Same in-flight-edit race guard as the autosave: only mark 'saved'
+        // if no edit landed while the write was in flight.
+        if (res && res.ok && editSeqRef.current === seqAtStart) setSaveStatus('saved');
+      }).catch(() => {});
+    };
+    const onPageHide = () => flushNow();
+    const onVisibility = () => { if (document.visibilityState === 'hidden') flushNow(); };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    window.addEventListener('pagehide', onPageHide);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('beforeunload', onBeforeUnload);
+      window.removeEventListener('pagehide', onPageHide);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, []);
 
   // Tick to update "saved Xs ago" label every 5s
   const [tickNow, setTickNow] = useState(Date.now());
@@ -4130,11 +4222,12 @@ export default function App() {
       await alertDialog('Workspace name cannot contain ":".', 'Invalid name');
       return;
     }
-    if (saveStatus === 'unsaved') {
-      const ok = await confirmDialog(`Discard unsaved changes and switch workspace?`, 'Switch workspace');
-      if (!ok) return;
-    }
-    if (trimmed === workspace) return;
+    if (trimmed === workspace) { setShowWorkspaceDialog(false); return; }
+    // Same contract as every design switch: FLUSH the current design's working
+    // state instead of discarding it. The old gate-on-saveStatus discard both
+    // threw away flushable work and skipped the prompt entirely when an
+    // autosave race had mislabeled the status 'saved'.
+    if (!(await flushCurrentBeforeSwitch(`workspace "${trimmed || 'default'}"`))) return;
     setWorkspace(trimmed);
     await setStoredWorkspace(trimmed);
     setShowWorkspaceDialog(false);

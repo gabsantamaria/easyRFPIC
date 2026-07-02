@@ -19,7 +19,9 @@ import {
   loadDesign,
   saveDesign,
   deleteDesignStored,
+  sanitizeDesignName,
 } from './workspace.js';
+import { listStacks, loadStack, saveStack, deleteStack } from './stacks.js';
 
 // ----- Library storage -----
 export async function listLibraryItems(workspace) {
@@ -156,7 +158,10 @@ export async function importDesign(workspace, bundle, opts = {}) {
   if (!bundle.payload || typeof bundle.payload !== 'object') {
     throw new Error('Bundle is missing the design payload');
   }
-  const targetName = opts.name || bundle.name || 'Imported design';
+  // Sanitize the name so an imported design can never land on a reserved key
+  // (leading '_') or a workspace-shadowing name (contains ':') — those save
+  // fine but vanish from every list.
+  const targetName = sanitizeDesignName(opts.name || bundle.name || 'Imported design');
   const mode = opts.mode || 'overwrite';
   const existing = new Set(await listSavedDesigns(workspace));
   let finalName = targetName;
@@ -172,8 +177,12 @@ export async function importDesign(workspace, bundle, opts = {}) {
       replaced = true; // overwrite
     }
   }
-  if (!await saveDesign(workspace, finalName, bundle.payload)) {
-    throw new Error('Save failed');
+  // saveDesign returns a STRUCTURED result ({ ok, ... }) which is always
+  // truthy — checking the object itself reported failed writes as success
+  // (a real bug: quota failures showed "Import complete" with nothing saved).
+  const res = await saveDesign(workspace, finalName, bundle.payload);
+  if (!res || !res.ok) {
+    throw new Error(`Save failed: ${res && res.message ? res.message : 'storage error'}`);
   }
   return { name: finalName, replaced };
 }
@@ -201,6 +210,15 @@ export async function exportWorkspace(workspace) {
     const d = await loadCellDef(workspace, n);
     if (d) cells[n] = d;
   }
+  // Stack library too — it lives under its own prefix (stacks.js), and
+  // omitting it meant a workspace bundle restored on a new machine lost
+  // every saved stack (designs keep their inline scene.stack, but the
+  // curated library was gone).
+  const stacks = {};
+  for (const n of await listStacks(workspace)) {
+    const d = await loadStack(workspace, n);
+    if (d) stacks[n] = d;
+  }
   return {
     format: 'photonic_layout_workspace',
     version: 1,
@@ -210,41 +228,80 @@ export async function exportWorkspace(workspace) {
     library: lib,
     libraryArchive: archive,
     cells,
+    stacks,
   };
 }
 
 // Write a bundle into a workspace. mode = 'merge' (skip existing) | 'overwrite' | 'replace' (wipe first).
-// Returns counts and a list of skipped names.
+// Returns counts, a list of skipped names, and a list of failed writes.
+//
+// SAFETY (replace mode): the old implementation DELETED every existing key
+// FIRST, then wrote the bundle — so a quota/serialize failure mid-import
+// destroyed the old workspace while (thanks to the truthy-object bug below)
+// still reporting N items imported. Now replace mode WRITES the incoming
+// items first (overwriting collisions in place) and only after all writes
+// succeed deletes the leftovers not present in the bundle. Any write failure
+// aborts the prune — worst case is a merged superset, never a wiped store.
+//
+// COUNTS: saveDesign returns a structured { ok, ... } result (always truthy);
+// `if (await saveDesign(...))` counted every failure as a success. All saves
+// are now checked via a truthiness-safe ok() that accepts both structured
+// results and legacy booleans (saveLibraryItem & co return true/false).
 export async function importWorkspace(workspace, bundle, mode) {
   if (!bundle || bundle.format !== 'photonic_layout_workspace') {
     throw new Error('Not a workspace bundle (missing or wrong "format" field)');
   }
-  const counts = { designs: 0, library: 0, archive: 0, cells: 0, skipped: [] };
-  if (mode === 'replace') {
-    for (const n of await listSavedDesigns(workspace)) await deleteDesignStored(workspace, n);
-    for (const n of await listLibraryItems(workspace)) await deleteLibraryItem(workspace, n);
-    for (const n of await listArchivedLibraryItems(workspace)) await deleteArchivedLibraryItem(workspace, n);
-    for (const n of await listCellDefs(workspace)) await deleteCellDef(workspace, n);
-  }
+  const counts = { designs: 0, library: 0, archive: 0, cells: 0, stacks: 0, skipped: [], failed: [] };
+  const ok = (res) => (res && typeof res === 'object' ? !!res.ok : !!res);
   const existingDesigns = new Set(await listSavedDesigns(workspace));
   const existingLib = new Set(await listLibraryItems(workspace));
   const existingArch = new Set(await listArchivedLibraryItems(workspace));
   const existingCells = new Set(await listCellDefs(workspace));
+  const existingStacks = new Set(await listStacks(workspace));
+  const put = async (kind, n, save, bump) => {
+    let res = false;
+    try { res = await save(); } catch { res = false; }
+    if (ok(res)) bump();
+    else counts.failed.push(`${kind}:${n}`);
+  };
   for (const [n, payload] of Object.entries(bundle.designs || {})) {
     if (mode === 'merge' && existingDesigns.has(n)) { counts.skipped.push(`design:${n}`); continue; }
-    if (await saveDesign(workspace, n, payload)) counts.designs++;
+    await put('design', n, () => saveDesign(workspace, n, payload), () => counts.designs++);
   }
   for (const [n, payload] of Object.entries(bundle.library || {})) {
     if (mode === 'merge' && existingLib.has(n)) { counts.skipped.push(`library:${n}`); continue; }
-    if (await saveLibraryItem(workspace, n, payload)) counts.library++;
+    await put('library', n, () => saveLibraryItem(workspace, n, payload), () => counts.library++);
   }
   for (const [n, payload] of Object.entries(bundle.libraryArchive || {})) {
     if (mode === 'merge' && existingArch.has(n)) { counts.skipped.push(`archive:${n}`); continue; }
-    if (await saveArchivedLibraryItem(workspace, n, payload)) counts.archive++;
+    await put('archive', n, () => saveArchivedLibraryItem(workspace, n, payload), () => counts.archive++);
   }
   for (const [n, payload] of Object.entries(bundle.cells || {})) {
     if (mode === 'merge' && existingCells.has(n)) { counts.skipped.push(`cell:${n}`); continue; }
-    if (await saveCellDef(workspace, n, payload)) counts.cells++;
+    await put('cell', n, () => saveCellDef(workspace, n, payload), () => counts.cells++);
+  }
+  for (const [n, payload] of Object.entries(bundle.stacks || {})) {
+    if (mode === 'merge' && existingStacks.has(n)) { counts.skipped.push(`stack:${n}`); continue; }
+    await put('stack', n, () => saveStack(workspace, n, payload), () => counts.stacks++);
+  }
+  if (mode === 'replace') {
+    if (counts.failed.length > 0) {
+      // Do NOT prune — a partial import must never delete data the bundle
+      // failed to replace. The caller surfaces counts.failed to the user.
+      return counts;
+    }
+    const keep = {
+      design: new Set(Object.keys(bundle.designs || {})),
+      library: new Set(Object.keys(bundle.library || {})),
+      archive: new Set(Object.keys(bundle.libraryArchive || {})),
+      cell: new Set(Object.keys(bundle.cells || {})),
+      stack: new Set(Object.keys(bundle.stacks || {})),
+    };
+    for (const n of await listSavedDesigns(workspace)) if (!keep.design.has(n)) await deleteDesignStored(workspace, n);
+    for (const n of await listLibraryItems(workspace)) if (!keep.library.has(n)) await deleteLibraryItem(workspace, n);
+    for (const n of await listArchivedLibraryItems(workspace)) if (!keep.archive.has(n)) await deleteArchivedLibraryItem(workspace, n);
+    for (const n of await listCellDefs(workspace)) if (!keep.cell.has(n)) await deleteCellDef(workspace, n);
+    for (const n of await listStacks(workspace)) if (!keep.stack.has(n)) await deleteStack(workspace, n);
   }
   return counts;
 }
