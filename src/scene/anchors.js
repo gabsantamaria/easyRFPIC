@@ -61,10 +61,16 @@ export function anchorLocalRotated(anchorName, w, h, rotDeg = 0) {
 }
 
 // Numeric value of a component's first-class `rotation` field (degrees,
-// CCW). Only rect / circle / ellipse / polygon support it (matching the
-// seeding in expandTransforms); booleans and path-like kinds return 0.
-// Absent / blank / '0' → 0.
-const ROTATABLE_KINDS = new Set(['rect', 'circle', 'ellipse', 'polygon']);
+// CCW). Only rect / circle / ellipse / polygon / bridge support it
+// (matching the seeding in expandTransforms); booleans and path-like
+// kinds return 0. Absent / blank / '0' → 0.
+// KEEP THIS SET IDENTICAL to HFSS_ROTATABLE_KINDS in hfss-native.js —
+// computeParametricPositions wraps snap-chain offsets in the rotation
+// matrix for exactly those kinds, so a kind rotatable in HFSS but not
+// here makes the canvas/solver place a snapped child at the UNROTATED
+// anchor while HFSS builds it at the ROTATED one (a real bridge bug we
+// shipped and fixed: solver said (15, 0), HFSS built (0, 15)).
+const ROTATABLE_KINDS = new Set(['rect', 'circle', 'ellipse', 'polygon', 'bridge']);
 export function compRotationDeg(comp, paramValues) {
   if (!comp) return 0;
   if (!ROTATABLE_KINDS.has(comp.kind || 'rect')) return 0;

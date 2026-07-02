@@ -40,10 +40,16 @@ scene = {
 ```js
 // Primitive shapes:
 { id, kind, layer, cx, cy, w, h, cutouts[], transforms[], consumedBy?,
-  rotation?,   // OPTIONAL expression (degrees, CCW) on rect/circle/ellipse/polygon.
-               // Absent or '0' = none. Seeds the base instance's rotation in
-               // expandTransforms; chain rotates ADD to it. Anchors/snap dots
-               // rotate with the shape (anchorWorld / anchorLocalRotated).
+  rotation?,   // OPTIONAL expression (degrees, CCW) on rect/circle/ellipse/
+               // polygon/bridge. Absent or '0' = none. Seeds the base
+               // instance's rotation in expandTransforms; chain rotates ADD
+               // to it. Anchors/snap dots rotate with the shape (anchorWorld
+               // / anchorLocalRotated). CRITICAL: anchors.js ROTATABLE_KINDS
+               // must stay IDENTICAL to hfss-native's HFSS_ROTATABLE_KINDS —
+               // a kind in only one set makes the solver and the HFSS
+               // parametric snap chain disagree about where a snapped child
+               // sits (bridge was missing app-side: canvas placed the child
+               // at the unrotated anchor while HFSS built it rotated).
   zOffset?,    // OPTIONAL expression (µm) on rect/circle/ellipse/polygon/
                // polyline/polyshape: shifts the part's Z placement relative
                // to its layer (HFSS-parametric; no canvas visual in top view).

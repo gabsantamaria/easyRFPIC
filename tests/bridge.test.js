@@ -549,3 +549,46 @@ describe('bridge landing pads (padLength)', () => {
     expect(spanX).toBeCloseTo(30 + 2 * 5, 3); // L + 2P
   });
 });
+
+// ── Rotated-bridge anchors: canvas/solver ↔ HFSS parity ────────────────
+
+describe('rotated bridge anchors (ROTATABLE_KINDS parity with HFSS)', () => {
+  it('anchorWorld rotates bridge anchors with the shape', async () => {
+    const { anchorWorld, compRotationDeg } = await import('../src/scene/anchors.js');
+    const br = { id: 'b', kind: 'bridge', cx: 0, cy: 0, w: '(30)', h: '(10)', rotation: '90' };
+    expect(compRotationDeg(br, {})).toBe(90);
+    const e = anchorWorld(br, 'E', {});
+    // 30-long span rotated 90° CCW → E anchor lands at (0, +15).
+    expect(e.x).toBeCloseTo(0, 9);
+    expect(e.y).toBeCloseTo(15, 9);
+  });
+
+  it('a child snapped to a rotated bridge solves to the ROTATED anchor and MATCHES the HFSS parametric expression', async () => {
+    const { computeParametricPositions } = await import('../src/export/hfss-native.js');
+    const { evalExpr } = await import('../src/scene/params.js');
+    const s = makeBlankScene();
+    s.components.push({ id: 'br', kind: 'bridge', cx: 0, cy: 0, length: '30', width: '10', height: '3', rotation: '90' });
+    s.components.push({ id: 'child', kind: 'rect', layer: 'electrode', cx: 50, cy: 50, w: '4', h: '4', cutouts: [], transforms: [] });
+    const scene = normalizeScene(s);
+    scene.snaps.push({ id: 'sn', from: { compId: 'br', anchor: 'E' }, to: { compId: 'child', anchor: 'C' }, dx: '0', dy: '0' });
+    const pv = resolveParams(scene.params).values;
+    const solved = solveLayout(scene.components, scene.snaps, pv);
+    const child = solved.find(c => c.id === 'child');
+    // Rotated E anchor of the 30-µm span = (0, +15) — NOT the unrotated (15, 0).
+    expect(child.cx).toBeCloseTo(0, 6);
+    expect(child.cy).toBeCloseTo(15, 6);
+    // The HFSS parametric position must evaluate to the SAME point (the
+    // exporter wraps the anchor offset in the rotation matrix). Make the
+    // HFSS expr JS-evaluable: strip 'um', turn 'Ndeg' into radians.
+    const pp = computeParametricPositions(solved, scene.snaps, pv);
+    expect(pp.child).toBeTruthy();
+    const evalHfss = (expr) => evalExpr(
+      expr.replace(/um/g, '').replace(/(\d+(?:\.\d+)?)deg/g, '($1*pi/180)'),
+      pv,
+    );
+    expect(evalHfss(pp.child.cxExpr)).toBeCloseTo(child.cx, 6);
+    expect(evalHfss(pp.child.cyExpr)).toBeCloseTo(child.cy, 6);
+    // And the expression is genuinely PARAMETRIC in the rotation.
+    expect(pp.child.cxExpr).toContain('cos');
+  });
+});
