@@ -69,6 +69,11 @@ import {
   ensureWritePermission, writeBundleToHandle,
 } from './storage/file-handle.js';
 import {
+  dirPickerPresent, getWorkspaceDirHandle, setWorkspaceDirHandle,
+  queryDirPermission, requestDirPermission, mirrorDesignToDir,
+  writeGitSyncScript, dirHasGitRepo,
+} from './storage/dir-mirror.js';
+import {
   listStacks, loadStack, saveStack, deleteStack,
 } from './storage/stacks.js';
 import { HoverTooltip } from './ui/HoverTooltip.jsx';
@@ -712,14 +717,44 @@ export default function App() {
   // UI should reflect this, even though the API exists on `window`.
   const [fsBlockedAtRuntime, setFsBlockedAtRuntime] = useState(false);
   const fsLinkAvailable = fsAccessAPIPresent && !fsBlockedAtRuntime;
-  // Reload the linked handle whenever the active workspace changes.
+  // Directory link (git-ready folder mirror — see src/storage/dir-mirror.js).
+  const [workspaceDirHandle, setWorkspaceDirHandle_] = useState(null);
+  const [workspaceDirLabel, setWorkspaceDirLabel] = useState('');
+  const [dirHasGit, setDirHasGit] = useState(false);
+  // True when a persisted disk link (file OR folder) exists but its
+  // permission downgraded to 'prompt' after a reload — mirroring is then
+  // silently dead until a user GESTURE re-grants it (requestPermission is
+  // auto-denied without one). Drives the one-click re-authorize banner;
+  // the old behavior was a console.warn the user never saw while the UI
+  // still showed the link as live.
+  const [mirrorNeedsReauth, setMirrorNeedsReauth] = useState(false);
+  const workspaceDirHandleRef = useRef(null);
+  workspaceDirHandleRef.current = workspaceDirHandle;
+
+  // Reload the linked handles whenever the active workspace changes, and
+  // probe their permissions (query only — no prompting here).
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const h = await getWorkspaceHandle(workspace);
+      const dh = await getWorkspaceDirHandle(workspace);
       if (cancelled) return;
       setWorkspaceHandle(h || null);
       setWorkspaceFileLabel(h?.name || '');
+      setWorkspaceDirHandle_(dh || null);
+      setWorkspaceDirLabel(dh?.name || '');
+      let needs = false;
+      try {
+        if (h && (await h.queryPermission({ mode: 'readwrite' })) !== 'granted') needs = true;
+      } catch { /* treat as fine — write path re-checks */ }
+      if (dh) {
+        const p = await queryDirPermission(dh);
+        if (p !== 'granted') needs = true;
+        setDirHasGit(p === 'granted' ? await dirHasGitRepo(dh) : false);
+      } else {
+        setDirHasGit(false);
+      }
+      if (!cancelled) setMirrorNeedsReauth(needs);
     })();
     return () => { cancelled = true; };
   }, [workspace]);
@@ -1146,14 +1181,41 @@ export default function App() {
     // so their SAVED DESIGNS list / version caches refresh instead of holding
     // stale state (BroadcastChannel does NOT deliver to the posting tab).
     try { saveBroadcastChannel?.postMessage({ type: 'saved', workspace: workspace || '' }); } catch { /* best-effort */ }
+    // Folder mirror (git-ready): the ACTIVE design's current.json + any
+    // snapshot files not yet on disk (append-only) + commit_msg + manifest.
+    // GRANTED-only: no permission prompting outside a user gesture —
+    // otherwise Chromium auto-denies and the browser may throttle future
+    // prompts. A downgraded permission raises the re-authorize banner.
+    const dh = workspaceDirHandleRef.current;
+    if (dh) {
+      try {
+        const p = await queryDirPermission(dh);
+        if (p === 'granted') {
+          const name = (designNameRef.current || '').trim();
+          if (name) {
+            mirrorDesignToDir(dh, workspace, name, {
+              scene: sceneRef.current,
+              versions: versionsRef.current,
+              currentVersionId: currentVersionIdRef.current,
+            }).then((r) => { if (!r.ok) console.warn('Folder mirror failed:', r.error); });
+          }
+        } else {
+          setMirrorNeedsReauth(true);
+        }
+      } catch (e) {
+        console.warn('Folder mirror error:', e);
+      }
+    }
     if (!workspaceHandle) return;
     try {
       const bundle = await exportWorkspace(workspace);
       const ok = await writeBundleToHandle(workspaceHandle, bundle);
       if (!ok) {
-        // The handle exists but write failed — likely permission revoked
-        // or the user moved the file. Surface a non-blocking warning.
-        console.warn('Linked workspace file is unwritable; the link may need to be re-established.');
+        // The handle exists but write failed — likely permission revoked or
+        // the user moved the file. Raise the re-authorize banner (the old
+        // console.warn was invisible while the UI showed the link as live).
+        setMirrorNeedsReauth(true);
+        console.warn('Linked workspace file is unwritable; the link may need to be re-authorized.');
       }
     } catch (e) {
       console.warn('Workspace mirror failed:', e);
@@ -4375,6 +4437,90 @@ export default function App() {
     setWorkspaceFileLabel('');
   };
 
+  // ----- Folder link (git-ready mirror) -----
+  // Link the workspace to a DIRECTORY: every save mirrors the active design
+  // as individual files (designs/<name>/current.json + append-only
+  // versions/vNNN_<id>.json + .photonic/commit_msg) — a layout made for git.
+  // The browser cannot run git; the generated sync_git.sh (or the user's own
+  // tooling) does the committing. See src/storage/dir-mirror.js.
+  const handleLinkWorkspaceToDir = async () => {
+    if (!dirPickerPresent) {
+      await alertDialog('Your browser does not support folder linking (the File System Access API directory picker). Use Chrome or Edge.', 'Not supported');
+      return;
+    }
+    let handle;
+    try {
+      handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+    } catch (e) {
+      if (e?.name === 'AbortError') return;
+      const msg = String(e?.message || '');
+      if (e?.name === 'SecurityError' || /Cross[- ]origin|sub[- ]?frames?|sandboxed?/i.test(msg)) {
+        setFsBlockedAtRuntime(true);
+        await alertDialog('Folder linking is blocked in this browsing context (likely a sandboxed iframe).', 'Linking unavailable here');
+        return;
+      }
+      await alertDialog(`Could not open folder picker: ${msg}`, 'Error');
+      return;
+    }
+    await setWorkspaceDirHandle(workspace, handle);
+    setWorkspaceDirHandle_(handle);
+    setWorkspaceDirLabel(handle.name || '');
+    setMirrorNeedsReauth(false);
+    // Initial sync (we're inside a user gesture): active design + git helper.
+    const name = (designNameRef.current || '').trim();
+    if (name) {
+      const r = await mirrorDesignToDir(handle, workspace, name, {
+        scene: sceneRef.current, versions: versionsRef.current, currentVersionId: currentVersionIdRef.current,
+      });
+      if (!r.ok) await alertDialog('Linked the folder, but the initial write failed. Permission may have been denied.', 'Warning');
+    }
+    await writeGitSyncScript(handle);
+    const hasGit = await dirHasGitRepo(handle);
+    setDirHasGit(hasGit);
+    await alertDialog(
+      `Folder linked. Every save now mirrors the active design into "${handle.name}":\n\n` +
+      `  designs/<name>/current.json      — working state\n` +
+      `  designs/<name>/versions/…        — one immutable file per snapshot\n` +
+      `  .photonic/commit_msg             — latest snapshot description\n` +
+      `  sync_git.sh                      — run it to git add/commit/push\n\n` +
+      (hasGit
+        ? 'A git repo was detected in the folder — run "sh sync_git.sh" after taking snapshots (or hook it to a file watcher; the script header shows an fswatch one-liner).'
+        : 'No git repo detected yet. Run "git init" in the folder once, then "sh sync_git.sh" commits every snapshot with its description as the message.'),
+      'Folder linked'
+    );
+  };
+
+  const handleUnlinkWorkspaceDir = async () => {
+    if (!workspaceDirHandle) return;
+    const ok = await confirmDialog(
+      `Unlink workspace "${workspace || 'default'}" from folder "${workspaceDirLabel || ''}"? Files on disk are kept; future saves will no longer mirror there.`,
+      'Unlink folder'
+    );
+    if (!ok) return;
+    await setWorkspaceDirHandle(workspace, null);
+    setWorkspaceDirHandle_(null);
+    setWorkspaceDirLabel('');
+    setDirHasGit(false);
+  };
+
+  // One-click, GESTURE-SCOPED permission re-grant for both disk links (a
+  // reload downgrades persisted handles to 'prompt' and non-gesture
+  // requestPermission is auto-denied — mirroring silently died before).
+  const handleReauthorizeMirrors = async () => {
+    let ok = true;
+    try {
+      if (workspaceHandle) ok = (await ensureWritePermission(workspaceHandle)) && ok;
+    } catch { ok = false; }
+    if (workspaceDirHandle) ok = (await requestDirPermission(workspaceDirHandle)) && ok;
+    if (ok) {
+      setMirrorNeedsReauth(false);
+      if (workspaceDirHandle) setDirHasGit(await dirHasGitRepo(workspaceDirHandle));
+      mirrorWorkspaceToFileIfLinked(); // catch up the disk state immediately
+    } else {
+      await alertDialog('Permission was not granted — the disk mirror stays paused. Click the banner again to retry.', 'Re-authorization failed');
+    }
+  };
+
   // Import a workspace from a JSON file. Tries showOpenFilePicker first (so
   // the chosen file becomes a candidate for linking after import), with a
   // hidden <input type="file"> fallback for Safari/Firefox AND for sandboxed
@@ -5628,6 +5774,16 @@ export default function App() {
           Read-only — this workspace is open in another tab. Edits here won't be saved. Close the other tab to take over.
         </div>
       )}
+      {mirrorNeedsReauth && tabRole !== 'readonly' && (
+        <button
+          onClick={handleReauthorizeMirrors}
+          className="w-full px-4 py-1.5 text-center text-xs font-medium border-b border-cyan-700 hover:brightness-110"
+          style={{ background: 'rgba(8, 51, 68, 0.7)', color: '#67e8f9' }}
+          title="The browser downgraded the disk link's permission after a reload; mirroring is paused until you re-grant it (needs a click — browsers auto-deny silent requests)."
+        >
+          Disk mirror paused — the linked file/folder needs re-authorization after the reload. Click to re-authorize and sync now.
+        </button>
+      )}
       <header className="border-b border-slate-700" style={{ background: 'var(--app-slate-950)' }}>
         {/* Row 1 — primary tools and identity */}
         <div className="flex items-center justify-between px-4 py-2">
@@ -6204,6 +6360,57 @@ export default function App() {
               <p className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">Switch to / create</p>
               <WorkspaceCreateRow currentWorkspace={workspace} onSwitch={handleChangeWorkspace} />
               <p className="text-[10px] text-slate-500 mt-2">Tip: leave empty to use the default workspace. Names cannot contain colons.</p>
+            </div>
+
+            {/* Folder-link section (git-ready): mirrors the active design as
+                individual files (current.json + append-only per-snapshot
+                versions + commit_msg) — a layout made for version control.
+                The generated sync_git.sh does the actual committing. */}
+            <div className="px-4 py-3 border-b border-slate-700">
+              <p className="text-[10px] uppercase tracking-wider text-slate-500 mb-1.5">Linked folder (git-ready, auto-mirrors on save)</p>
+              {workspaceDirHandle ? (
+                <div className="rounded border border-emerald-700/60 bg-emerald-900/10 px-2 py-1.5">
+                  <div className="flex items-center gap-2">
+                    <FolderTree size={11} className="text-emerald-400" />
+                    <span className="font-mono text-xs flex-1 truncate text-emerald-300" title={workspaceDirLabel}>
+                      {workspaceDirLabel || '(linked folder)'}
+                    </span>
+                    {dirHasGit && (
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-800 text-emerald-200 font-medium" title="A .git repository was detected in the linked folder — run sh sync_git.sh to commit snapshots">
+                        git repo
+                      </span>
+                    )}
+                    <button
+                      onClick={mirrorWorkspaceToFileIfLinked}
+                      className="text-[10px] px-2 py-0.5 rounded bg-emerald-700 hover:bg-emerald-600 text-white"
+                      title="Mirror the active design's current state + any missing snapshot files to the folder now"
+                    >
+                      sync now
+                    </button>
+                    <button
+                      onClick={handleUnlinkWorkspaceDir}
+                      className="text-[10px] px-2 py-0.5 rounded border border-slate-600 hover:bg-slate-800 text-slate-300"
+                      title="Stop mirroring to this folder (files on disk are kept)"
+                    >
+                      unlink
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-slate-500 mt-1.5 leading-snug">
+                    Layout: <span className="font-mono">designs/&lt;name&gt;/current.json</span> (working state) + <span className="font-mono">versions/vNNN_&lt;id&gt;.json</span> (one immutable file per snapshot) + <span className="font-mono">.photonic/commit_msg</span>. Run <span className="font-mono">sh sync_git.sh</span> to add/commit/push — the commit message mirrors the latest snapshot description.
+                  </p>
+                </div>
+              ) : (
+                <button
+                  onClick={handleLinkWorkspaceToDir}
+                  disabled={!dirPickerPresent || fsBlockedAtRuntime}
+                  className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 rounded text-xs font-medium bg-cyan-700 hover:bg-cyan-600 text-white disabled:opacity-30 disabled:cursor-not-allowed"
+                  title={dirPickerPresent && !fsBlockedAtRuntime
+                    ? 'Pick a folder (e.g. a git repo). Every save mirrors the active design into it as git-friendly files; snapshots become immutable per-version files.'
+                    : 'Folder linking needs the File System Access API directory picker (Chrome/Edge, not sandboxed).'}
+                >
+                  <FolderTree size={11} /> Link folder (git-ready)…
+                </button>
+              )}
             </div>
 
             {/* File-link section: the active workspace can be bound to a JSON

@@ -574,6 +574,55 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
 - **Phase-ambiguity caveat (v1)**: β is unwrapped only while βΔl < π over the
   band — pick L2−L1 small enough. α and εeff-from-α are unaffected by the branch.
 
+## Storage durability, multi-tab safety & disk mirrors
+
+- **Layered persistence rule**: any NEW UI preference persists via the layered
+  pattern (in-memory session cache → `window.storage`/IndexedDB write-through +
+  memoized async hydrate → best-effort `localStorage`) — this user's browser
+  silently drops `localStorage` writes. Stores: `src/ui/twoLineSettings.js`
+  (wizard), `src/ui/settings.js` (app settings; explicit-`storage` param
+  bypasses the layers for tests), `src/ui/ui-prefs.js` (misc layout prefs:
+  `paramNameWidth`, panel widths/collapse). React wiring: persist effects gate
+  on hydration completing (or diff a prev-value ref) so StrictMode's
+  double-invoked mount effect can't clobber the durable store with defaults.
+- **Multi-tab**: one WRITER per workspace via a session-long Web Lock
+  (`photonic_layout_ws_lock:<ws>`); losing tabs go read-only (banner, saves/
+  autosave/flushes disabled) and auto-take-over when the writer closes.
+  Belt-and-braces: `saveDesign` read-merges `versions[]` by id before every
+  write (payload wins on collision) so a stale tab can never erase snapshots —
+  pass `{ mergeVersions: false }` ONLY when deliberately deleting a version.
+  BroadcastChannel `photonic_layout` pings other tabs after every persist
+  (choke point: `mirrorWorkspaceToFileIfLinked`).
+- **Save-integrity contracts**: `saveDesign` returns a STRUCTURED `{ok,...}`
+  result — always check `.ok`, never truthiness. `importWorkspace('replace')`
+  writes first and prunes only after every write succeeded.
+  `validateDesignName` (reject leading `_` and `:`) guards Save/Save As/New/
+  Rename; `sanitizeDesignName` maps imported names. Version restore takes an
+  automatic RESCUE snapshot (`auto: before loading vN`) instead of discarding.
+  beforeunload prompts while `saveStatus` is unsaved/saving (NOT `isDirty` —
+  drifted-but-autosaved is already persisted); pagehide/visibility-hidden do a
+  fire-and-forget flush guarded by an `editSeqRef` counter (the same counter
+  keeps an in-flight autosave from marking a newer edit 'saved').
+- **Disk mirrors** (both Chromium FSA, handles persisted in the
+  `photonic_layout_handles` IDB store): the single-FILE bundle mirror
+  (`file-handle.js`) and the **git-ready FOLDER mirror**
+  (`src/storage/dir-mirror.js`): `designs/<safeName>/current.json` (working
+  scene, no undo history) + `versions/vNNN_<id>.json` (one immutable file PER
+  SNAPSHOT, written at most once — append-only, diffs cleanly) +
+  `.photonic/commit_msg` (latest snapshot description) + generated
+  `sync_git.sh` (add/commit -F/push; the browser cannot run git —
+  isomorphic-git was REJECTED: push needs a PAT in browser storage, violating
+  the credential-isolation rule). Mirroring runs GRANTED-only (a reload
+  downgrades handle permissions to 'prompt' and non-gesture requestPermission
+  is auto-denied) — a downgraded permission raises the one-click
+  "re-authorize" banner instead of dying silently.
+- **Layer visibility** (`src/ui/canvas/layer-visibility.js`): LAYERS-panel
+  eyes hide render families ('wg' | 'port' | 'via' | 'cond:<stackLayerId>')
+  on the CANVAS ONLY — ephemeral React state, never scene/settings; solver +
+  every export always see the full scene. Hidden parts can't be selected
+  (⌘A/marquee filtered, selection pruned); a "N layers hidden — show all"
+  pill keeps a blank canvas self-explaining.
+
 ## Settings & appearance themes
 
 User preferences + appearance themes, via the ⚙ header button (between Workspace and the AI ✨ button → `src/ui/SettingsPanel.jsx`).
