@@ -13,6 +13,7 @@
 //
 // Extracted from PhotonicLayout.jsx as Stage 2.3 of the planned refactor.
 import { evalExpr, topoSortParams } from '../scene/params.js';
+import { effectiveConductorLayerId } from '../scene/conductor-binding.js';
 import { parseAnchor, anchorLocal } from '../scene/anchors.js';
 import { solveLayout, applyMirrors } from '../scene/solver.js';
 import { expandTransforms } from '../scene/transforms.js';
@@ -976,9 +977,16 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   //      comment shows the stale id so the user can trace it.
   //   3. component is explicitly bound and the binding resolves cleanly.
   //      Comment confirms which layer was used.
+  // Boolean-operand INHERITANCE: an operand with no binding of its own
+  // resolves through its consuming boolean's (effectiveConductorLayerId)
+  // — set the binding once on the meander boolean and every bar/rail
+  // lands on that layer, matching the 3-D viewer / GDS / LAYERS eyes.
+  const condBindById = Object.fromEntries((scene.components || []).map(cc => [cc.id, cc]));
   const resolveCondForComp = (c) => {
     if (!c) return { layer: condLayer, comment: '# (no component)' };
-    const bound = c.conductorLayerId || null;
+    const own = c.conductorLayerId || null;
+    const bound = own || effectiveConductorLayerId(c, condBindById) || null;
+    const inherited = !own && bound ? ` (inherited from the consuming boolean)` : '';
     if (!bound) {
       if (allConductorLayers.length > 1) {
         return {
@@ -995,12 +1003,14 @@ export function generateHfssNative(scene, paramValues, options = {}) {
     if (match) {
       return {
         layer: match,
-        comment: `# Conductor layer for ${c.id}: "${match.id}" (explicit binding).`,
+        comment: own
+          ? `# Conductor layer for ${c.id}: "${match.id}" (explicit binding).`
+          : `# Conductor layer for ${c.id}: "${match.id}" (inherited from the consuming boolean's binding).`,
       };
     }
     return {
       layer: condLayer,
-      comment: `# WARNING: ${c.id} was bound to conductor layer id "${bound}", but no conductor layer with that id exists in the current stack. Falling back to "${condLayer ? condLayer.id : '(none)'}". Re-bind it in the Inspector.`,
+      comment: `# WARNING: ${c.id} was bound to conductor layer id "${bound}"${inherited}, but no conductor layer with that id exists in the current stack. Falling back to "${condLayer ? condLayer.id : '(none)'}". Re-bind it in the Inspector.`,
     };
   };
 
@@ -1237,11 +1247,15 @@ def set_var(name, value):
     const allCondLayers = allConductorLayers; // alias for clarity
     const elecOrPort = (solved || []).filter(c => c.layer === 'electrode' || c.layer === 'port');
     const unbound = [];
-    const stale = []; // [{ id, badId }]
+    const inheritedList = []; // [{ id, layerId }] — bound via the consuming boolean
+    const stale = []; // [{ id, badId }] — only components that OWN the stale binding
     for (const c of elecOrPort) {
-      const bound = c.conductorLayerId || null;
-      if (!bound) { unbound.push(c.id); continue; }
-      if (!allCondLayers.some(l => l.id === bound)) stale.push({ id: c.id, badId: bound });
+      const own = c.conductorLayerId || null;
+      const eff = effectiveConductorLayerId(c, condBindById) || null;
+      if (own && !allCondLayers.some(l => l.id === own)) { stale.push({ id: c.id, badId: own }); continue; }
+      if (own) continue; // clean explicit binding — nothing to flag
+      if (eff && allCondLayers.some(l => l.id === eff)) { inheritedList.push({ id: c.id, layerId: eff }); continue; }
+      unbound.push(c.id);
     }
     code += `\n# ===== Conductor-layer audit =====\n`;
     if (allCondLayers.length === 0) {
@@ -1252,6 +1266,10 @@ def set_var(name, value):
         code += `#   - ${l.id} (material=${l.material}, thickness=${l.thickness})\n`;
       }
       code += `# Default-fallback conductor (used when a component has no explicit binding): ${condLayer ? condLayer.id : '(none)'}\n`;
+    }
+    if (inheritedList.length > 0) {
+      code += `# Components bound via their consuming boolean (operand inheritance — not ambiguous):\n`;
+      for (const it of inheritedList) code += `#   - ${it.id} -> "${it.layerId}"\n`;
     }
     if (unbound.length > 0) {
       code += `# WARNING: components with NO explicit conductor-layer binding (will use default-fallback above):\n`;

@@ -72,6 +72,7 @@ import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/ra
 import { tessellatePolylinePath, taperedBandQuads, polylineIsTapered } from '../geometry/polyline.js';
 import { sampleBridgeArch } from '../geometry/bridge.js';
 import { computeNumericLayerZ } from './layer-z.js';
+import { effectiveConductorLayerId } from './conductor-binding.js';
 import { layerVisKey } from '../ui/canvas/layer-visibility.js';
 
 // Nominal heights for zero-thickness / sheet-like solids (µm).
@@ -194,9 +195,15 @@ export function buildScene3D(rawScene, paramValues) {
   const xfsRotation = (xfs) => xfs.reduce((a, xf) => a + (xf.rot || 0), 0);
 
   // ── Style / layer resolution ────────────────────────────────────────────
+  // Boolean-operand INHERITANCE: an operand without its own binding uses
+  // the consuming boolean's (effectiveConductorLayerId) — the meander-
+  // looks-2µm-thick bug: template operands are unbound, so they fell back
+  // to the FIRST conductor layer instead of the one the user set on the
+  // boolean.
   const boundConductorFor = (c) => {
-    if (c.conductorLayerId) {
-      const l = conductors.find(x => x.id === c.conductorLayerId);
+    const eff = effectiveConductorLayerId(c, compById);
+    if (eff) {
+      const l = conductors.find(x => x.id === eff);
       if (l) return l;
     }
     return conductors[0] || null;

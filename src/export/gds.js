@@ -21,6 +21,7 @@ import { solveLayout, applyMirrors } from '../scene/solver.js';
 import { expandTransforms } from '../scene/transforms.js';
 import { tessellatePolylinePath, taperedBandQuads, polylineIsTapered } from '../geometry/polyline.js';
 import { shapeInstanceToRing } from '../geometry/rings.js';
+import { effectiveConductorLayerId } from '../scene/conductor-binding.js';
 import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/racetrack.js';
 
 // Via GDS layer mapping (D4): vias land on layers 200+. Each DISTINCT
@@ -158,6 +159,7 @@ export function generateGDS(scene, paramValues) {
   // Vias: one GDS layer per distinct (layerFrom → layerTo) pair, 200+.
   const viaLayers = viaGdsLayerMap(components);
   const viaKeyToGdsLayer = Object.fromEntries(viaLayers.map(v => [v.key, v.layer]));
+  const gdsCompById = Object.fromEntries((components || []).map(cc => [cc.id, cc]));
   const gdsLayerForComponent = (c) => {
     if (c.kind === 'via') {
       return viaKeyToGdsLayer[`${c.layerFrom || '?'}->${c.layerTo || '?'}`] ?? 200;
@@ -168,8 +170,13 @@ export function generateGDS(scene, paramValues) {
     if (c.layer === 'waveguide') return 1;
     if (c.layer === 'port') return 100;
     if (c.layer === 'electrode') {
-      if (c.conductorLayerId && condIdToGdsLayer[c.conductorLayerId] != null) {
-        return condIdToGdsLayer[c.conductorLayerId];
+      // Own binding, else inherited from the consuming boolean
+      // (effectiveConductorLayerId) — template-built operands carry no
+      // binding of their own; without inheritance a bound meander's bars
+      // landed on the default layer 10 regardless of the user's choice.
+      const eff = effectiveConductorLayerId(c, gdsCompById);
+      if (eff && condIdToGdsLayer[eff] != null) {
+        return condIdToGdsLayer[eff];
       }
       return 10;
     }

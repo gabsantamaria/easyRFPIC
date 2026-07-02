@@ -37,6 +37,7 @@ import { solveLayout } from '../scene/solver.js';
 import { expandTransforms } from '../scene/transforms.js';
 import { shapeInstanceToRing } from '../geometry/rings.js';
 import { flattenReplicas } from '../scene/twoLine.js';
+import { effectiveConductorLayerId } from '../scene/conductor-binding.js';
 
 const ascii = (s) => String(s ?? '').replace(/[^\x00-\x7F]/g, '?');
 const num = (v) => (Number.isFinite(v) ? (Math.round(v * 1e6) / 1e6) : 0);
@@ -150,7 +151,26 @@ function buildQ3DBody(scene, paramValues, opts, boxFn, polyFn, sweepFn, uniteFn)
   const rootCompId = (p) => { let cur = p, g = 0; while (cur && g++ < 64) { if (!cur.consumedBy) return baseId(cur.id); cur = flatById[cur.consumedBy]; } return null; };
   const condWarnings = [];
 
-  const condLayer = stack.find((l) => l.role === 'conductor');
+  // Conductor layer: resolve from the SELECTED conductors' effective
+  // binding (own conductorLayerId, else the consuming boolean's —
+  // effectiveConductorLayerId), NOT blindly the first conductor-role
+  // stack layer. In a multi-conductor stack the first layer can be a
+  // thick via layer while the line lives on a zero-thickness conductor:
+  // keying off the first put the Q3D sheets at the WRONG Z + thickness,
+  // so the C fed into Z0 belonged to a different vertical cross-section
+  // than the HFSS line. Falls back to the first conductor when nothing
+  // resolves (single-conductor stacks are unchanged).
+  const solvedByIdQ3D = Object.fromEntries(solved.map((c) => [c.id, c]));
+  const resolvedCondLayers = condComps
+    .map((c) => {
+      const eff = effectiveConductorLayerId(c, solvedByIdQ3D);
+      return (eff && stack.find((l) => l.id === eff && l.role === 'conductor')) || null;
+    })
+    .filter(Boolean);
+  const condLayer = resolvedCondLayers[0] || stack.find((l) => l.role === 'conductor');
+  if (resolvedCondLayers.some((l) => l.id !== condLayer.id)) {
+    condWarnings.push(`selected conductors resolve to DIFFERENT stack layers (${[...new Set(resolvedCondLayers.map((l) => l.id))].join(', ')}) — all sheets are emitted at "${condLayer.id}"'s Z/thickness`);
+  }
   const condMat = (condLayer && condLayer.material) || 'gold';
   const hCond = condLayer ? (evalExpr(condLayer.thickness, pv) || 0) : 0;
   let effThk = Number.isFinite(opts.thicknessUm) && opts.thicknessUm > 0 ? opts.thicknessUm : (hCond > 0 ? hCond : 0.1);

@@ -36,6 +36,7 @@ import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/ra
 import { tessellatePolylinePath, taperedBandQuads } from '../geometry/polyline.js';
 import { computeParametricPositions } from './hfss-native.js';
 import { viaGdsLayerMap } from './gds.js';
+import { effectiveConductorLayerId } from '../scene/conductor-binding.js';
 
 // ── Expression translation: HFSS-style → Python-style ────────────────
 // computeParametricPositions emits expressions for HFSS, which means:
@@ -131,6 +132,7 @@ export function generateGdsfactory(scene, paramValues, options = {}) {
     layerMap.push({ key: `via_${pyIdent(v.key)}`, num: v.layer, datatype: 0, label: `via "${v.layerFrom} -> ${v.layerTo}"` });
   }
   const viaKeyByPair = Object.fromEntries(viaLayerEntries.map(v => [v.key, `via_${pyIdent(v.key)}`]));
+  const gfCompById = Object.fromEntries((scene.components || []).map(cc => [cc.id, cc]));
   const layerKeyForComp = (c) => {
     if (c.kind === 'via') {
       return viaKeyByPair[`${c.layerFrom || '?'}->${c.layerTo || '?'}`]
@@ -139,8 +141,11 @@ export function generateGdsfactory(scene, paramValues, options = {}) {
     if (c.layer === 'waveguide') return 'wg';
     if (c.layer === 'port') return 'port';
     if (c.layer === 'electrode') {
-      if (c.conductorLayerId && conductorLayers.some(l => l.id === c.conductorLayerId)) {
-        return `cond_${pyIdent(c.conductorLayerId)}`;
+      // Own binding, else inherited from the consuming boolean — the
+      // SAME resolution as the binary GDS / HFSS / 3-D consumers.
+      const eff = effectiveConductorLayerId(c, gfCompById);
+      if (eff && conductorLayers.some(l => l.id === eff)) {
+        return `cond_${pyIdent(eff)}`;
       }
       return conductorLayers[0] ? `cond_${pyIdent(conductorLayers[0].id)}` : 'wg';
     }

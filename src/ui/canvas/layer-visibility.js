@@ -12,9 +12,10 @@
 //   'wg'            every waveguide-layer component
 //   'port'          port-layer components (canvas pseudo-layer)
 //   'via'           via components (canvas pseudo-layer)
-//   'cond:<id>'     electrode components bound to stack conductor <id>
-//                   (unbound electrodes fall back to the FIRST conductor —
-//                   the same implicit binding the exporters use)
+//   'cond:<id>'     electrode components bound to stack conductor <id> —
+//                   own binding, else the consuming boolean's
+//                   (effectiveConductorLayerId), else the FIRST conductor
+//                   (the same implicit binding the exporters use)
 //   'electrode'     electrodes in a stack with NO conductor layer (edge case)
 //
 // Classification mirrors Canvas's resolveBoundLayer: booleans recurse to
@@ -24,6 +25,8 @@
 // Shared referentially-stable empty set — lets consumers fast-path the
 // nothing-hidden case without allocating.
 export const EMPTY_HIDDEN_SET = new Set();
+
+import { effectiveConductorLayerId } from '../../scene/conductor-binding.js';
 
 // Classify one component into its visibility key. `compById` is a prebuilt
 // id → component map (callers loop; don't rebuild per call), `stack` is
@@ -52,8 +55,11 @@ export function layerVisKey(c, compById, stack, visited = new Set()) {
   if (layer === 'electrode') {
     const conductors = (stack || []).filter(l => l.role === 'conductor');
     if (conductors.length === 0) return 'electrode';
-    const bound = c.conductorLayerId && conductors.some(l => l.id === c.conductorLayerId)
-      ? c.conductorLayerId
+    // Own binding, else inherited from the consuming boolean, else the
+    // first conductor (same rule as the exporters / 3-D viewer).
+    const eff = effectiveConductorLayerId(c, compById);
+    const bound = eff && conductors.some(l => l.id === eff)
+      ? eff
       : conductors[0].id; // implicit first-conductor fallback, like the exporters
     return `cond:${bound}`;
   }

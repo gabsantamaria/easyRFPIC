@@ -17,6 +17,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Ruler, X as XIcon, AlertTriangle, Check, Download } from 'lucide-react';
 import { buildTwoLineScene } from '../scene/twoLine.js';
 import { evalExpr } from '../scene/params.js';
+import { effectiveConductorLayerId } from '../scene/conductor-binding.js';
 import { loadTwoLinePrefs, saveTwoLinePrefs } from './twoLineSettings.js';
 
 const C_LIGHT = 2.99792458e8;
@@ -81,10 +82,29 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
   // Thin-conductor thickness for Q3D: default to the stack's h_cond; if that's 0
   // (zero-thickness/superconductor sheet) the user must supply a value.
   const condThkResolved = useMemo(() => {
-    const cl = (scene.stack || []).find((l) => l.role === 'conductor');
-    if (!cl) return 0;
-    const v = evalExpr(cl.thickness, paramValues || {});
-    return Number.isFinite(v) ? v : 0;
+    // Thickness of the conductor layer the LINE actually sits on: resolve
+    // each electrode's effective binding (own conductorLayerId, else the
+    // consuming boolean's) and take the thinnest bound layer — if ANY of
+    // the line's metal is on a zero-thickness layer, the export emits
+    // sheets on the PEC_sheets boundary and the Rs/Xs block must show.
+    // Falls back to the first conductor-role layer (single-conductor
+    // stacks unchanged).
+    const conductors = (scene.stack || []).filter((l) => l.role === 'conductor');
+    if (conductors.length === 0) return 0;
+    const byId = Object.fromEntries((scene.components || []).map((c) => [c.id, c]));
+    const thkOf = (l) => {
+      const v = evalExpr(l.thickness, paramValues || {});
+      return Number.isFinite(v) ? v : 0;
+    };
+    let thinnest = null;
+    for (const c of scene.components || []) {
+      if (c.layer !== 'electrode') continue;
+      const eff = effectiveConductorLayerId(c, byId);
+      const l = (eff && conductors.find((x) => x.id === eff)) || conductors[0];
+      const t = thkOf(l);
+      if (thinnest == null || t < thinnest) thinnest = t;
+    }
+    return thinnest != null ? thinnest : thkOf(conductors[0]);
   }, [scene, paramValues]);
   const [q3dThk, setQ3dThk] = useState(() => (prefs && prefs.q3dThk ? prefs.q3dThk : (condThkResolved > 0 ? String(condThkResolved) : '')));
   // ACTUAL physical line length for C/length, as an EXPRESSION (becomes the Q3D

@@ -820,6 +820,24 @@ Custom REAL8 binary encoder. Each component emits BOUNDARY records using `shapeI
 - **Infinite recursion in boolean tree walks.** Use a `visited` Set, passed through the recursion.
 - **HFSS `Rotate` rotates about world Z, not part center.** Always use translate-rotate-translate for "rotate about own center" semantics.
 - **HFSS `Mirror`/`DuplicateMirror` base-point fields don't evaluate parametric VARIABLE expressions** (unlike `CreateBox` positions / `Move` vectors, which do — the whole export depends on that, and the very parts being mirrored are CREATED with deep parametric position exprs HFSS evaluates fine). Feeding the parametric cluster-centroid expr into `MirrorBaseX/Y` made HFSS silently skip the reflection (swallowed by the try/except) → a mirrored line rendered UN-mirrored while the canvas looked right. Fix (`emitTransformChainHfss`, both `mirror` and `duplicate_mirror`): keep the parametric plane ONLY in `oEditor.Move` calls and mirror about the ORIGIN (trivial `0um` base). `mirror`(pivot C) = translate(−c) → `Mirror`(origin) → translate(+c); `duplicate_mirror` = translate(−plane) → `DuplicateMirror`(origin) → translate(+plane) over both originals AND the new copies (names predicted via `nextCloneName` up front). Stays sweep-parametric; the Mirror command only ever sees `0um`. pyAEDT bakes the mirror base NUMERICALLY (so it works there, just not sweepable).
+- **Conductor-binding resolution bypassing `effectiveConductorLayerId`.** An
+  operand consumed by a boolean usually carries NO `conductorLayerId` of its
+  own (templates don't set it) — the user binds the BOOLEAN. Every consumer
+  (hfss-native `resolveCondForComp` + its top-of-script audit block, scene3d
+  `boundConductorFor`, gds + gdsfactory layer maps, Canvas
+  `resolveBoundLayer`, layer-visibility `layerVisKey`, q3d's selected-
+  conductor layer, TwoLineWizard's `condThkResolved` sheet gate, the
+  Inspector picker's inherited state, the sceneIssues unbound/stale checks)
+  must resolve own-binding → consuming-boolean's binding
+  (`src/scene/conductor-binding.js`) → first-conductor fallback. The
+  resolution ORDER is operand-own-first everywhere — a consumer that lets
+  the boolean's binding beat an operand's own (or vice versa) disagrees
+  with the rest (adversarial review caught Canvas doing exactly that).
+  STALE warnings fire only on the component that OWNS the stale binding
+  (once on the boolean, not per inheriting operand). A consumer using `c.conductorLayerId || first` puts bound
+  clusters on whatever layer is ordered first in a multi-conductor stack
+  (the "meander renders 2 µm thick on a zero-thickness conductor" bug —
+  wrong Z/thickness in 3-D AND HFSS). Guard: tests/conductor-binding.test.js.
 - **Cluster siblings as alt-drag snap targets.** Exclude via `drag.clusterSet` at drag-init time.
 - **Anchor-pair switching during alt-drag.** Apply hysteresis via `stickThresh = worldThresh * 0.5`.
 - **Drag preview doesn't match drop position.** The drag preview and the commit logic must use the same shape-aware coordinate computation.

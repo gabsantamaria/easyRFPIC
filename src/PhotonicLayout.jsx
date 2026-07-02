@@ -16,6 +16,7 @@ import { generateQ3DCapacitance } from './export/q3d.js';
 import { generateGdsfactory } from './export/gdsfactory.js';
 import { generateSvgFromElement, generatePdfFromElement } from './export/figure.js';
 import { defaultStack, normalizeScene, makeDefaultScene, makeBlankScene, paramsForStack, migrateStackCoplanarGroups, scenesEqual } from './scene/schema.js';
+import { effectiveConductorLayerId } from './scene/conductor-binding.js';
 import { buildDesignExport, designExportFilename } from './scene/design-file.js';
 import {
   BASE_DESIGN_PREFIX, BASE_LIB_PREFIX, BASE_ARCHIVE_PREFIX, WORKSPACE_KEY,
@@ -5114,11 +5115,18 @@ export default function App() {
     //    implicit first-conductor fallback is unambiguous).
     const conductorLayers = (scene.stack || []).filter(l => l.role === 'conductor');
     if (conductorLayers.length > 0) {
+      const bindById = Object.fromEntries((scene.components || []).map(cc => [cc.id, cc]));
       for (const c of scene.components || []) {
         if (c.layer !== 'electrode' && c.layer !== 'port') continue;
-        const bound = c.conductorLayerId || null;
-        if (bound && !conductorLayers.some(l => l.id === bound)) {
-          out.push({ kind: 'stale-conductor', snapId: null, compId: c.id, message: `"${c.id}" is bound to conductor layer "${bound}" which was deleted or is no longer a conductor — rebind in the Inspector` });
+        // Effective binding: own, else inherited from the consuming
+        // boolean — an operand whose boolean is bound is NOT unbound.
+        const own = c.conductorLayerId || null;
+        const bound = effectiveConductorLayerId(c, bindById) || null;
+        // STALE fires only on the component that OWNS the stale binding
+        // (one warning on the boolean, not one per inheriting operand —
+        // the operands' Inspectors show no binding to "rebind").
+        if (own && !conductorLayers.some(l => l.id === own)) {
+          out.push({ kind: 'stale-conductor', snapId: null, compId: c.id, message: `"${c.id}" is bound to conductor layer "${own}" which was deleted or is no longer a conductor — rebind in the Inspector` });
         } else if (!bound && conductorLayers.length >= 2) {
           out.push({ kind: 'unbound-conductor', snapId: null, compId: c.id, message: `"${c.id}" has no explicit conductor binding — export falls back to the first conductor ("${conductorLayers[0].name || conductorLayers[0].id}") in a ${conductorLayers.length}-conductor stack` });
         }
@@ -8359,15 +8367,25 @@ export default function App() {
                   const boundExists = explicitBoundId
                     ? conductorLayers.some(l => l.id === explicitBoundId)
                     : false;
-                  const isUnbound = !explicitBoundId;
+                  // Operand inheritance: no own binding but the consuming
+                  // boolean has one — resolved exactly like the exporters
+                  // (effectiveConductorLayerId), shown as INHERITED, not
+                  // unbound.
+                  const inheritById = Object.fromEntries((scene.components || []).map(cc => [cc.id, cc]));
+                  const inheritedId = !explicitBoundId
+                    ? (effectiveConductorLayerId(selected, inheritById) || null)
+                    : null;
+                  const inheritedLayer = inheritedId ? conductorLayers.find(l => l.id === inheritedId) : null;
+                  const isInherited = !!inheritedLayer;
+                  const isUnbound = !explicitBoundId && !isInherited;
                   const isStale = !!explicitBoundId && !boundExists;
                   // What to display in the <select>. For unbound we use a
                   // sentinel value '__unbound__' so the select doesn't visually
                   // suggest a layer is bound when none is. For stale, show the
                   // stale id so the user sees what's recorded.
-                  const displayValue = isUnbound
-                    ? '__unbound__'
-                    : (boundExists ? explicitBoundId : explicitBoundId);
+                  const displayValue = isInherited
+                    ? '__inherited__'
+                    : (isUnbound ? '__unbound__' : explicitBoundId);
                   const labelText = selected.layer === 'port'
                     ? 'Conductor layer (port Z)'
                     : 'Conductor layer';
@@ -8382,7 +8400,7 @@ export default function App() {
                         onChange={(e) => {
                           // Sentinel values from the unbound/stale options
                           // are no-ops on commit. Only real ids persist.
-                          if (e.target.value === '__unbound__') return;
+                          if (e.target.value === '__unbound__' || e.target.value === '__inherited__') return;
                           updateComp(selected.id, { conductorLayerId: e.target.value });
                         }}
                         className={`w-full bg-slate-900 border rounded px-2 py-1 text-xs font-mono outline-none ${
@@ -8392,6 +8410,11 @@ export default function App() {
                         }`}
                         title={helpText}
                       >
+                        {isInherited && (
+                          <option value="__inherited__">
+                            inherited: "{inheritedLayer.name || inheritedLayer.id}" (from the consuming boolean)
+                          </option>
+                        )}
                         {isUnbound && (
                           <option value="__unbound__">
                             ⚠ unbound — falls back to "{conductorLayers[0]?.name || conductorLayers[0]?.id}"
@@ -8421,7 +8444,14 @@ export default function App() {
                           conductor — which may not be what you want.
                         </p>
                       )}
-                      {!isUnbound && !isStale && (
+                      {isInherited && (
+                        <p className="text-[9px] text-slate-500 mt-1 leading-snug">
+                          Inherits "{inheritedLayer.name || inheritedLayer.id}" from the boolean
+                          that consumes this operand — the export builds it there. Pick a layer
+                          above only to OVERRIDE this one operand.
+                        </p>
+                      )}
+                      {!isUnbound && !isStale && !isInherited && (
                         <p className="text-[9px] text-slate-500 mt-1 leading-snug">{helpText}</p>
                       )}
                     </div>

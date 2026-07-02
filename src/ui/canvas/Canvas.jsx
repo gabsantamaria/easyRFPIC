@@ -16,6 +16,7 @@ import { DeferredTextInput } from '../DeferredTextInput.jsx';
 import { DEFAULT_CANVAS_THEME } from '../theme.js';
 import { resolveInstanceAnchorNumeric } from '../../scene/instance-positions.js';
 import { ANCHORS, parseAnchor, anchorLocal, anchorLocalRotated, anchorWorld, compRotationDeg, rotateLocal } from '../../scene/anchors.js';
+import { effectiveConductorLayerId } from '../../scene/conductor-binding.js';
 import { evalExpr } from '../../scene/params.js';
 import { solveLayout, applyMirrors, resolveBooleanBboxes } from '../../scene/solver.js';
 import { expandTransforms } from '../../scene/transforms.js';
@@ -3359,14 +3360,29 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     if (!c || visited.has(c.id)) return null;
     visited.add(c.id);
     if (c.kind === 'boolean') {
+      // Walk to the first resolvable operand — each operand resolves via
+      // effectiveConductorLayerId (its OWN binding, else the consuming
+      // boolean's), so a bound boolean with unbound operands paints the
+      // boolean's layer while an own-bound operand keeps its own. Do NOT
+      // shortcut to the boolean's own binding here: every other consumer
+      // (exports, 3-D, LAYERS eyes) resolves per-operand with own-first
+      // priority, and the canvas must agree with what gets built.
       for (const opid of (c.operandIds || [])) {
         const r = resolveBoundLayer(compById_style[opid], visited);
         if (r) return r;
       }
+      // No resolvable operand (edge case) — fall back to the boolean's
+      // own binding so a bound-but-empty cluster still paints sensibly.
+      if (c.conductorLayerId && layerById[c.conductorLayerId]) {
+        return layerById[c.conductorLayerId];
+      }
       return null;
     }
-    if (c.layer === 'electrode' && c.conductorLayerId && layerById[c.conductorLayerId]) {
-      return layerById[c.conductorLayerId];
+    if (c.layer === 'electrode') {
+      // Own binding, else inherited from the consuming boolean — same
+      // rule as the exporters / 3-D viewer (effectiveConductorLayerId).
+      const eff = effectiveConductorLayerId(c, compById_style);
+      if (eff && layerById[eff]) return layerById[eff];
     }
     if (c.layer === 'waveguide') {
       return (scene.stack || []).find(l => l.role === 'waveguide') || null;
