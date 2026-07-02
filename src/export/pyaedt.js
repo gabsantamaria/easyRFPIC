@@ -14,8 +14,9 @@ import { solveLayout, applyMirrors } from '../scene/solver.js';
 import { shapeInstanceToRing } from '../geometry/rings.js';
 import { buildRacetrackCenterline } from '../geometry/racetrack.js';
 import { tessellatePolylinePath, taperedBandQuads, polylineIsTapered } from '../geometry/polyline.js';
+import { sampleBridgeArch } from '../geometry/bridge.js';
 import { detectPortIntegrationLine } from '../scene/lumpedPort.js';
-import { migrateStackCoplanarGroups } from '../scene/schema.js';
+import { computeNumericLayerZ } from '../scene/layer-z.js';
 
 // ----------------------------------------------------------------------
 // PYAEDT EXPORT
@@ -27,60 +28,12 @@ export function generatePyAEDT(scene, paramValues) {
   // Numeric per-layer Z map (zBottom / zTop per stack layer) for via
   // emission. Same walk as the native exporter's layerZ, NUMERIC ONLY —
   // pyAEDT is the basic/convenience exporter; the native COM export
-  // carries the fully parametric Z expressions. Grouping is by
-  // `coplanarGroup` (members share zBottom; the group advances by its
-  // cladding TOP) so it MUST stay in lockstep with hfss-native's layerZ —
-  // same migrate, same group predicate, same cladding-pick — or via Z
-  // spans would disagree between the two exporters.
-  const numericLayerZ = (() => {
-    const stack = migrateStackCoplanarGroups(scene.stack || []);
-    const map = {};
-    const isDev = (r) => r === 'waveguide' || r === 'conductor' || r === 'cladding';
-    const tOf = (l) => {
-      const v = evalExpr(l.thickness, paramValues);
-      return Number.isFinite(v) ? v : 1;
-    };
-    // Layer whose TOP defines a coplanar group's top: the cladding (thickest if
-    // several), else — malformed group with no cladding — the thickest member.
-    const advanceLayerOf = (members) => {
-      const clad = members.filter(m => m.role === 'cladding');
-      const pool = clad.length ? clad : members;
-      return pool.reduce((a, b) => (tOf(b) > tOf(a) ? b : a), pool[0]);
-    };
-    // Pin Z=0 at the first device-role layer OR first coplanar-group member
-    // (matches hfss-native; every group carries a cladding/device member).
-    let firstDev = stack.findIndex(l => isDev(l.role) || l.coplanarGroup);
-    if (firstDev === -1) firstDev = stack.length;
-    let z = 0;
-    for (let i = firstDev - 1; i >= 0; i--) {
-      const t = tOf(stack[i]);
-      map[stack[i].id] = { zBottom: z - t, zTop: z };
-      z -= t;
-    }
-    z = 0;
-    let i = firstDev;
-    while (i < stack.length) {
-      const gid = stack[i].coplanarGroup;
-      if (gid) {
-        let runEnd = i;
-        while (runEnd + 1 < stack.length && stack[runEnd + 1].coplanarGroup === gid) runEnd++;
-        const members = [];
-        for (let j = i; j <= runEnd; j++) {
-          const t = tOf(stack[j]);
-          map[stack[j].id] = { zBottom: z, zTop: z + t };
-          members.push(stack[j]);
-        }
-        z += tOf(advanceLayerOf(members));
-        i = runEnd + 1;
-      } else {
-        const t = tOf(stack[i]);
-        map[stack[i].id] = { zBottom: z, zTop: z + t };
-        z += t;
-        i++;
-      }
-    }
-    return map;
-  })();
+  // carries the fully parametric Z expressions. The walk itself lives in
+  // src/scene/layer-z.js (computeNumericLayerZ — shared with the 3-D
+  // viewer's spec builder) and MUST stay in lockstep with hfss-native's
+  // layerZ — same migrate, same group predicate, same cladding-pick — or
+  // via Z spans would disagree between the two exporters.
+  const numericLayerZ = computeNumericLayerZ(scene.stack, paramValues);
 
   // Bbox-centroid (in solved-world coords) of the group named `groupName`.
   // Used for pivot='group' rotates so every grouped member rotates about
@@ -266,15 +219,11 @@ def build_wg(name, cx, cy, w, h):
         code += `# Skipped bridge ${id}: length/width/height must all evaluate > 0\n`;
       } else {
         const yPl = c.cy - brW / 2;
-        const NARC = 8; // segments per arc — numeric stand-in for the NURBS
-        const arcPts = (zBase) => {
-          const pts = [];
-          for (let k = 0; k <= NARC; k++) {
-            const u = -1 + (2 * k) / NARC;
-            pts.push([c.cx + (u * brL) / 2, yPl, zBase + brH * (1 - u * u)]);
-          }
-          return pts;
-        };
+        // 8-segment parabolic arch — sampler shared with the 3-D viewer
+        // spec builder (src/geometry/bridge.js) so both emit the SAME
+        // 9-point profile.
+        const archProfile = sampleBridgeArch(brL, brH, 8);
+        const arcPts = (zBase) => archProfile.map(([xa, zr]) => [c.cx + xa, yPl, zBase + zr]);
         const fmtPts = (pts) => pts.map(([x, y, z]) => `["${x.toFixed(3)}um", "${y.toFixed(3)}um", "${z.toFixed(3)}um"]`).join(', ');
         code += `# ${c.id}: airbridge over "${brCondL ? ascii(brCondL.id) : '(none)'}" (numeric arch profile; use the native COM export for parametric tracking)\n`;
         code += `# Strap thickness is measured VERTICALLY (exact at landings, ~cos(slope) thinner on the flanks).\n`;

@@ -634,6 +634,66 @@ User preferences + appearance themes, via the ⚙ header button (between Workspa
 - `index.html` sets `data-theme` from the saved settings before React mounts (no chrome flash). The figure exporters (`handleExportSVG`/`handleExportPDF`) thread `canvasTheme.canvasBg` through `options.background` so exported figures match the on-screen canvas.
 - **CAUTION for future edits:** do NOT mutate `src/PhotonicLayout.jsx` via a Bash script and then use the Edit tool — the Edit tool's in-memory snapshot will clobber the Bash writes. Re-Read the file first, or do all mutations through one mechanism.
 
+## 3D viewer
+
+An interactive 3-D PREVIEW of what the HFSS export builds ("3D" toolbar button
+next to "fit"; Esc or re-click returns to 2-D). STRICTLY render-side — it only
+READS the scene through the same pipeline everything else uses; scene model,
+solver, and every export path are untouched (viewer-only guarantee, enforced by
+a no-mutation test).
+
+- **`src/scene/scene3d.js`** — `buildScene3D(scene, paramValues) → { solids,
+  warnings }`. PURE spec builder (NO three.js import; fully unit-tested in
+  `tests/scene3d.test.js`). Pipeline: normalizeScene → solveLayout +
+  applyMirrors + resolveBooleanBboxes → expandTransforms →
+  `shapeInstanceToRing` footprints + `computeNumericLayerZ` for Z. Solid kinds:
+  `extrude` (plan ring + holes, zBottom, height), `cylinder` (vias:
+  layerFrom.zBottom → layerTo.zTop — the same numbers pyAEDT emits), `bridge`
+  (closed arch profile from the SHARED parabolic 9-pt sampler
+  `src/geometry/bridge.js`, swept by width). **Convention: Z-UP** — X = plan x,
+  Y = plan y, Z = stack height (camera.up = (0,0,1)).
+  - **CSG scope: subtract/punch ONLY.** Blank solids carry
+    `csg: { subtractIds }`; tools emit `role:'tool'` and are never rendered
+    (punch clones consumed exactly like the canvas; the ORIGINAL punch tool
+    renders standalone). `union` = visual union (operands emitted separately —
+    overlapping same-material solids read as merged; CSG-union deliberately
+    skipped). `intersect` = overlap + warning.
+  - **layerKey** = EXACTLY `layerVisKey(...)` from
+    `src/ui/canvas/layer-visibility.js` ('wg'|'port'|'via'|'cond:<id>'|
+    'electrode') so `hiddenLayerKeys` filters 3-D identically to the canvas;
+    PLUS `stack:<id>` for substrate/cladding slabs (viewer-local checkboxes).
+    `selectId` = the top-level boolean for cluster members (click-select
+    parity with the canvas); `compId` = the leaf component.
+  - **Documented approximations** (each pushes a `warnings[]` entry): rib
+    waveguides render slab + RECTANGULAR rib (top width = core width; no
+    etch-angle trapezoid); zero-thickness conductors get a nominal 0.02 µm
+    height; cladding/substrates are translucent boxes over the chip extent
+    (simSetup pads, else 50 µm) with NO subtraction (translucency shows
+    embedded parts better); constant-width polylines use a mitered band,
+    tapered ones the HFSS butt-join quads; port rects are thin sheets at the
+    bound conductor's mid-Z; cutouts become Shape holes when fully inside the
+    footprint, else CSG tools.
+- **`src/scene/layer-z.js`** — `computeNumericLayerZ(stack, paramValues)`:
+  the numeric per-layer Z walk EXTRACTED from generatePyAEDT (which now
+  consumes it; byte-identical output verified). Same coplanar-group semantics
+  as hfss-native's parametric `layerZ` — keep all three in lockstep. Tested in
+  `tests/layer-z.test.js`.
+- **`src/ui/Viewer3D.jsx`** — React.lazy'd from PhotonicLayout; three.js +
+  OrbitControls + three-bvh-csg are dynamically imported INSIDE it
+  (module-level promise, same pattern as the AI SDK in `src/ai/client.js`), so
+  they live in their own chunks (~750 kB three stays out of the main bundle —
+  main-chunk delta of the whole feature ≈ +0.7 kB). Spec → meshes:
+  ExtrudeGeometry (+holes), CylinderGeometry, profile-extrude for bridges; all
+  placement is baked into geometry (identity mesh transforms) so three-bvh-csg
+  Brushes compose without matrix bookkeeping; CSG tools are inflated ±10 nm in
+  Z to dodge coplanar-face artifacts; recursive tool resolution (a tool may
+  itself carry csg). Debounced (250 ms) rebuild on scene/paramValues with a
+  "rebuilding…" hint; geometries/materials disposed on every rebuild. Raycast
+  click → `setSelection` (stack slabs unpickable); selected meshes get a cyan
+  emissive tint; `data-solid-count` attribute on the container for testability.
+  Esc exits via `onExit`. Fit prefers device solids over the (possibly 250 µm
+  thick) substrate slabs.
+
 ## Rendering
 
 Canvas uses SVG with `y-up world → y-down screen` transform.
@@ -774,6 +834,13 @@ npx vitest run
 #                                       (every error category), applyFragment → solve + snap-graph
 #                                       + HFSS set_var parametricity, collision rename incl. snap
 #                                       vertices (network call NOT covered — browser-only)
+#   tests/layer-z.test.js             — computeNumericLayerZ vs hand-computed sequential +
+#                                       coplanar-group stacks (cladding-top advance, Z=0 pinning)
+#   tests/scene3d.test.js             — 3-D viewer spec builder (no three.js): wg slab+rib Z,
+#                                       electrode/via/bridge/racetrack solids, punch→csg.subtractIds
+#                                       + tool roles, union-as-overlap, zero-thickness epsilon +
+#                                       warning, layerKey ↔ layer-visibility parity, cladding box,
+#                                       cutout hole-vs-CSG, repeat expansion, scene no-mutation
 # (plus per-module unit files: anchors, geometry, params, schema, solver, transforms, versions)
 
 # Production build

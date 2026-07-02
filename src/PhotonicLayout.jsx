@@ -96,6 +96,10 @@ import { TransformChainEditor } from './ui/panels/TransformChainEditor.jsx';
 import { GroupTreeItem } from './ui/panels/GroupTreeItem.jsx';
 import { LayerCard, LevelGroup } from './ui/panels/LayersPanel.jsx';
 import { Canvas } from './ui/canvas/Canvas.jsx';
+// 3-D viewer — React.lazy so three.js/three-bvh-csg (dynamically imported
+// INSIDE Viewer3D, like the AI SDK in src/ai/client.js) stay in their own
+// chunk; users who never toggle 3D never download them.
+const Viewer3D = React.lazy(() => import('./ui/Viewer3D.jsx'));
 import { DeferredTextInput } from './ui/DeferredTextInput.jsx';
 import { ContextMenu } from './ui/ContextMenu.jsx';
 import { BUILTIN_TEMPLATES } from './templates/index.js';
@@ -534,6 +538,11 @@ export default function App() {
   // 2-line method wizard (Marks 1991): stamp the line at two lengths and
   // emit a native HFSS script that extracts εeff/α in HFSS.
   const [showTwoLineWizard, setShowTwoLineWizard] = useState(false);
+  // 3-D viewer toggle ("3D" toolbar button). When on, the canvas area is
+  // REPLACED by the lazy Viewer3D (the 2-D Canvas unmounts and re-mounts
+  // cleanly on return). VIEWER-ONLY: scene model, solver, and exports are
+  // untouched. Esc (handled inside Viewer3D) or re-clicking returns to 2-D.
+  const [show3D, setShow3D] = useState(false);
   // Reference to the canvas <svg> element. Used by the figure exporter
   // to clone the live DOM (so SVG/PDF figures include rulers, dimension
   // overlays, mirror axes, replications — everything the user sees on
@@ -6308,6 +6317,13 @@ export default function App() {
               <Maximize2 size={11} /> fit
             </button>
             <button
+              onClick={() => setShow3D(v => !v)}
+              className={`flex items-center gap-1 px-2 py-1 rounded text-xs ${show3D ? 'bg-cyan-600 text-white' : 'border border-slate-600 hover:bg-slate-800'}`}
+              title="3-D preview — an approximation of what the HFSS export builds (extruded layer stack; rib cross-sections simplified). Viewer-only: nothing in the scene or exports changes. Esc returns to 2-D."
+            >
+              <Box size={11} /> 3D
+            </button>
+            <button
               onClick={() => setShowDimensions(d => !d)}
               className={`flex items-center gap-1 px-2 py-1 rounded text-xs ${showDimensions ? 'bg-violet-600 text-white' : 'border border-slate-600 hover:bg-slate-800'}`}
               title="Show dimension arrows for every parameter-bound width, height, and snap offset. Variable names are the primary label; values appear when there is room."
@@ -7929,6 +7945,25 @@ export default function App() {
           onToggleCollapse={() => setPanelLayout(pl => ({ ...pl, leftCollapsed: !pl.leftCollapsed }))}
         />
         <div className="flex-1 relative min-w-0">
+          {show3D ? (
+            <React.Suspense
+              fallback={
+                <div className="absolute inset-0 flex items-center justify-center text-xs" style={{ color: 'var(--app-slate-400)' }}>
+                  loading 3-D viewer…
+                </div>
+              }
+            >
+              <Viewer3D
+                scene={scene}
+                paramValues={paramValues}
+                hiddenLayerKeys={hiddenLayerKeys}
+                canvasTheme={canvasTheme}
+                setSelection={setSelection}
+                selectedIds={selectedIds}
+                onExit={() => setShow3D(false)}
+              />
+            </React.Suspense>
+          ) : (
           <Canvas
             scene={scene}
             updateScene={updateScene}
@@ -7970,6 +8005,7 @@ export default function App() {
             flashAnchor={flashAnchor}
             hiddenLayerKeys={hiddenLayerKeys}
           />
+          )}
           {/* Hidden-layer indicator: a "blank" canvas must be self-explaining.
               One click restores everything. */}
           {hiddenLayerKeys.size > 0 && (
@@ -7983,6 +8019,7 @@ export default function App() {
               {hiddenLayerKeys.size} layer{hiddenLayerKeys.size === 1 ? '' : 's'} hidden — show all
             </button>
           )}
+          {!show3D && (
           <div className="absolute top-2 left-2 px-2 py-1 rounded text-[10px] font-mono" style={{ background: 'rgba(15,23,42,0.85)', color: '#e2e8f0' }}>
             wheel = zoom · drag = pan/move · ⌥+drag = marquee/snap · F = fit ·{' '}
             <button
@@ -7993,6 +8030,7 @@ export default function App() {
               ? = all shortcuts
             </button>
           </div>
+          )}
           {showShortcuts && (
             <div className="absolute inset-0 z-40 flex items-center justify-center" style={{ background: 'rgba(2,6,23,0.7)' }} onClick={() => setShowShortcuts(false)}>
               <div className="rounded-lg border border-slate-700 shadow-2xl w-[560px] max-w-[92%] max-h-[85%] overflow-y-auto" style={{ background: '#0f172a' }} onClick={(e) => e.stopPropagation()}>

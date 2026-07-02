@@ -21,7 +21,9 @@
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "recharts": "^3.8.1",
-    "tailwindcss": "^4.3.0"
+    "tailwindcss": "^4.3.0",
+    "three": "^0.185.1",
+    "three-bvh-csg": "^0.0.18"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
