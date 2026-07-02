@@ -596,9 +596,9 @@ function DimensionDemo() {
     <div className="w-full h-full flex flex-col rounded overflow-hidden" style={{ background: '#0f172a' }}>
       <MiniHeader>
         <div className="flex-1" />
-        {/* Diagnose button (red when issues; here clean) */}
+        {/* Issues button (red when issues; here clean) */}
         <div className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px]" style={{ background: '#334155', color: '#e2e8f0' }}>
-          <AlertTriangle size={9} /> diagnose
+          <AlertTriangle size={9} /> issues
         </div>
         {/* Grid button (real cyan when on) */}
         <div className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] bg-cyan-700 text-white">

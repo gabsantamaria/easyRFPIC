@@ -8,7 +8,7 @@ import { rectInstanceToRing, shapeInstanceToRing } from './geometry/rings.js';
 import { resolvePolylineVertices, polylineIsTapered, synthArc90 } from './geometry/polyline.js';
 import { expandTransforms } from './scene/transforms.js';
 import { detectPortIntegrationLine } from './scene/lumpedPort.js';
-import { solveLayout, applyMirrors, resolveBooleanBboxes, validateSnapGraph } from './scene/solver.js';
+import { solveLayout, applyMirrors, resolveBooleanBboxes, validateSnapGraph, getLastSolveDiagnostics } from './scene/solver.js';
 import { generateGDS, viaGdsLayerMap } from './export/gds.js';
 import { generatePyAEDT } from './export/pyaedt.js';
 import { generateHfssNative } from './export/hfss-native.js';
@@ -823,11 +823,16 @@ export default function App() {
   //
   // The result `paramValues` contains both regular params and the synthetic
   // `_comp_<id>_cx/cy` entries, ready for use everywhere downstream.
-  const { values: paramValues, errors: paramErrors } = useMemo(() => {
+  const { values: paramValues, errors: paramErrors, solveDiag } = useMemo(() => {
     const pass1 = resolveParams(scene.params);
     // Compute solved positions using pass-1 values; solver itself uses
     // workingPV-with-synthetics so span widths still work.
     const solvedPass1 = applyMirrors(solveLayout(scene.components, scene.snaps, pass1.values), scene.mirrors);
+    // Capture the solver's per-run diagnostics (nan-pos-expr,
+    // dangling-instance, non-convergence) RIGHT after this solve — the
+    // module-level record is refreshed by every solveLayout call, and other
+    // solves (exports, drags) run at arbitrary times. Surfaced in sceneIssues.
+    const diag = getLastSolveDiagnostics();
     const synthetics = {};
     for (const c of solvedPass1) {
       synthetics[`_comp_${c.id}_cx`] = c.cx;
@@ -843,7 +848,7 @@ export default function App() {
     // Re-resolve params with synthetics available, so span dimension
     // expressions get correct values now.
     const pass2 = resolveParams(scene.params, synthetics);
-    return { values: { ...pass2.values, ...synthetics }, errors: pass2.errors };
+    return { values: { ...pass2.values, ...synthetics }, errors: pass2.errors, solveDiag: diag };
   }, [scene.params, scene.components, scene.snaps, scene.mirrors]);
 
   const selected = scene.components.find(c => c.id === selectedId);
@@ -4543,113 +4548,54 @@ export default function App() {
   //   - cycle: snap chain forms a loop, breaking the topological solver
   //   - nan_offset: snap dx or dy evaluates to NaN (broken expression)
   //   - bad_anchor_size: anchor references a component whose w/h evaluates to NaN/0
-  const validateScene = (s, paramVals) => {
-    const issues = [];
-    const compIds = new Set(s.components.map(c => c.id));
-    // Orphans
-    for (const snap of s.snaps) {
-      if (!compIds.has(snap.from.compId)) {
-        issues.push({ kind: 'orphan', snapId: snap.id, side: 'from', missing: snap.from.compId, msg: `Snap "${snap.id}" references missing component "${snap.from.compId}" (from)` });
-      }
-      if (!compIds.has(snap.to.compId)) {
-        issues.push({ kind: 'orphan', snapId: snap.id, side: 'to', missing: snap.to.compId, msg: `Snap "${snap.id}" references missing component "${snap.to.compId}" (to)` });
-      }
-    }
-    // Duplicate `to`: more than one snap places the same component. With the
-    // current model each component should be the `to` of exactly one snap (new
-    // snaps auto-reverse if they would create a duplicate). If we still find
-    // duplicates, the scene is from before the auto-reverse fix or was edited
-    // manually — flag for cleanup.
-    const toCounts = new Map();
-    for (const snap of s.snaps) {
-      if (!compIds.has(snap.to.compId)) continue;
-      if (!toCounts.has(snap.to.compId)) toCounts.set(snap.to.compId, []);
-      toCounts.get(snap.to.compId).push(snap);
-    }
-    for (const [compId, group] of toCounts.entries()) {
-      if (group.length > 1) {
-        const ids = group.map(sn => sn.id).join(', ');
-        issues.push({
-          kind: 'duplicate_to',
-          compId,
-          snapIds: group.map(sn => sn.id),
-          msg: `Component "${compId}" is the target of ${group.length} snaps (${ids}). Only one will position it; the others are silent. Reverse the redundant snaps so they push other components instead, or delete them.`,
-        });
-      }
-    }
-    // Cycles via topological walk
-    const inDeg = new Map();
-    const next = new Map();
-    for (const c of s.components) { inDeg.set(c.id, 0); next.set(c.id, []); }
-    for (const snap of s.snaps) {
-      if (!compIds.has(snap.from.compId) || !compIds.has(snap.to.compId)) continue;
-      inDeg.set(snap.to.compId, (inDeg.get(snap.to.compId) || 0) + 1);
-      next.get(snap.from.compId).push(snap.to.compId);
-    }
-    const queue = [];
-    for (const [id, d] of inDeg.entries()) if (d === 0) queue.push(id);
-    let visited = 0;
-    while (queue.length > 0) {
-      const id = queue.shift();
-      visited++;
-      for (const tgt of (next.get(id) || [])) {
-        const nd = inDeg.get(tgt) - 1;
-        inDeg.set(tgt, nd);
-        if (nd === 0) queue.push(tgt);
-      }
-    }
-    if (visited < s.components.length) {
-      const cyc = [...inDeg.entries()].filter(([, d]) => d > 0).map(([id]) => id);
-      issues.push({ kind: 'cycle', compIds: cyc, msg: `Snap chain forms a cycle through: ${cyc.join(', ')}` });
-    }
-    // NaN offsets
-    for (const snap of s.snaps) {
-      const dx = evalExpr(snap.dx, paramVals);
-      const dy = evalExpr(snap.dy, paramVals);
-      if (!Number.isFinite(dx) || !Number.isFinite(dy)) {
-        issues.push({ kind: 'nan_offset', snapId: snap.id, msg: `Snap "${snap.id}" has invalid dx="${snap.dx}" or dy="${snap.dy}" (evaluates to NaN)` });
-      }
-    }
-    return issues;
+  // Per-kind report metadata for the issues dialog: a heading and a one-line
+  // remediation hint. Kinds come from validateSnapGraph (solver.js) + the
+  // extra sceneIssues checks + the solver diagnostics — ONE vocabulary, so
+  // the badge count always equals what the dialog reports (the old click
+  // path re-ran a drifted duplicate validator and could say "No issues
+  // found" under a red badge).
+  const ISSUE_KIND_INFO = {
+    'missing-from':      { heading: 'Snaps referencing deleted components (from side)', hint: 'Auto-fix removes these snaps.' },
+    'missing-to':        { heading: 'Snaps referencing deleted components (to side)', hint: 'Auto-fix removes these snaps.' },
+    'duplicate-to':      { heading: 'Components targeted by multiple snaps', hint: 'Only one snap positions each component; the others are silent. Auto-fix reverses the redundant ones so they push outward through the chain.' },
+    'self-snap':         { heading: 'Snaps from a component to itself', hint: 'Delete the snap in the SNAPS panel.' },
+    'cycle':             { heading: 'Snap-chain cycles', hint: 'Break the loop by deleting or reversing one snap in the cycle.' },
+    'nan-offset':        { heading: 'Snap offsets that do not evaluate', hint: 'Fix the dx/dy expression (a referenced param may be missing or broken).' },
+    'param-error':       { heading: 'Parameter expressions that do not evaluate', hint: 'Fix in the PARAMS panel (circular or unresolvable expression).' },
+    'bad-dims':          { heading: 'Components with degenerate size', hint: 'Give w/h a positive value — anchors and exports misbehave at ≤ 0.' },
+    'stale-conductor':   { heading: 'Stale conductor-layer bindings', hint: 'Rebind the component to an existing conductor layer in the Inspector.' },
+    'unbound-conductor': { heading: 'Ambiguous conductor bindings', hint: 'Multiple conductor layers exist — pick one explicitly in the Inspector.' },
+    'nan-pos-expr':      { heading: 'Parametric positions (cx/cy expressions) that do not evaluate', hint: 'Fix the cxExpr/cyExpr in the Inspector; the numeric position is used meanwhile.' },
+    'dangling-instance': { heading: 'Snaps targeting a repeat replica that no longer exists', hint: 'Lower the snap\'s instance index or increase the repeat count.' },
+    'not-converged':     { heading: 'Snap solve did not settle', hint: 'The constraint network kept moving at the iteration cap — usually a near-cycle; check the newest snaps.' },
   };
+  const FIXABLE_KINDS = new Set(['missing-from', 'missing-to', 'duplicate-to']);
 
   const diagnoseScene = async () => {
-    const issues = validateScene(scene, paramValues);
+    // ONE source of truth: the same live sceneIssues feed that drives the
+    // badge and the SNAPS-panel ⚠ markers.
+    const issues = sceneIssues;
     if (issues.length === 0) {
-      await alertDialog('No issues found. Your scene looks healthy.', 'Diagnose scene');
+      await alertDialog('No issues found. Your scene looks healthy.\n\n(Checked: snap graph structure, snap offsets, parameter expressions, component dimensions, conductor bindings, and solver convergence.)', 'Scene issues');
       return;
     }
     const grouped = {};
     for (const it of issues) { (grouped[it.kind] = grouped[it.kind] || []).push(it); }
     const lines = [];
-    if (grouped.duplicate_to) {
-      lines.push(`⚠ ${grouped.duplicate_to.length} component(s) targeted by multiple snaps — only one will position each, the others are silent. New snaps now auto-reverse to avoid this; older scenes may need cleanup. Auto-fix can keep the most recent snap and reverse the rest so they push outward through the chain instead:`);
-      for (const it of grouped.duplicate_to) lines.push(`    • ${it.msg}`);
+    for (const [kind, group] of Object.entries(grouped)) {
+      const info = ISSUE_KIND_INFO[kind] || { heading: kind, hint: '' };
+      lines.push(`⚠ ${group.length} × ${info.heading}:`);
+      for (const it of group) lines.push(`    • ${it.message || it.msg}`);
+      if (info.hint) lines.push(`    → ${info.hint}`);
       lines.push('');
     }
-    if (grouped.orphan) {
-      lines.push(`⚠ ${grouped.orphan.length} snap(s) reference deleted components:`);
-      for (const it of grouped.orphan) lines.push(`    • ${it.msg}`);
-      lines.push('');
-    }
-    if (grouped.cycle) {
-      lines.push(`⚠ Snap chain has cycles:`);
-      for (const it of grouped.cycle) lines.push(`    • ${it.msg}`);
-      lines.push('');
-    }
-    if (grouped.nan_offset) {
-      lines.push(`⚠ ${grouped.nan_offset.length} snap(s) with broken dx/dy expressions:`);
-      for (const it of grouped.nan_offset) lines.push(`    • ${it.msg}`);
-      lines.push('');
-    }
-    const fixable = (grouped.orphan?.length || 0) + (grouped.duplicate_to?.length || 0);
+    const fixable = issues.filter(it => FIXABLE_KINDS.has(it.kind)).length;
     if (fixable > 0) {
-      lines.push('');
-      lines.push(`Auto-fix is available: removes orphaned snaps and reverses redundant duplicate-target snaps so they propagate outward through the chain instead of being silent.`);
-      const ok = await confirmDialog(lines.join('\n') + '\n\nApply auto-fix now?', 'Diagnose scene');
+      lines.push(`Auto-fix is available for ${fixable} snap issue(s): removes orphaned snaps and reverses redundant duplicate-target snaps so they propagate outward through the chain instead of being silent.`);
+      const ok = await confirmDialog(lines.join('\n') + '\n\nApply auto-fix now?', 'Scene issues');
       if (ok) autoFixSnaps();
     } else {
-      await alertDialog(lines.join('\n'), 'Diagnose scene');
+      await alertDialog(lines.join('\n'), 'Scene issues');
     }
   };
 
@@ -4666,9 +4612,19 @@ export default function App() {
       const claimed = new Set();
       const newParams = { ...prev.params };
       const fixed = [];
+      // Params whose EXPRESSION was already sign-flipped in THIS run. When a
+      // reversed snap uses the same param for BOTH dx and dy, the flip must
+      // happen ONCE — the second axis rides the same (already negated)
+      // expression. Flipping twice made -(-(old)) = old, so the reversed
+      // snap landed the component on the WRONG side.
+      const flippedParams = new Set();
       const paramRefCount = (paramName) => {
-        // count references to a param across components and snaps; >1 means
-        // shared, 1 (just this snap) means we can flip its sign in place.
+        // Count EVERY reference to a param across snaps, component fields,
+        // and other param expressions. The caller subtracts the reversed
+        // snap's OWN dx/dy occurrences — only a param referenced NOWHERE
+        // ELSE may have its expression sign-flipped in place. (The old gate
+        // was `refs <= 2`, which let a param shared with ANOTHER snap's
+        // offset get negated scene-wide — silent corruption of that snap.)
         let n = 0;
         for (const sn of snaps) { if (sn.dx === paramName) n++; if (sn.dy === paramName) n++; }
         for (const c of prev.components) {
@@ -4690,24 +4646,28 @@ export default function App() {
         }
         // `to` already claimed; can we reverse?
         if (!claimed.has(s.from.compId)) {
-          // Reverse direction. To negate offsets: if dx/dy are unique parameter
-          // names, mutate the param expression in place; otherwise wrap with -().
+          // Reverse direction. To negate offsets: if dx/dy are lone parameter
+          // names used NOWHERE else, mutate the param expression in place
+          // (keeps the snap edits-by-reference); otherwise wrap with -().
+          const ownRefs = (name) => (s.dx === name ? 1 : 0) + (s.dy === name ? 1 : 0);
           const negateOffset = (offsetExpr) => {
             if (typeof offsetExpr !== 'string') return offsetExpr;
             const stripped = offsetExpr.trim();
-            // If it's a sole identifier referring to a parameter that exists,
-            // and that parameter is referenced ONLY by this snap, flip its expr.
             if (/^[A-Za-z_][\w]*$/.test(stripped) && newParams[stripped]) {
-              const refs = paramRefCount(stripped);
-              if (refs <= 2) {
-                // Edit the param's expr to be its negation.
+              if (flippedParams.has(stripped)) {
+                // Already negated for this snap's other axis — reuse as-is.
+                return stripped;
+              }
+              const refsElsewhere = paramRefCount(stripped) - ownRefs(stripped);
+              if (refsElsewhere === 0) {
                 const old = newParams[stripped].expr;
-                const newExpr = `-(${old})`;
-                newParams[stripped] = { ...newParams[stripped], expr: newExpr };
+                newParams[stripped] = { ...newParams[stripped], expr: `-(${old})` };
+                flippedParams.add(stripped);
                 return stripped; // keep the same name; expr now negated
               }
             }
-            // Fallback: wrap inline
+            // Shared / non-identifier offset: wrap inline (never touch a
+            // param another snap or component still reads).
             return `-(${offsetExpr})`;
           };
           fixed.push({
@@ -4780,8 +4740,18 @@ export default function App() {
         }
       }
     }
+    // 6) Solver diagnostics from the main solve (captured in the paramValues
+    //    memo right after solveLayout): nan-pos-expr, dangling-instance, and
+    //    a synthetic non-convergence row. These were recorded by the solver
+    //    but never surfaced anywhere in the UI.
+    for (const it of (solveDiag && solveDiag.issues) || []) {
+      out.push({ kind: it.kind || 'solve-issue', snapId: it.snapId ?? null, compId: it.compId ?? null, message: it.message || String(it) });
+    }
+    if (solveDiag && solveDiag.converged === false) {
+      out.push({ kind: 'not-converged', snapId: null, compId: null, message: `Snap solve hit the iteration cap (${solveDiag.iterations}) while positions were still changing — the constraint network may not have settled.` });
+    }
     return out;
-  }, [scene.components, scene.snaps, scene.stack, paramErrors, paramValues]);
+  }, [scene.components, scene.snaps, scene.stack, paramErrors, paramValues, solveDiag]);
 
   // snapId → newline-joined issue messages, for the ⚠ markers on SNAPS
   // panel rows.
@@ -5856,12 +5826,15 @@ export default function App() {
             <button
               onClick={diagnoseScene}
               className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium"
-              style={{ background: sceneIssues.length > 0 ? '#dc2626' : 'var(--app-slate-700)', color: 'var(--app-slate-200)' }}
+              style={{
+                background: sceneIssues.length > 0 ? '#dc2626' : 'var(--app-slate-700)',
+                color: sceneIssues.length > 0 ? '#fff' : 'var(--app-slate-400)',
+              }}
               title={sceneIssues.length === 0
-                ? 'Validate scene: check for snap conflicts, orphans, cycles, broken expressions'
-                : `${sceneIssues.length} issue${sceneIssues.length === 1 ? '' : 's'} detected — click to diagnose\n${sceneIssues.slice(0, 8).map(it => `• ${it.message}`).join('\n')}${sceneIssues.length > 8 ? '\n…' : ''}`}
+                ? 'Scene health: no issues (checked live on every edit — snap graph, offsets, params, dimensions, conductor bindings, solver convergence). Click for the full report.'
+                : `${sceneIssues.length} issue${sceneIssues.length === 1 ? '' : 's'} — click for details and auto-fix\n${sceneIssues.slice(0, 8).map(it => `• ${it.message}`).join('\n')}${sceneIssues.length > 8 ? '\n…' : ''}`}
             >
-              <AlertTriangle size={11} /> diagnose{sceneIssues.length > 0 ? ` (${sceneIssues.length})` : ''}
+              <AlertTriangle size={11} /> {sceneIssues.length > 0 ? `issues (${sceneIssues.length})` : 'issues'}
             </button>
             {rulerMeasurements.length > 0 && (
               <button
