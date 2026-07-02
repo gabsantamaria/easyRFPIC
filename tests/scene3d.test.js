@@ -30,7 +30,7 @@ describe('buildScene3D — default scene', () => {
     expect(solids.length).toBeGreaterThan(0);
   });
 
-  it('waveguide rect → slab + rib at the wg layer Z from computeNumericLayerZ', () => {
+  it('waveguide rect → slab + trapezoid-loft rib at the wg layer Z from computeNumericLayerZ', () => {
     const wgSolids = solids.filter(s => s.compId === 'wg1');
     expect(wgSolids.length).toBe(2); // slab + rib
     const slab = wgSolids.find(s => /slab/.test(s.label));
@@ -42,8 +42,19 @@ describe('buildScene3D — default scene', () => {
     expect(rib.zBottom).toBeCloseTo(layerZ[wgLayer.id].zBottom + pv.h_slab, 9);
     // Rib top = wg layer top.
     expect(rib.zBottom + rib.height).toBeCloseTo(layerZ[wgLayer.id].zTop, 9);
-    // v1 approximation is flagged.
-    expect(warnings.some(w => /rectangular rib/i.test(w))).toBe(true);
+    // Etch-angle trapezoid: LOFT with the SAME ribBotW/ribTopW math the
+    // HFSS-native export sweeps (ref 'top' in the default stack ⇒ top =
+    // core width, bottom = core + 2·ribH/tan(etch_angle)).
+    expect(rib.kind).toBe('loft');
+    const ribH = layerZ[wgLayer.id].thickness - pv.h_slab;
+    const inward = ribH / Math.tan((pv.etch_angle * Math.PI) / 180);
+    const spanY = (ring) => Math.max(...ring.map(p => p[1])) - Math.min(...ring.map(p => p[1]));
+    // wg1 in the default scene runs along x ⇒ perpendicular = y.
+    expect(spanY(rib.ringTop)).toBeCloseTo(pv.w_wg, 6);
+    expect(spanY(rib.ringBottom)).toBeCloseTo(pv.w_wg + 2 * inward, 6);
+    expect(rib.ringBottom.length).toBe(rib.ringTop.length);
+    // The old rectangular-rib approximation warning is GONE.
+    expect(warnings.some(w => /rectangular rib/i.test(w))).toBe(false);
   });
 
   it('electrode at conductor zBottom with h_cond height', () => {
@@ -312,6 +323,114 @@ describe('buildScene3D — repeat transforms', () => {
     expect(rs.length).toBe(4);
     const cxs = rs.map(s => (Math.min(...s.ring.map(p => p[0])) + Math.max(...s.ring.map(p => p[0]))) / 2).sort((a, b) => a - b);
     expect(cxs.map(v => Math.round(v))).toEqual([0, 20, 40, 60]);
+  });
+
+  const ringCx = (ring) => (Math.min(...ring.map(p => p[0])) + Math.max(...ring.map(p => p[0]))) / 2;
+
+  it('a BOOLEAN repeat chain places operand rings at each replica position (punch cluster)', () => {
+    // The punch1 bug: the generic-extrude branch dropped the cluster
+    // transform (xfs), so every boolean replica's operand rings piled up
+    // at the base position while vias/bridges/wg shifted correctly.
+    const scene = sceneWith([
+      { id: 'bar', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: '10', h: '100', consumedBy: 'pn' },
+      { id: 'hole', kind: 'rect', layer: 'electrode', cx: 0, cy: 40, w: '6', h: '6', consumedBy: 'pn' },
+      {
+        id: 'pn', kind: 'boolean', op: 'punch', operandIds: ['bar', 'hole'], layer: 'electrode',
+        cx: 0, cy: 0, w: '0', h: '0',
+        transforms: [{ id: 't1', kind: 'repeat', enabled: true, n: '2', dx: '50', dy: '0', includeOriginal: true }],
+      },
+    ]);
+    const { solids } = buildScene3D(scene, pvOf(scene));
+    const blanks = solids.filter(s => s.compId === 'bar');
+    const tools = solids.filter(s => s.compId === 'hole');
+    expect(blanks.length).toBe(3);
+    expect(tools.length).toBe(3);
+    expect(blanks.map(s => Math.round(ringCx(s.ring))).sort((a, b) => a - b)).toEqual([0, 50, 100]);
+    expect(tools.map(s => Math.round(ringCx(s.ring))).sort((a, b) => a - b)).toEqual([0, 50, 100]);
+    // Each replica blank subtracts ITS OWN replica tool (co-located).
+    for (const b of blanks) {
+      expect(b.csg).toBeTruthy();
+      expect(b.csg.subtractIds.length).toBe(1);
+      const tool = solids.find(s => s.id === b.csg.subtractIds[0]);
+      expect(tool.role).toBe('tool');
+      expect(ringCx(tool.ring)).toBeCloseTo(ringCx(b.ring), 6);
+    }
+  });
+
+  it('a UNION repeat chain places every unit-cell operand at each replica position (meander cells)', () => {
+    const scene = sceneWith([
+      { id: 'railT', kind: 'rect', layer: 'electrode', cx: 0, cy: 10, w: '20', h: '2', consumedBy: 'u1' },
+      { id: 'railB', kind: 'rect', layer: 'electrode', cx: 0, cy: -10, w: '20', h: '2', consumedBy: 'u1' },
+      {
+        id: 'u1', kind: 'boolean', op: 'union', operandIds: ['railT', 'railB'], layer: 'electrode',
+        cx: 0, cy: 0, w: '0', h: '0',
+        transforms: [{ id: 't1', kind: 'repeat', enabled: true, n: '3', dx: '25', dy: '0', includeOriginal: true }],
+      },
+    ]);
+    const { solids } = buildScene3D(scene, pvOf(scene));
+    for (const opId of ['railT', 'railB']) {
+      const rs = solids.filter(s => s.compId === opId);
+      expect(rs.length).toBe(4);
+      expect(rs.map(s => Math.round(ringCx(s.ring))).sort((a, b) => a - b)).toEqual([0, 25, 50, 75]);
+      // All selectable as the top-level boolean (canvas cluster parity).
+      for (const s of rs) expect(s.selectId).toBe('u1');
+    }
+  });
+});
+
+describe('buildScene3D — rib etch-angle trapezoid variants', () => {
+  it("core_width_ref 'bottom' puts the core width on the BOTTOM ring", () => {
+    const base = sceneWith([
+      { id: 'wgB', kind: 'rect', layer: 'waveguide', cx: 0, cy: 0, w: '100', h: '5' },
+    ]);
+    const stack = base.stack.map(l => (l.role === 'waveguide' ? { ...l, core_width_ref: 'bottom' } : l));
+    const scene = { ...base, stack };
+    const pv = pvOf(scene);
+    const { solids } = buildScene3D(scene, pv);
+    const rib = solids.find(s => s.compId === 'wgB' && /rib/.test(s.label));
+    expect(rib.kind).toBe('loft');
+    const wgL = stack.find(l => l.role === 'waveguide');
+    const layerZ = computeNumericLayerZ(stack, pv);
+    const ribH = layerZ[wgL.id].thickness - pv.h_slab;
+    const inward = ribH / Math.tan((pv.etch_angle * Math.PI) / 180);
+    const spanY = (ring) => Math.max(...ring.map(p => p[1])) - Math.min(...ring.map(p => p[1]));
+    expect(spanY(rib.ringBottom)).toBeCloseTo(pv.w_wg, 6);
+    expect(spanY(rib.ringTop)).toBeCloseTo(Math.max(pv.w_wg - 2 * inward, 1e-3), 6);
+  });
+
+  it('a 90° etch angle degenerates to a straight prism (equal rings)', () => {
+    const base = sceneWith([
+      { id: 'wgV', kind: 'rect', layer: 'waveguide', cx: 0, cy: 0, w: '100', h: '5' },
+    ]);
+    const scene = { ...base, params: { ...base.params, etch_angle: { expr: '90', unit: 'deg', desc: '' } } };
+    const pv = pvOf(scene);
+    expect(pv.etch_angle).toBe(90);
+    const { solids } = buildScene3D(scene, pv);
+    const rib = solids.find(s => s.compId === 'wgV' && /rib/.test(s.label));
+    expect(rib.kind).toBe('loft');
+    const spanY = (ring) => Math.max(...ring.map(p => p[1])) - Math.min(...ring.map(p => p[1]));
+    expect(spanY(rib.ringBottom)).toBeCloseTo(spanY(rib.ringTop), 6);
+  });
+
+  it('rib loft rings shift with a repeat replica (xfs applied to both rings)', () => {
+    const scene = sceneWith([
+      {
+        id: 'wgR', kind: 'rect', layer: 'waveguide', cx: 0, cy: 0, w: '100', h: '5', consumedBy: 'uW',
+      },
+      {
+        id: 'uW', kind: 'boolean', op: 'union', operandIds: ['wgR'], layer: 'waveguide',
+        cx: 0, cy: 0, w: '0', h: '0',
+        transforms: [{ id: 't1', kind: 'repeat', enabled: true, n: '1', dx: '0', dy: '30', includeOriginal: true }],
+      },
+    ]);
+    const { solids } = buildScene3D(scene, pvOf(scene));
+    const ribs = solids.filter(s => s.compId === 'wgR' && /rib/.test(s.label));
+    expect(ribs.length).toBe(2);
+    const cyOf = (ring) => (Math.min(...ring.map(p => p[1])) + Math.max(...ring.map(p => p[1]))) / 2;
+    const cys = ribs.map(r => Math.round(cyOf(r.ringBottom))).sort((a, b) => a - b);
+    expect(cys).toEqual([0, 30]);
+    // Top ring rides along with the bottom ring.
+    for (const r of ribs) expect(cyOf(r.ringTop)).toBeCloseTo(cyOf(r.ringBottom), 6);
   });
 });
 

@@ -56,10 +56,66 @@ function ringToShape(THREE, ring, holes) {
   return shape;
 }
 
+// Loft between two index-corresponded plan rings (same vertex count/order,
+// e.g. the rib-waveguide trapezoid): planar side walls + triangulated caps.
+// Built as a closed, outward-wound triangle soup so it stays a valid CSG
+// brush. Both rings are normalized to CCW with ONE decision (they come from
+// the same generator, so their winding always matches).
+function buildLoftGeometry(THREE, solid, inflateZ) {
+  let bot = solid.ringBottom;
+  let top = solid.ringTop;
+  if (signedArea(bot) < 0) { bot = [...bot].reverse(); top = [...top].reverse(); }
+  const zB = solid.zBottom - inflateZ;
+  const zT = solid.zBottom + solid.height + inflateZ;
+  const n = bot.length;
+  const pos = [];
+  const tri = (a, b, c) => pos.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
+  // Side walls: CCW rings ⇒ (b0, b1, t1) / (b0, t1, t0) face outward.
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    const b0 = [bot[i][0], bot[i][1], zB];
+    const b1 = [bot[j][0], bot[j][1], zB];
+    const t0 = [top[i][0], top[i][1], zT];
+    const t1 = [top[j][0], top[j][1], zT];
+    tri(b0, b1, t1);
+    tri(b0, t1, t0);
+  }
+  // Caps: CCW triangulation faces +Z — up for the top cap, reversed for
+  // the bottom cap.
+  const topTris = THREE.ShapeUtils.triangulateShape(top.map(([x, y]) => new THREE.Vector2(x, y)), []);
+  for (const [a, b, c] of topTris) {
+    tri([top[a][0], top[a][1], zT], [top[b][0], top[b][1], zT], [top[c][0], top[c][1], zT]);
+  }
+  const botTris = THREE.ShapeUtils.triangulateShape(bot.map(([x, y]) => new THREE.Vector2(x, y)), []);
+  for (const [a, b, c] of botTris) {
+    tri([bot[a][0], bot[a][1], zB], [bot[c][0], bot[c][1], zB], [bot[b][0], bot[b][1], zB]);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  // three-bvh-csg's Evaluator requires position+uv+normal on BOTH brushes
+  // (a position-only soup throws inside evaluate, which buildSolidGeometry
+  // swallows — the subtraction would be SILENTLY skipped). Zero-filled uv
+  // is fine (no material here samples uv); normals are per-face from the
+  // soup and recomputed after CSG anyway.
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(new Float32Array((pos.length / 3) * 2), 2));
+  g.computeVertexNormals();
+  return g;
+}
+
 // Solid spec → BufferGeometry with ALL placement baked in (identity mesh
 // transform — required so CSG brushes compose without matrix bookkeeping).
 // `inflateZ` grows the solid symmetrically in Z (used on CSG tools).
 function buildRawGeometry(THREE, solid, inflateZ = 0) {
+  if (solid.kind === 'loft'
+      && Array.isArray(solid.ringBottom) && Array.isArray(solid.ringTop)
+      && solid.ringBottom.length >= 3 && solid.ringBottom.length === solid.ringTop.length) {
+    return buildLoftGeometry(THREE, solid, inflateZ);
+  }
+  if (solid.kind === 'loft') {
+    // Mismatched/degenerate rings — fall back to a straight prism on the
+    // bottom ring rather than failing the solid.
+    return buildRawGeometry(THREE, { ...solid, kind: 'extrude', ring: solid.ringBottom, holes: [] }, inflateZ);
+  }
   if (solid.kind === 'cylinder') {
     const h = Math.max(solid.height + 2 * inflateZ, 1e-4);
     const g = new THREE.CylinderGeometry(solid.r, solid.r, h, 48);
@@ -94,6 +150,7 @@ export default function Viewer3D({
   paramValues,
   hiddenLayerKeys,
   canvasTheme,
+  gridVisible = true,
   setSelection,
   selectedIds,
   onExit,
@@ -234,6 +291,16 @@ export default function Viewer3D({
     return s;
   }, [hiddenLayerKeys, stackHidden]);
 
+  // Grid follows the 2-D canvas grid setting (latest-value ref so the mesh
+  // rebuild effect reads it at creation; the effect below toggles live
+  // without a rebuild).
+  const gridVisibleRef = useRef(gridVisible !== false);
+  gridVisibleRef.current = gridVisible !== false;
+  useEffect(() => {
+    const ctx = threeRef.current;
+    if (ctx && ctx.grid) ctx.grid.visible = gridVisible !== false;
+  }, [gridVisible, spec, libsReady]);
+
   // ── Mesh (re)build from the spec ───────────────────────────────────────
   useEffect(() => {
     const ctx = threeRef.current;
@@ -333,6 +400,7 @@ export default function Viewer3D({
       grid.position.set((bb.min.x + bb.max.x) / 2, (bb.min.y + bb.max.y) / 2, 0);
       grid.material.transparent = true;
       grid.material.opacity = 0.35;
+      grid.visible = gridVisibleRef.current;
       ctx.scene3.add(grid);
       ctx.grid = grid;
     }
@@ -361,26 +429,51 @@ export default function Viewer3D({
   // Fits to the DEVICE solids when any exist (the translucent substrate
   // slab can be hundreds of µm thick — fitting to it would shrink the
   // actual geometry to a sliver); falls back to everything.
-  const fitToSolids = useCallback(() => {
+  const fitInfo = useCallback(() => {
     const ctx = threeRef.current;
-    if (!ctx) return;
-    const { THREE, camera, controls, solidsGroup } = ctx;
+    if (!ctx) return null;
+    const { THREE, camera, solidsGroup } = ctx;
     const device = solidsGroup.children.filter(m => !m.userData.stackSlab);
     const bb = new THREE.Box3();
     for (const m of (device.length ? device : solidsGroup.children)) bb.expandByObject(m);
-    if (bb.isEmpty()) return;
+    if (bb.isEmpty()) return null;
     const center = bb.getCenter(new THREE.Vector3());
     const size = bb.getSize(new THREE.Vector3());
     const radius = Math.max(size.x, size.y, size.z, 1) * 0.6;
     const dist = radius / Math.tan((camera.fov * Math.PI) / 360) * 1.25;
-    const dir = new THREE.Vector3(0.65, -0.75, 0.55).normalize();
-    camera.position.copy(center.clone().add(dir.multiplyScalar(dist)));
-    camera.near = Math.max(dist / 1000, 0.01);
-    camera.far = dist * 1000;
-    camera.updateProjectionMatrix();
-    controls.target.copy(center);
-    controls.update();
+    return { center, dist };
   }, []);
+
+  const placeCamera = useCallback((dirVec) => {
+    const ctx = threeRef.current;
+    const fit = fitInfo();
+    if (!ctx || !fit) return;
+    const { camera, controls } = ctx;
+    const dir = new ctx.THREE.Vector3(...dirVec).normalize();
+    camera.position.copy(fit.center.clone().add(dir.multiplyScalar(fit.dist)));
+    camera.near = Math.max(fit.dist / 1000, 0.01);
+    camera.far = fit.dist * 1000;
+    camera.updateProjectionMatrix();
+    controls.target.copy(fit.center);
+    controls.update();
+  }, [fitInfo]);
+
+  const fitToSolids = useCallback(() => {
+    placeCamera([0.65, -0.75, 0.55]);
+  }, [placeCamera]);
+
+  // Six axis-aligned views (Z-up: front = looking from −Y, right = from
+  // +X, top = from +Z). Top/bottom keep a hair of −Y tilt so the view
+  // direction is never exactly parallel to camera.up (OrbitControls'
+  // singular pole).
+  const AXIS_VIEWS = [
+    { key: 'top', label: 'T', title: 'Top view (looking down −Z)', dir: [0, -1e-3, 1] },
+    { key: 'bottom', label: 'B', title: 'Bottom view (looking up +Z)', dir: [0, -1e-3, -1] },
+    { key: 'front', label: 'F', title: 'Front view (looking along +Y)', dir: [0, -1, 0] },
+    { key: 'back', label: 'K', title: 'Back view (looking along −Y)', dir: [0, 1, 0] },
+    { key: 'left', label: 'L', title: 'Left view (looking along +X)', dir: [-1, 0, 0] },
+    { key: 'right', label: 'R', title: 'Right view (looking along −X)', dir: [1, 0, 0] },
+  ];
 
   // ── Click → selection sync (raycast; small-move threshold vs orbit) ────
   const downRef = useRef(null);
@@ -467,6 +560,23 @@ export default function Viewer3D({
         >
           fit
         </button>
+        <div className="flex rounded border overflow-hidden pointer-events-auto" style={{ borderColor: '#475569' }}>
+          {AXIS_VIEWS.map((v, i) => (
+            <button
+              key={v.key}
+              onClick={() => placeCamera(v.dir)}
+              className="px-1.5 py-1 text-[10px]"
+              style={{
+                background: 'rgba(15,23,42,0.85)',
+                color: '#e2e8f0',
+                borderLeft: i > 0 ? '1px solid #475569' : 'none',
+              }}
+              title={v.title}
+            >
+              {v.label}
+            </button>
+          ))}
+        </div>
         {building && (
           <div className="px-2 py-1 rounded text-[10px] pointer-events-auto" style={{ background: 'rgba(120,53,15,0.8)', color: '#fcd34d' }}>
             rebuilding…

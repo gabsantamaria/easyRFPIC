@@ -7958,6 +7958,7 @@ export default function App() {
                 paramValues={paramValues}
                 hiddenLayerKeys={hiddenLayerKeys}
                 canvasTheme={canvasTheme}
+                gridVisible={showGrid}
                 setSelection={setSelection}
                 selectedIds={selectedIds}
                 onExit={() => setShow3D(false)}

@@ -650,7 +650,11 @@ a no-mutation test).
   `extrude` (plan ring + holes, zBottom, height), `cylinder` (vias:
   layerFrom.zBottom → layerTo.zTop — the same numbers pyAEDT emits), `bridge`
   (closed arch profile from the SHARED parabolic 9-pt sampler
-  `src/geometry/bridge.js`, swept by width). **Convention: Z-UP** — X = plan x,
+  `src/geometry/bridge.js`, swept by width), `loft` (two index-corresponded
+  plan rings joined by planar side walls — the rib-waveguide ETCH-ANGLE
+  TRAPEZOID, exact same ribBotW/ribTopW math as hfss-native: inward =
+  ribH/tan(etch_angle), `core_width_ref` 'top'|'bottom'; fully-pinched top
+  clamps to a 1 nm hairline + warning). **Convention: Z-UP** — X = plan x,
   Y = plan y, Z = stack height (camera.up = (0,0,1)).
   - **CSG scope: subtract/punch ONLY.** Blank solids carry
     `csg: { subtractIds }`; tools emit `role:'tool'` and are never rendered
@@ -658,21 +662,27 @@ a no-mutation test).
     renders standalone). `union` = visual union (operands emitted separately —
     overlapping same-material solids read as merged; CSG-union deliberately
     skipped). `intersect` = overlap + warning.
+  - **Boolean-cluster replicas**: `emitComponent` expands the boolean's OWN
+    transform chain into per-instance cluster xforms (`xfs`) and EVERY
+    emission branch must apply them (`xfPoint`/`xfRing`). The generic-extrude
+    branch once skipped this — a punch/union boolean with `repeat` piled all
+    replica operand rings on the base position while the canvas/HFSS placed
+    them correctly (the punch1/meander-cells bug; regression-tested).
   - **layerKey** = EXACTLY `layerVisKey(...)` from
     `src/ui/canvas/layer-visibility.js` ('wg'|'port'|'via'|'cond:<id>'|
     'electrode') so `hiddenLayerKeys` filters 3-D identically to the canvas;
     PLUS `stack:<id>` for substrate/cladding slabs (viewer-local checkboxes).
     `selectId` = the top-level boolean for cluster members (click-select
     parity with the canvas); `compId` = the leaf component.
-  - **Documented approximations** (each pushes a `warnings[]` entry): rib
-    waveguides render slab + RECTANGULAR rib (top width = core width; no
-    etch-angle trapezoid); zero-thickness conductors get a nominal 0.02 µm
-    height; cladding/substrates are translucent boxes over the chip extent
+  - **Documented approximations** (each pushes a `warnings[]` entry):
+    zero-thickness conductors get a nominal 0.02 µm height;
+    cladding/substrates are translucent boxes over the chip extent
     (simSetup pads, else 50 µm) with NO subtraction (translucency shows
     embedded parts better); constant-width polylines use a mitered band,
     tapered ones the HFSS butt-join quads; port rects are thin sheets at the
     bound conductor's mid-Z; cutouts become Shape holes when fully inside the
-    footprint, else CSG tools.
+    footprint, else CSG tools (a rib waveguide's loft rib forces the CSG
+    path — the hole shortcut requires all-extrude instance solids).
 - **`src/scene/layer-z.js`** — `computeNumericLayerZ(stack, paramValues)`:
   the numeric per-layer Z walk EXTRACTED from generatePyAEDT (which now
   consumes it; byte-identical output verified). Same coplanar-group semantics
@@ -683,7 +693,12 @@ a no-mutation test).
   (module-level promise, same pattern as the AI SDK in `src/ai/client.js`), so
   they live in their own chunks (~750 kB three stays out of the main bundle —
   main-chunk delta of the whole feature ≈ +0.7 kB). Spec → meshes:
-  ExtrudeGeometry (+holes), CylinderGeometry, profile-extrude for bridges; all
+  ExtrudeGeometry (+holes), CylinderGeometry, profile-extrude for bridges,
+  manual BufferGeometry loft (side quads + triangulated caps) for the rib
+  trapezoid — the loft MUST carry position+uv+normal attributes: three-bvh-csg's
+  Evaluator hard-requires all three on both brushes, and a position-only soup
+  throws INSIDE the swallowed evaluate try/catch = silently-skipped subtraction
+  (a real bug we caught pre-commit). All
   placement is baked into geometry (identity mesh transforms) so three-bvh-csg
   Brushes compose without matrix bookkeeping; CSG tools are inflated ±10 nm in
   Z to dodge coplanar-face artifacts; recursive tool resolution (a tool may
@@ -692,7 +707,11 @@ a no-mutation test).
   click → `setSelection` (stack slabs unpickable); selected meshes get a cyan
   emissive tint; `data-solid-count` attribute on the container for testability.
   Esc exits via `onExit`. Fit prefers device solids over the (possibly 250 µm
-  thick) substrate slabs.
+  thick) substrate slabs; `fitInfo`/`placeCamera` also drive SIX axis-view
+  buttons (T/B/F/K/L/R — top/bottom/front/back/left/right; top/bottom keep a
+  hair of −Y tilt to dodge the OrbitControls pole). The z=0 GridHelper tracks
+  the 2-D canvas grid setting (`gridVisible` prop = `settings.gridVisible`,
+  toggled live without a mesh rebuild).
 
 ## Rendering
 

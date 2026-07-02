@@ -28,6 +28,12 @@
 //                (src/geometry/bridge.js), width, cx, cy, rotationDeg,
 //                zBottom }. The viewer sweeps the profile by `width`.
 //                Zero-thickness strap → thin (~0.05 µm) profile + warning.
+//   'loft'     — { ringBottom, ringTop, zBottom, height } two index-
+//                corresponded plan rings (same vertex count/order) joined
+//                by planar side walls: bottom cap at zBottom, top cap at
+//                zBottom+height. Used for the rib-waveguide etch-angle
+//                trapezoid (sloped sidewalls; the SAME ribBotW/ribTopW
+//                math generateHfssNative sweeps).
 //
 // BOOLEANS (CSG scope — subtract/punch ONLY):
 //   union      — each consumed operand emits as its own solid. CSG-union is
@@ -50,8 +56,6 @@
 // 'stack:<id>' for the substrate/cladding slabs (viewer-local toggles).
 //
 // DOCUMENTED APPROXIMATIONS (each also pushes a warnings[] entry when hit):
-//   - rib waveguides: rectangular rib cross-section (top width = core
-//     width); the etch-angle trapezoid is not modeled.
 //   - zero-thickness conductors render with a nominal 0.02 µm height.
 //   - cladding is a translucent box (NO subtraction of embedded parts —
 //     translucency shows them better); substrates are translucent slabs.
@@ -393,20 +397,21 @@ export function buildScene3D(rawScene, paramValues) {
         }));
       } else if (c.layer === 'waveguide' && c.kind === 'rect'
                  && !(Number.isFinite(inst.cornerRadius) && inst.cornerRadius > 0)) {
-        // Rib waveguide: TWO extrudes — slab + rib — using the SAME
-        // slab/rib dimension sources as the HFSS-native wg emission.
-        // v1: the rib cross-section is RECTANGULAR (top width = core
-        // width); the etch-angle trapezoid is approximated.
-        warn('rib-approx', 'rib waveguides: rectangular rib cross-section (etch-angle trapezoid approximated; top width = core width)');
+        // Rib waveguide: slab extrude + trapezoidal rib LOFT — the SAME
+        // slab/rib dimension sources AND etch-angle trapezoid math as the
+        // HFSS-native wg emission (ribH/tan(etch_angle) sidewall inset,
+        // core_width_ref 'top'|'bottom' reference face).
         const z = wgLayer && layerZ[wgLayer.id]
           ? layerZ[wgLayer.id]
           : { zBottom: 0, thickness: evalExpr('h_wg', pv) || 0.6 };
         const coreW = evalExpr((wgLayer && wgLayer.core_width) || 'w_wg', pv);
         const slabH = evalExpr((wgLayer && wgLayer.slab_height) || 'h_slab', pv);
         const slabW = evalExpr((wgLayer && wgLayer.slab_width) || 'w_slab', pv);
+        const etchDeg = evalExpr((wgLayer && wgLayer.etch_angle) || 'etch_angle', pv);
         const safeCoreW = Number.isFinite(coreW) && coreW > 0 ? coreW : 1.2;
         const safeSlabH = Number.isFinite(slabH) && slabH > 0 ? slabH : 0.1;
         const safeSlabW = Number.isFinite(slabW) && slabW > 0 ? slabW : 5.0;
+        const safeAngle = Number.isFinite(etchDeg) && etchDeg > 0 && etchDeg <= 90 ? etchDeg : 70;
         const axis = inst.w >= inst.h ? 'x' : 'y';
         const rectRing = (perpW) => xfRing(xfs, shapeInstanceToRing({
           ...inst,
@@ -428,10 +433,27 @@ export function buildScene3D(rawScene, paramValues) {
         }));
         const ribH = thk - slabT;
         if (ribH > 1e-9) {
+          // Sidewall inset over the rib height (etch angle from horizontal,
+          // < 90° ⇒ base wider than top) — mirrors generateHfssNative.
+          const inward = ribH / Math.max(Math.tan((safeAngle * Math.PI) / 180), 1e-9);
+          const widthRef = wgLayer && wgLayer.core_width_ref === 'bottom' ? 'bottom' : 'top';
+          let ribBotW;
+          let ribTopW;
+          if (widthRef === 'top') {
+            ribTopW = safeCoreW;
+            ribBotW = safeCoreW + 2 * inward;
+          } else {
+            ribBotW = safeCoreW;
+            ribTopW = Math.max(0, safeCoreW - 2 * inward);
+          }
+          if (!(ribTopW > 0)) {
+            warn(`ribpinch:${c.id}`, `${c.id}: etch angle fully pinches the rib top (top width ≤ 0) — rendered with a hairline top face`);
+          }
           instSolidIds.push(pushSolid({
             ...common,
-            kind: 'extrude',
-            ring: rectRing(safeCoreW),
+            kind: 'loft',
+            ringBottom: rectRing(ribBotW),
+            ringTop: rectRing(Math.max(ribTopW, 1e-3)),
             zBottom: z.zBottom + zOff + slabT,
             height: ribH,
             opacity: 1,
@@ -471,12 +493,16 @@ export function buildScene3D(rawScene, paramValues) {
             warn('zero-cond', 'zero-thickness conductor(s) rendered with nominal thickness for visibility (0.02 µm)');
           }
         }
+        // Apply the boolean-cluster transform chain (xfs) to the footprint
+        // rings — replicas of a boolean's repeat/displace chain land at
+        // their instance positions, not piled on the base (the via/bridge/
+        // wg branches already xfPoint/xfRing; this branch must too).
         for (const { ring, holes } of footprintRings(c, inst)) {
           instSolidIds.push(pushSolid({
             ...common,
             kind: 'extrude',
-            ring,
-            holes,
+            ring: xfRing(xfs, ring),
+            holes: (holes || []).map(h => xfRing(xfs, h)),
             zBottom,
             height,
             opacity,
@@ -591,6 +617,10 @@ export function buildScene3D(rawScene, paramValues) {
   };
   for (const s of solids) {
     if (s.kind === 'extrude') for (const [x, y] of s.ring) grow(x, y);
+    else if (s.kind === 'loft') {
+      for (const [x, y] of s.ringBottom) grow(x, y);
+      for (const [x, y] of s.ringTop) grow(x, y);
+    }
     else if (s.kind === 'cylinder') { grow(s.cx - s.r, s.cy - s.r); grow(s.cx + s.r, s.cy + s.r); }
     else if (s.kind === 'bridge') {
       const half = Math.max(...s.profile.map(([xa]) => Math.abs(xa)), s.width / 2);
