@@ -8,6 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   collectNudgeCluster, cloneSnapsForDuplicate, groupParamPrefixes,
+  deleteComponentsFromScene,
 } from '../src/PhotonicLayout.jsx';
 
 // ── C4: collectNudgeCluster ──────────────────────────────────────────────
@@ -164,5 +165,64 @@ describe('groupParamPrefixes (C7 PARAMS grouping)', () => {
     const { sections, flat } = groupParamPrefixes(names, 4);
     expect(sections[0].prefix).toBe('m_h');
     expect(flat).toEqual(['m_w']); // prefix 'm' has only 1 member
+  });
+});
+
+// ── deleteComponentsFromScene (zombie-operand fix) ───────────────────────
+
+describe('deleteComponentsFromScene', () => {
+  const mkScene = () => ({
+    components: [
+      rect('a', { consumedBy: 'u' }),
+      rect('b', { consumedBy: 'u' }),
+      { id: 'u', kind: 'boolean', op: 'union', operandIds: ['a', 'b'], cx: 0, cy: 0, w: '0', h: '0' },
+      rect('tool', { consumedBy: 'p', cloneOf: 'port1' }),
+      rect('blank', { consumedBy: 'p' }),
+      { id: 'p', kind: 'boolean', op: 'punch', operandIds: ['blank', 'tool'], cx: 0, cy: 0, w: '0', h: '0' },
+      rect('free'),
+    ],
+    snaps: [
+      { id: 's1', from: { compId: 'free', anchor: 'C' }, to: { compId: 'a', anchor: 'C' }, dx: '0', dy: '0' },
+      { id: 's2', from: { compId: 'free', anchor: 'C' }, to: { compId: 'tool', anchor: 'C' }, dx: '0', dy: '0' },
+    ],
+    mirrors: [{ id: 'm1', axis: 'x', axisCoord: 0, members: [{ srcId: 'a', mirrorId: 'free', locked: true }] }],
+    groups: [{ id: 'g1', name: 'g', memberIds: ['u', 'free'] }],
+  });
+
+  it('deleting a BOOLEAN releases its operands (no invisible zombies) and keeps consistency', () => {
+    const next = deleteComponentsFromScene(mkScene(), new Set(['u']));
+    const a = next.components.find(c => c.id === 'a');
+    const b = next.components.find(c => c.id === 'b');
+    // Operands SURVIVE with consumedBy cleared — they render standalone again.
+    expect(a).toBeTruthy();
+    expect(b).toBeTruthy();
+    expect(a.consumedBy).toBeUndefined();
+    expect(b.consumedBy).toBeUndefined();
+    // NO component keeps a dangling consumedBy → no zombie invisible to
+    // the renderer/SHAPES list but still flowing into exports.
+    const ids = new Set(next.components.map(c => c.id));
+    for (const c of next.components) {
+      if (c.consumedBy) expect(ids.has(c.consumedBy)).toBe(true);
+    }
+    // Group membership pruned; the group survives via 'free'.
+    expect(next.groups[0].memberIds).toEqual(['free']);
+  });
+
+  it('deleting a PUNCH boolean drops its clone tool but keeps the blank', () => {
+    const next = deleteComponentsFromScene(mkScene(), new Set(['p']));
+    expect(next.components.find(c => c.id === 'tool')).toBeUndefined(); // cloneOf helper dies with the boolean
+    const blank = next.components.find(c => c.id === 'blank');
+    expect(blank).toBeTruthy();
+    expect(blank.consumedBy).toBeUndefined();
+    // The snap that targeted the dropped clone dies with it.
+    expect(next.snaps.map(s => s.id)).toEqual(['s1']);
+  });
+
+  it('deleting a primitive leaves booleans and other members intact', () => {
+    const next = deleteComponentsFromScene(mkScene(), new Set(['free']));
+    expect(next.components.find(c => c.id === 'u')).toBeTruthy();
+    expect(next.snaps).toHaveLength(0);        // both snaps hung off 'free'
+    expect(next.mirrors).toHaveLength(0);      // mirror member referenced 'free'
+    expect(next.groups[0].memberIds).toEqual(['u']);
   });
 });

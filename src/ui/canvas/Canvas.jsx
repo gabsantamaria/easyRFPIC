@@ -1416,10 +1416,22 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     };
   }, []);
 
+  // True when a keydown originated in a text-entry element. All three tool
+  // handlers below must ignore those: DeferredTextInput does not stop
+  // Enter/Escape propagation, so committing an Inspector/PARAMS field with
+  // Enter ALSO committed an in-progress polyline draft, and Escape (meant to
+  // revert the field's draft text) cancelled the trace / exited the tool.
+  const keyFromTextInput = (e) => {
+    const t = e.target;
+    const tag = t && t.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (t && t.isContentEditable);
+  };
+
   // Ruler-mode Escape: cancel in-progress measurement, or exit the tool entirely
   useEffect(() => {
     if (!rulerMode) return;
     const handler = (e) => {
+      if (keyFromTextInput(e)) return;
       if (e.key === 'Escape') {
         if (rulerInProgress) setRulerInProgress(null);
         else { setRulerMode(false); if (rulerSnapPoint) setRulerSnapPoint(null); }
@@ -1436,6 +1448,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
   useEffect(() => {
     if (snapMode !== 'creating') return;
     const handler = (e) => {
+      if (keyFromTextInput(e)) return;
       if (e.key === 'Escape') {
         if (snapPick) { setSnapPick(null); setSnapHover(null); setSnapCursor(null); }
         else setSnapMode('idle');
@@ -1449,6 +1462,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
   useEffect(() => {
     if (!addMode) return;
     const handler = (e) => {
+      if (keyFromTextInput(e)) return;
       if (e.key === 'Escape') {
         if (polylineDraft) setPolylineDraft(null);
         else if (addDrag) setAddDrag(null);
@@ -1469,12 +1483,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           // the arc ENDPOINT and the draft synthesizes a 90° circular
           // arc through it (center on the perpendicular bisector of the
           // chord — see synthArc90). Needs at least one placed vertex
-          // (an arc sweeps FROM the previous vertex). Ignore key events
-          // targeted at text inputs so typing in the inspector can't
-          // flip the mode.
-          const t = e.target;
-          const tag = t && t.tagName;
-          if (tag === 'INPUT' || tag === 'TEXTAREA' || (t && t.isContentEditable)) return;
+          // (an arc sweeps FROM the previous vertex).
           if (polylineDraft.vertices.length > 0) {
             setPolylineDraft({ ...polylineDraft, arcNext: !polylineDraft.arcNext });
             e.preventDefault();
@@ -1863,7 +1872,6 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
   };
 
   const onWheel = (e) => {
-    e.preventDefault();
     // Smooth, sensitivity-controlled zoom that works for both mouse wheel and trackpad.
     // Smaller k = less sensitive. 0.0015 feels gentle.
     const k = 0.0015;
@@ -1884,6 +1892,22 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       return { x: newCx, y: newCy, w: newW, h: newH };
     });
   };
+  // NATIVE non-passive wheel listener. React 19 registers its root-delegated
+  // wheel listeners as PASSIVE, so preventDefault inside a JSX onWheel is a
+  // no-op (console warning + the browser default still runs): trackpad pinch
+  // (ctrl+wheel) zoomed the whole PAGE on top of the canvas zoom, and a
+  // scrollable ancestor would scroll. Registering directly on the <svg> with
+  // { passive: false } makes preventDefault effective. The handler proper
+  // stays in onWheel (via a latest-value ref, so this effect binds once).
+  const onWheelRef = useRef(null);
+  onWheelRef.current = onWheel;
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return;
+    const h = (e) => { e.preventDefault(); onWheelRef.current?.(e); };
+    el.addEventListener('wheel', h, { passive: false });
+    return () => el.removeEventListener('wheel', h);
+  }, []);
 
   const onMouseDown = (e) => {
     // Only left-button starts drags / selection. Right-click is reserved
@@ -3280,7 +3304,6 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       onMouseMove={onMouseMove}
       onMouseUp={onMouseUp}
       onMouseLeave={onMouseUp}
-      onWheel={onWheel}
       onDoubleClick={(e) => {
         // Double-click while drawing a polyline commits it (using the
         // vertices placed up to the previous single click — the double

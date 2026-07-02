@@ -31,15 +31,26 @@ export function ModalDialog({
   }, [open, kind]);
   useEffect(() => {
     if (!open) return;
+    // CAPTURE phase + stopPropagation: while the dialog is open, NO keydown
+    // may reach the app's global handlers (Delete deleted canvas components
+    // behind a confirm, Escape both cancelled the dialog AND cleared the
+    // selection, Enter double-fired into the polyline-draft commit, ⌘Z/⌘D/
+    // arrows all stayed live). The window-capture listener runs FIRST and
+    // stopPropagation halts the event entirely (including React's delegated
+    // handlers). Typing in the prompt input still works: character insertion
+    // is the keydown's DEFAULT ACTION (surfaced via input/onChange events),
+    // which stopPropagation does not cancel — only preventDefault would,
+    // and we only preventDefault for Escape/Enter.
     const onKey = (e) => {
+      e.stopPropagation();
       if (e.key === 'Escape') { e.preventDefault(); onCancel?.(); }
       else if (e.key === 'Enter' && kind !== 'alert') {
         e.preventDefault();
         onConfirm?.(kind === 'prompt' ? value : true);
       }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
   }, [open, kind, value, onConfirm, onCancel]);
   if (!open) return null;
   return (

@@ -110,6 +110,39 @@ const saveBroadcastChannel = (typeof BroadcastChannel !== 'undefined')
   ? new BroadcastChannel('photonic_layout')
   : null;
 
+// Delete a set of component ids from a scene, keeping every derived
+// structure consistent. Deleting a BOOLEAN releases its consumed operands
+// (clears their consumedBy — same contract as the SHAPES-tree deleteBoolean):
+// an operand whose consumedBy dangles is skipped by the canvas renderer AND
+// the SHAPES list — an invisible, unselectable zombie that still flows into
+// exports (a real bug: the Delete key / Inspector delete left them behind).
+// Punch-tool clones (cloneOf) are helper geometry with no life of their own —
+// they go with the boolean. Snaps/mirrors/groups are re-filtered against the
+// SURVIVING id set, so links to dropped clones die too.
+export function deleteComponentsFromScene(prev, idSet) {
+  const deletedBooleanIds = new Set(
+    prev.components.filter(c => idSet.has(c.id) && c.kind === 'boolean').map(c => c.id)
+  );
+  const components = prev.components
+    .filter(c => !idSet.has(c.id))
+    .filter(c => !(c.consumedBy && deletedBooleanIds.has(c.consumedBy) && c.cloneOf))
+    .map(c => (c.consumedBy && deletedBooleanIds.has(c.consumedBy)) ? { ...c, consumedBy: undefined } : c);
+  const survivingIds = new Set(components.map(c => c.id));
+  // Remove deleted ids from each group's memberIds; drop groups that become empty
+  const newGroups = (prev.groups || [])
+    .map(g => ({ ...g, memberIds: g.memberIds.filter(id => survivingIds.has(id)) }))
+    .filter(g => g.memberIds.length > 0);
+  return {
+    ...prev,
+    components,
+    snaps: (prev.snaps || []).filter(s => survivingIds.has(s.from.compId) && survivingIds.has(s.to.compId)),
+    mirrors: (prev.mirrors || [])
+      .map(m => ({ ...m, members: m.members.filter(mm => survivingIds.has(mm.srcId) && survivingIds.has(mm.mirrorId)) }))
+      .filter(m => m.members.length > 0),
+    groups: newGroups,
+  };
+}
+
 // C4: expand a selection to the full boolean-cluster move set, matching
 // drag semantics (CLAUDE.md "Cluster drag"): a selected primitive that's
 // consumed by a boolean moves its WHOLE cluster (walk consumedBy up to
@@ -1629,8 +1662,12 @@ export default function App() {
   //      teammate's chat, AND survives even if localStorage is cleared.
   //      Will silently no-op if the API isn't present or the user
   //      hasn't granted clipboard-write permission.
-  const handleCopy = useCallback(async () => {
-    const payload = buildSelectionFragment(selectedIds);
+  // `idsOverride` (a Set) lets the context menu copy the right-clicked
+  // component even when it isn't part of the current selection; the ⌘C
+  // path calls with no args and copies the selection.
+  const handleCopy = useCallback(async (idsOverride) => {
+    const ids = idsOverride instanceof Set ? idsOverride : selectedIds;
+    const payload = buildSelectionFragment(ids);
     if (!payload) return;
     setClipboard(payload);
     const wireFormat = JSON.stringify({ _kind: CLIPBOARD_KIND, ...payload });
@@ -1651,7 +1688,12 @@ export default function App() {
         await navigator.clipboard.writeText(JSON.stringify({ _kind: CLIPBOARD_KIND, ...payload }, null, 2));
       }
     } catch { /* permission denied / not allowed — silent fallback */ }
-    setSaveStatus(s => s); // no-op, just to indicate user feedback could go here
+    // Visible feedback — ⌘C was completely silent, so users couldn't tell
+    // whether the fragment (and its param closure) was captured. Reuses the
+    // canvas status pill; clears itself after a moment.
+    const nParams = Object.keys(payload.params || {}).length;
+    setInteractionStatus({ kind: 'add', line: `Copied ${payload.components.length} shape${payload.components.length === 1 ? '' : 's'}${nParams ? ` + ${nParams} param${nParams === 1 ? '' : 's'}` : ''}` });
+    setTimeout(() => setInteractionStatus(s => (s && s.line && s.line.startsWith('Copied ') ? null : s)), 2200);
   }, [selectedIds, buildSelectionFragment]);
 
   const handlePaste = useCallback(async (at) => {
@@ -2598,21 +2640,7 @@ export default function App() {
   const deleteComp = (idOrSet) => {
     const idSet = idOrSet instanceof Set ? idOrSet : new Set([idOrSet]);
     if (idSet.size === 0) return;
-    updateScene(prev => {
-      // Remove deleted ids from each group's memberIds; drop groups that become empty
-      const newGroups = prev.groups
-        .map(g => ({ ...g, memberIds: g.memberIds.filter(id => !idSet.has(id)) }))
-        .filter(g => g.memberIds.length > 0);
-      return {
-        ...prev,
-        components: prev.components.filter(c => !idSet.has(c.id)),
-        snaps: prev.snaps.filter(s => !idSet.has(s.from.compId) && !idSet.has(s.to.compId)),
-        mirrors: prev.mirrors
-          .map(m => ({ ...m, members: m.members.filter(mm => !idSet.has(mm.srcId) && !idSet.has(mm.mirrorId)) }))
-          .filter(m => m.members.length > 0),
-        groups: newGroups,
-      };
-    });
+    updateScene(prev => deleteComponentsFromScene(prev, idSet));
     setSelection({ ids: new Set(), primary: null });
   };
   deleteCompRef.current = deleteComp;
@@ -2794,6 +2822,8 @@ export default function App() {
         disabled: !ungroupId,
       },
       { divider: true },
+      { label: multi ? `Copy (${selectedIds.size})` : 'Copy', icon: Copy, hint: '⌘C',
+        onClick: () => handleCopy(multi ? selectedIds : new Set([compId])) },
       { label: multi ? `Duplicate (${selectedIds.size})` : 'Duplicate', icon: Copy,
         onClick: () => duplicateIds(multi ? selectedIds : new Set([compId])) },
       { label: multi ? `Download selection (${selectedIds.size})` : 'Download shape', icon: Download,
@@ -5865,7 +5895,16 @@ export default function App() {
             <input
               type="number" step="0.1" min="0.1"
               value={gridSize}
-              onChange={(e) => setGridSize(Math.max(0.1, parseFloat(e.target.value) || 1))}
+              title="Grid pitch (µm)"
+              aria-label="Grid pitch (µm)"
+              onChange={(e) => {
+                // Ignore mid-typing states ('', '0.') instead of coercing them
+                // to 1 — the old `parseFloat(...)||1` yanked the grid to 1 µm
+                // while the user was still typing. Same handling as the
+                // SettingsPanel's grid-size field.
+                const n = parseFloat(e.target.value);
+                if (Number.isFinite(n) && n > 0) setGridSize(Math.max(0.1, n));
+              }}
               className="w-12 bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-xs text-slate-100 outline-none"
             />
             <button onClick={fitToView} className="flex items-center gap-1 px-2 py-1 rounded text-xs border border-slate-600 hover:bg-slate-800" title="Fit all to view (F)">
@@ -5890,8 +5929,11 @@ export default function App() {
             <button onClick={handleSaveAs} className="flex items-center gap-1 px-2 py-1 rounded text-xs border border-slate-600 hover:bg-slate-800" title="Save as new (Cmd/Ctrl+Shift+S)">
               <Copy size={11} /> save as
             </button>
-            <button onClick={handleNewBlank} className="flex items-center gap-1 px-2 py-1 rounded text-xs border border-slate-600 hover:bg-slate-800" title="New blank design — starts from a completely empty scene (no components, no parameters; layer stack preserved). Prompts to save the current design first if unsaved.">
+            <button onClick={handleNewBlank} className="flex items-center gap-1 px-2 py-1 rounded text-xs border border-slate-600 hover:bg-slate-800" title="New blank design — a completely empty scene (no components, no parameters; layer stack preserved). The current design is saved to storage first.">
               <FilePlus size={11} /> blank
+            </button>
+            <button onClick={handleNew} className="flex items-center gap-1 px-2 py-1 rounded text-xs border border-slate-600 hover:bg-slate-800" title="New design from the example scene (demo ring + electrode) — a starting point that shows the parametric idioms. The current design is saved to storage first.">
+              <FileText size={11} /> new
             </button>
             {/* Per-design export moved to a download icon on each version (incl.
                 current) in the SAVED DESIGNS list; design import lives in that
@@ -6939,7 +6981,7 @@ export default function App() {
                           <AlertTriangle size={11} />
                         </span>
                       )}
-                      <button onClick={() => deleteSnap(s.id)} className="text-slate-500 hover:text-red-400 shrink-0"><Link2Off size={11} /></button>
+                      <button onClick={() => deleteSnap(s.id)} className="text-slate-500 hover:text-red-400 shrink-0" title="Delete this snap (the child keeps its position but is no longer constrained)"><Link2Off size={11} /></button>
                     </div>
                     <div className="grid grid-cols-2 gap-1 mt-1">
                       <div>
@@ -6988,12 +7030,18 @@ export default function App() {
                   <div key={m.id} className="p-2 rounded text-xs border border-slate-700" style={{ background: 'var(--app-slate-800)' }}>
                     <div className="flex items-center justify-between mb-1">
                       <span className="font-mono text-[10px] text-violet-300">{m.axis} @ {m.axisCoord}</span>
-                      <button onClick={() => deleteMirror(m.id)} className="text-slate-500 hover:text-red-400"><Trash2 size={11} /></button>
+                      <button onClick={() => deleteMirror(m.id)} className="text-slate-500 hover:text-red-400" title="Delete this mirror (both copies stay where they are, no longer linked)"><Trash2 size={11} /></button>
                     </div>
                     {m.members.map((mm, i) => (
                       <div key={i} className="flex items-center justify-between gap-1 text-[10px] py-0.5">
                         <span className="font-mono text-slate-300 truncate">{mm.srcId} ↔ {mm.mirrorId}</span>
-                        <button onClick={() => toggleMirrorLock(m.id, i)} className={mm.locked ? 'text-emerald-400' : 'text-amber-400'}>
+                        <button
+                          onClick={() => toggleMirrorLock(m.id, i)}
+                          className={mm.locked ? 'text-emerald-400' : 'text-amber-400'}
+                          title={mm.locked
+                            ? 'Locked: the mirror copy follows the source. Click to unlock and edit the copy independently (breaks symmetry).'
+                            : 'Unlocked: the copy is independent (symmetry broken). Click to re-lock it to the source.'}
+                        >
                           {mm.locked ? <Lock size={10} /> : <Unlock size={10} />}
                         </button>
                       </div>
@@ -7520,9 +7568,16 @@ export default function App() {
                     // names, and would create dead `<id>_w` / `<id>_h`
                     // params that the unused-param scanner flags as
                     // orphans. Same regex used everywhere else (param
-                    // names, HFSS variable validation).
-                    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(newId)) return;
-                    if (scene.components.some(c => c.id === newId && c.id !== selected.id)) return;
+                    // names, HFSS variable validation). TELL the user
+                    // why (the field silently reverting taught nothing).
+                    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(newId)) {
+                      alertDialog(`"${newId}" is not a valid id.\n\nIds become HFSS part names and appear in expressions, so they must be identifiers: letters, digits, and underscores, not starting with a digit.`, 'Invalid id');
+                      return;
+                    }
+                    if (scene.components.some(c => c.id === newId && c.id !== selected.id)) {
+                      alertDialog(`The id "${newId}" is already used by another component.`, 'Id already in use');
+                      return;
+                    }
                     const oldId = selected.id;
                     // Geometry-knob param suffixes the drag-add path
                     // creates per-component. Renaming the component
