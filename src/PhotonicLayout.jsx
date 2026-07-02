@@ -524,6 +524,10 @@ export default function App() {
   const toggleEditDims = () => updateSetting('showDimensionsOnSelect', v => !v);
   // Help / tutorial overlay. Opened from the "?" button in the header.
   const [showHelp, setShowHelp] = useState(false);
+  // Keyboard-shortcuts cheatsheet — opened with the '?' key (the old hint
+  // bar overflowed and taught nothing at a glance; the pill now shows only
+  // the essentials and points here).
+  const [showShortcuts, setShowShortcuts] = useState(false);
   // AI geometry assistant dialog (✨ header button): natural-language /
   // sketch input → Claude → validated parametric fragment insert.
   const [showAiAssistant, setShowAiAssistant] = useState(false);
@@ -2075,11 +2079,11 @@ export default function App() {
         // The red status dot signals it; a manual Cmd+S surfaces the modal.
         console.error('Autosave failed:', describeSaveFailure(res), res);
       }
-    }, 2000);
+    }, Math.min(60, Math.max(1, Number(settings.autosaveSeconds) || 2)) * 1000);
     return () => {
       if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     };
-  }, [workspace, scene, history, future, versions, currentVersionId, designName, saveStatus, tabRole, mirrorWorkspaceToFileIfLinked]);
+  }, [workspace, scene, history, future, versions, currentVersionId, designName, saveStatus, tabRole, settings.autosaveSeconds, mirrorWorkspaceToFileIfLinked]);
 
   // ----- Unload guard + emergency flush -----
   // Closing/refreshing the tab within the 2s autosave debounce silently
@@ -2233,6 +2237,10 @@ export default function App() {
         // preventDefault unconditionally — beats the browser bookmark dialog.
         e.preventDefault();
         if (selectedIds.size > 0) duplicateIdsRef.current?.(selectedIds);
+      } else if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        // Keyboard cheatsheet (Shift+/ on most layouts).
+        e.preventDefault();
+        setShowShortcuts(s => !s);
       } else if ((e.metaKey || e.ctrlKey) && (e.key === 'a' || e.key === 'A')) {
         // Select all non-consumed, VISIBLE components (consumed operands
         // live inside their boolean cluster; hidden-layer components can't
@@ -7961,9 +7969,48 @@ export default function App() {
               {hiddenLayerKeys.size} layer{hiddenLayerKeys.size === 1 ? '' : 's'} hidden — show all
             </button>
           )}
-          <div className="absolute top-2 left-2 px-2 py-1 rounded text-[10px] font-mono pointer-events-none" style={{ background: 'rgba(15,23,42,0.85)', color: '#e2e8f0' }}>
-            wheel = zoom · drag = pan/move · ⌥/Alt+drag = marquee · ⌘+click = toggle · ⌘+drag = no grid · F = fit · ⇧F = zoom sel · arrows = nudge (⇧ = 10×) · ⌘D = dup · ⌘A = all · Esc = deselect · ⌘Z/⇧Z = undo/redo · ⌘C/V = copy/paste · ⌘S = save
+          <div className="absolute top-2 left-2 px-2 py-1 rounded text-[10px] font-mono" style={{ background: 'rgba(15,23,42,0.85)', color: '#e2e8f0' }}>
+            wheel = zoom · drag = pan/move · ⌥+drag = marquee/snap · F = fit ·{' '}
+            <button
+              onClick={() => setShowShortcuts(true)}
+              className="underline decoration-dotted hover:text-cyan-300"
+              title="Full keyboard & mouse cheatsheet"
+            >
+              ? = all shortcuts
+            </button>
           </div>
+          {showShortcuts && (
+            <div className="absolute inset-0 z-40 flex items-center justify-center" style={{ background: 'rgba(2,6,23,0.7)' }} onClick={() => setShowShortcuts(false)}>
+              <div className="rounded-lg border border-slate-700 shadow-2xl w-[560px] max-w-[92%] max-h-[85%] overflow-y-auto" style={{ background: '#0f172a' }} onClick={(e) => e.stopPropagation()}>
+                <div className="px-4 py-2 border-b border-slate-700 flex items-center justify-between">
+                  <h3 className="text-sm font-medium text-slate-200">Keyboard & mouse shortcuts</h3>
+                  <button onClick={() => setShowShortcuts(false)} className="text-slate-400 hover:text-slate-200 text-sm">✕</button>
+                </div>
+                <div className="px-4 py-3 grid grid-cols-2 gap-x-6 gap-y-4 text-xs">
+                  {[
+                    { h: 'View', rows: [['wheel', 'zoom at cursor'], ['drag background', 'pan'], ['F', 'fit all'], ['⇧F', 'zoom to selection'], ['?', 'this cheatsheet']] },
+                    { h: 'Select', rows: [['click', 'select one (precise)'], ['⇧click', 'select whole group'], ['⌘click', 'toggle in selection'], ['⌥drag background', 'marquee (+⇧ additive)'], ['⌘A', 'select all (visible)'], ['Esc', 'deselect / cancel tool']] },
+                    { h: 'Edit', rows: [['drag', 'move (cluster/selection co-moves)'], ['⌥drag onto a part', 'create PARAMETRIC snap'], ['⌘drag', 'disable grid snap'], ['arrows', `nudge by grid (⇧ = 10×)`], ['⌘D', 'duplicate'], ['Delete/⌫', 'delete selection'], ['⌘Z / ⌘⇧Z', 'undo / redo']] },
+                    { h: 'Clipboard & files', rows: [['⌘C / ⌘V', 'copy / paste at cursor'], ['⌘S', 'save design'], ['⌘G / ⌘⇧G', 'group / ungroup']] },
+                    { h: 'Drawing tools', rows: [['click points', 'polyline/polyshape vertices'], ['a', 'toggle 90° arc for next segment'], ['Enter', 'commit trace'], ['double-click', 'commit trace / insert vertex'], ['⌥click vertex', 'delete vertex']] },
+                    { h: 'Remember', rows: [['⌥/Alt-drag', 'is THE parametric snap gesture — plain drags move numerically; snaps keep HFSS sweepable'], ['LAYERS eyes', 'hide layers on canvas only — exports always include everything']] },
+                  ].map(sec => (
+                    <div key={sec.h}>
+                      <p className="text-[10px] uppercase tracking-wider text-slate-500 mb-1.5">{sec.h}</p>
+                      <div className="space-y-1">
+                        {sec.rows.map(([k, d]) => (
+                          <div key={k} className="flex gap-2">
+                            <span className="font-mono text-cyan-300 whitespace-nowrap min-w-[7.5rem]">{k}</span>
+                            <span className="text-slate-300">{d}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
           <div className="absolute bottom-2 left-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] font-mono max-w-[60%]" style={{ color: '#475569' }}>
             <div className="flex items-center gap-1.5"><div className="w-3 h-3 rounded-sm" style={{ background: '#3ec27a' }} />wg</div>
             <div className="flex items-center gap-1.5"><div className="w-3 h-3 rounded-sm" style={{ background: '#f4a72e' }} />electrode</div>

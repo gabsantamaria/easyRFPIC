@@ -32,6 +32,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   gridVisible: true,              // draw the background grid
   gridSnap: true,                 // snap drags to the grid
   gridSize: 2,                    // grid pitch (µm)
+  autosaveSeconds: 2,             // debounce before autosaving after the last edit
 });
 
 // Per-key validators. Each returns the coerced value, or undefined to reject
@@ -46,6 +47,11 @@ const VALIDATORS = {
     const n = typeof v === 'number' ? v : parseFloat(v);
     if (!Number.isFinite(n) || n <= 0) return undefined;
     return Math.min(1e6, Math.max(0.1, n));
+  },
+  autosaveSeconds: (v) => {
+    const n = typeof v === 'number' ? v : parseFloat(v);
+    if (!Number.isFinite(n)) return undefined;
+    return Math.min(60, Math.max(1, Math.round(n)));
   },
 };
 

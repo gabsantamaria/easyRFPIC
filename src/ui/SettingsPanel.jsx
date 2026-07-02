@@ -130,6 +130,24 @@ export function SettingsPanel({ open, settings, onChange, onClose, onExport, onI
                   <span className="text-[11px] text-slate-500">µm</span>
                 </div>
               </div>
+              <div className="flex items-center justify-between px-3 py-2">
+                <div className="min-w-0">
+                  <div className="text-xs text-slate-200">Autosave delay</div>
+                  <div className="text-[11px] text-slate-500">Seconds after the last edit before autosaving (1–60).</div>
+                </div>
+                <div className="flex items-center gap-1">
+                  <input
+                    type="number" step="1" min="1" max="60"
+                    value={settings.autosaveSeconds}
+                    onChange={(e) => {
+                      const n = parseInt(e.target.value, 10);
+                      if (Number.isFinite(n) && n >= 1) onChange('autosaveSeconds', Math.min(60, n));
+                    }}
+                    className="w-16 bg-slate-800 border border-slate-700 rounded px-1.5 py-0.5 text-xs text-slate-100 outline-none focus:border-cyan-500"
+                  />
+                  <span className="text-[11px] text-slate-500">s</span>
+                </div>
+              </div>
             </div>
           </section>
         </div>
