@@ -128,11 +128,15 @@ describe('Alt-drag candidate index offers replica anchors', () => {
     expect(search.best).toBeFalsy();
   });
 
-  it('base anchors still carry instanceIdx 0', () => {
+  it('base anchors carry NO instanceIdx (explicit 0 now means "the rendered instance 0")', () => {
+    // Contract change with the moved-instance-0 feature: a base-record
+    // candidate commits a LEGACY snap (no instanceIdx — displayBbox/base
+    // semantics); only instance records carry an integer idx, and an
+    // unmoved instance 0 emits no record at all (byte-compat).
     const index = buildAltDragTargetIndex(solved, {}, null, instances);
     // Drag near the BASE parent.E (10,0) ⇒ center 12.
     const search = findAltDragSnapCandidate(index, { proposedCx: 12, proposedCy: 0, dw: 4, dh: 4, worldThresh: 5 });
     expect(search.best.target.compId).toBe('p');
-    expect(search.best.target.instanceIdx).toBe(0);
+    expect(search.best.target.instanceIdx).toBeUndefined();
   });
 });

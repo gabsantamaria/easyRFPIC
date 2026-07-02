@@ -15,7 +15,7 @@ import { createPortal } from 'react-dom';
 import { DeferredTextInput } from '../DeferredTextInput.jsx';
 import { DEFAULT_CANVAS_THEME } from '../theme.js';
 import { resolveInstanceAnchorNumeric } from '../../scene/instance-positions.js';
-import { ANCHORS, parseAnchor, anchorLocal, anchorLocalRotated, anchorWorld, compRotationDeg, rotateLocal } from '../../scene/anchors.js';
+import { ANCHORS, parseAnchor, anchorLocal, anchorLocalRotated, anchorLocalInstance, anchorWorld, compRotationDeg, rotateLocal } from '../../scene/anchors.js';
 import { effectiveConductorLayerId } from '../../scene/conductor-binding.js';
 import { evalExpr } from '../../scene/params.js';
 import { solveLayout, applyMirrors, resolveBooleanBboxes } from '../../scene/solver.js';
@@ -548,16 +548,33 @@ export function buildAltDragTargetIndex(solved, paramValues, dimsByCompId, insta
   // the base-only index (keeps the perf-equivalence oracle green).
   if (instances && instances.length) {
     const ocById = new Map(solved.map((c) => [c.id, c]));
+    const baseRecById = new Map(recs.map((r) => [r.oc.id, r]));
     let replicaBlock = solved.length;
     for (const inst of instances) {
-      if (!inst || inst.idx === 0) continue;
+      if (!inst) continue;
       const oc = ocById.get(inst.compId);
       if (!oc || oc.consumedBy) continue;
       const iw = inst.w, ih = inst.h;
       if (!Number.isFinite(iw) || !Number.isFinite(ih) || iw <= 0 || ih <= 0) continue;
       const irot = inst.rotation || 0;
+      const isx = inst.scaleX ?? 1;
+      const isy = inst.scaleY ?? 1;
+      if (inst.idx === 0) {
+        // Instance 0 is normally covered by the base record above — but
+        // chains containing rotate-about-centroid / duplicate_mirror /
+        // displace MOVE the base instance away from the raw cx/cy (a
+        // meander's "last cell"). Offer instance-0 candidates ONLY then,
+        // so unmoved bases keep the byte-identical base-only index.
+        const baseRec = baseRecById.get(inst.compId);
+        const moved = !baseRec
+          || Math.abs(inst.cx - baseRec.oc.cx) > 1e-9
+          || Math.abs(inst.cy - baseRec.oc.cy) > 1e-9
+          || Math.abs(irot - baseRec.rot) > 1e-9
+          || isx !== 1 || isy !== 1;
+        if (!moved) continue;
+      }
       for (let ai = 0; ai < ANCHORS.length; ai++) {
-        const lp = anchorLocalRotated(ANCHORS[ai], iw, ih, irot);
+        const lp = anchorLocalInstance(ANCHORS[ai], iw, ih, irot, isx, isy);
         const x = inst.cx + lp.x, y = inst.cy + lp.y;
         gridInsert(anchorGrid, x, y, x, y, {
           x, y, compId: inst.compId, anchor: ANCHORS[ai], anchorIdx: ai,
@@ -613,7 +630,10 @@ export function findAltDragSnapCandidate(index, {
             kind: 'anchor',
             dist,
             dAnchor: da,
-            target: { x: pt.x, y: pt.y, compId: pt.compId, anchor: pt.anchor, instanceIdx: pt.instanceIdx || 0 },
+            // instanceIdx only when the point IS an instance record —
+            // explicit 0 now means "the rendered instance 0" (moved-base
+            // chains), so base records must NOT be stamped with 0.
+            target: { x: pt.x, y: pt.y, compId: pt.compId, anchor: pt.anchor, ...(Number.isInteger(pt.instanceIdx) ? { instanceIdx: pt.instanceIdx } : {}) },
           };
           const seq = pt.ocIdx * SEQ_BLOCK + pt.anchorIdx * 9 + dj;
           if (better(dist, seq)) { best = cand; bestSeq = seq; }
@@ -1023,7 +1043,10 @@ function EditableSnapDims({ svgRef, viewport, snaps, solved, transformInstances,
     const toComp = byId[s.to.compId];
     if (!fromComp || !toComp) continue;
     let fromW = anchorWorld(fromComp, s.from.anchor, paramValues);
-    if (s.from.instanceIdx > 0) {
+    // Explicit idx (INCLUDING 0) measures from the RENDERED instance anchor
+    // — same gate as the solver, so the dimension leg connects to where the
+    // child actually is (moved-base chains put instance 0 off the raw cx/cy).
+    if (Number.isInteger(s.from.instanceIdx) && s.from.instanceIdx >= 0) {
       const ra = resolveInstanceAnchorNumeric(s.from.compId, s.from.anchor, s.from.instanceIdx, byId, transformInstances || [], paramValues);
       if (ra && Number.isFinite(ra.x) && Number.isFinite(ra.y)) fromW = ra;
     }
@@ -1581,7 +1604,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       } else {
         const fromComp = solved.find(c => c.id === snapPick.compId);
         if (fromComp) {
-          const fromW = anchorWorld(fromComp, snapPick.anchor, paramValues);
+          const pickIdxStat = Number.isInteger(snapPick.instanceIdx) ? snapPick.instanceIdx : null;
+          const fromW = (pickIdxStat != null && transformInstances
+            && resolveInstanceAnchorNumeric(snapPick.compId, snapPick.anchor, pickIdxStat,
+              Object.fromEntries(solved.map(cc => [cc.id, cc])), transformInstances, paramValues))
+            || anchorWorld(fromComp, snapPick.anchor, paramValues);
           let toX = null, toY = null, isLocked = false;
           if (snapHover && snapHover.compId !== snapPick.compId) {
             toX = snapHover.x; toY = snapHover.y;
@@ -1673,7 +1700,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     } else if (drag && drag.kind === 'move' && moveSnapHover) {
       const line = moveSnapHover.kind === 'edge'
         ? `Alt-drag · release to snap ${moveSnapHover.dSide} edge to ${moveSnapHover.targetSide} edge of ${moveSnapHover.targetCompId}`
-        : `Alt-drag · release to snap to ${moveSnapHover.compId}${moveSnapHover.instanceIdx > 0 ? ` replica #${moveSnapHover.instanceIdx}` : ''}.${moveSnapHover.anchor}`;
+        : `Alt-drag · release to snap to ${moveSnapHover.compId}${Number.isInteger(moveSnapHover.instanceIdx) ? ` instance #${moveSnapHover.instanceIdx}` : ''}.${moveSnapHover.anchor}`;
       status = { kind: 'snap', line };
     } else if (drag && drag.kind === 'move' && altKey) {
       status = {
@@ -3137,8 +3164,10 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // and HFSS export add the parent's base→instance-k chain offset there.
         // In the reverse direction the replica would become the CHILD, which
         // can't be positioned AS instance k, so we fall back to its base anchor.
-        const targetInstanceIdx = target.kind === 'anchor' ? (target.instanceIdx || 0) : 0;
-        let fromInstanceIdx = 0;
+        const targetInstanceIdx = (target.kind === 'anchor' && Number.isInteger(target.instanceIdx))
+          ? target.instanceIdx
+          : null;
+        let fromInstanceIdx = null;
         if (!draggedHasIncoming) {
           // Standard direction: target is the parent of the dragged comp.
           fromCompId = targetCompId;  fromAnchor = targetAnchor;
@@ -3186,7 +3215,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           },
           snaps: [...prev.snaps, {
             id: `snap_${Date.now()}`,
-            from: { compId: fromCompId, anchor: fromAnchor, ...(fromInstanceIdx > 0 ? { instanceIdx: fromInstanceIdx } : {}) },
+            from: { compId: fromCompId, anchor: fromAnchor, ...(fromInstanceIdx != null ? { instanceIdx: fromInstanceIdx } : {}) },
             to:   { compId: toCompId,   anchor: toAnchor },
             dx: gapX, dy: gapY,
           }],
@@ -3203,10 +3232,10 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     if (alignGuides) setAlignGuides(null);
   };
 
-  const onAnchorClick = (compId, anchor, evt) => {
+  const onAnchorClick = (compId, anchor, evt, instanceIdx = null) => {
     if (snapMode !== 'creating') return;
     if (!snapPick) {
-      setSnapPick({ compId, anchor });
+      setSnapPick({ compId, anchor, ...(Number.isInteger(instanceIdx) ? { instanceIdx } : {}) });
       return;
     }
     if (snapPick.compId === compId) return;
@@ -3244,28 +3273,70 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       return;
     }
 
-    const fromW = anchorWorld(fromComp, snapPick.anchor, paramValues);
-    const toW = anchorWorld(toComp, anchor, paramValues);
-    let dx = toW.x - fromW.x;
-    let dy = toW.y - fromW.y;
-    // Shift held = axis-lock the resulting offset to a single axis (zero the smaller delta)
-    const shiftHeld = !!(evt && evt.shiftKey);
-    if (shiftHeld) {
-      if (Math.abs(dx) < Math.abs(dy)) dx = 0; else dy = 0;
-    }
+    // Instance-aware anchor worlds: a pick carrying instanceIdx measures
+    // from/to the RENDERED instance's anchor (same math as the dots the
+    // user clicked), so the captured gap_* offsets keep both components
+    // exactly where they are.
+    const instAwareAnchor = (comp, anchorName, idx) => {
+      if (Number.isInteger(idx) && transformInstances) {
+        const byIdSnap = Object.fromEntries(solved.map(cc => [cc.id, cc]));
+        const ra = resolveInstanceAnchorNumeric(comp.id, anchorName, idx, byIdSnap, transformInstances, paramValues);
+        if (ra) return ra;
+      }
+      return anchorWorld(comp, anchorName, paramValues);
+    };
+    const pickIdx = Number.isInteger(snapPick.instanceIdx) ? snapPick.instanceIdx : null;
+    const clickIdx = Number.isInteger(instanceIdx) ? instanceIdx : null;
 
-    // Decide snap direction (auto-reverse if the user-intended `to` is already constrained)
-    let actualFrom, actualFromAnchor, actualTo, actualToAnchor, actualDx, actualDy, didReverse = false;
+    // Decide snap direction FIRST (auto-reverse if the user-intended `to`
+    // is already constrained), then measure the offsets exactly the way
+    // the SOLVER will resolve them: the FROM (reference) side at its
+    // instance anchor when an idx is carried, the TO (child) side always
+    // at its BASE anchor (a child can't be positioned AS instance k — the
+    // idx is dropped on the child side, same rule as alt-drag). Measuring
+    // this way makes the captured gap_* offsets keep both components
+    // byte-exactly where they are on commit.
+    let actualFrom, actualFromAnchor, actualTo, actualToAnchor, didReverse = false;
+    let actualFromInstanceIdx = null;
+    let fromCompActual, toCompActual;
     if (!isSecondConstrained) {
       actualFrom = snapPick.compId; actualFromAnchor = snapPick.anchor;
       actualTo = compId;             actualToAnchor = anchor;
-      actualDx = dx; actualDy = dy;
+      actualFromInstanceIdx = pickIdx;
+      fromCompActual = fromComp; toCompActual = toComp;
     } else {
       // isSecondConstrained && !isFirstConstrained (the both-constrained case is already handled above)
+      // Reverse would make the FIRST pick the child. If that pick carried
+      // an instance index (the user clicked a specific replica dot as the
+      // reference), it CAN'T survive on the child side — a child is placed
+      // as one component, not "as instance k". Rather than silently commit
+      // a base snap that contradicts the instance-anchor preview the user
+      // saw, refuse and explain (matches the reference-can't-be-a-replica
+      // intent). The second-clicked component keeps its existing snap.
+      if (Number.isInteger(pickIdx)) {
+        setSnapPick(null); setSnapHover(null); setSnapCursor(null); setSnapMode('idle');
+        if (alertDialog) {
+          alertDialog(
+            `"${compId}" is already positioned by another snap, so this snap would have to reverse and make "${snapPick.compId}" the child. But you picked instance #${pickIdx} of "${snapPick.compId}" as the reference — a replica instance can only be a reference, not a child. Free "${compId}" first (unlink it in the snap inspector), then snap it TO instance #${pickIdx} of "${snapPick.compId}".`,
+            'Snap not created'
+          );
+        }
+        return;
+      }
       didReverse = true;
       actualFrom = compId;            actualFromAnchor = anchor;
       actualTo = snapPick.compId;     actualToAnchor = snapPick.anchor;
-      actualDx = -dx; actualDy = -dy;
+      actualFromInstanceIdx = clickIdx;
+      fromCompActual = toComp; toCompActual = fromComp;
+    }
+    const fW = instAwareAnchor(fromCompActual, actualFromAnchor, actualFromInstanceIdx);
+    const tW = anchorWorld(toCompActual, actualToAnchor, paramValues);
+    let actualDx = tW.x - fW.x;
+    let actualDy = tW.y - fW.y;
+    // Shift held = axis-lock the resulting offset to a single axis (zero the smaller delta)
+    const shiftHeld = !!(evt && evt.shiftKey);
+    if (shiftHeld) {
+      if (Math.abs(actualDx) < Math.abs(actualDy)) actualDx = 0; else actualDy = 0;
     }
 
     updateScene(prev => {
@@ -3292,7 +3363,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       };
       const newSnap = {
         id: `snap_${Date.now()}`,
-        from: { compId: actualFrom, anchor: actualFromAnchor },
+        from: { compId: actualFrom, anchor: actualFromAnchor, ...(actualFromInstanceIdx != null ? { instanceIdx: actualFromInstanceIdx } : {}) },
         to:   { compId: actualTo,   anchor: actualToAnchor },
         dx: nameX, dy: nameY,
       };
@@ -4180,6 +4251,76 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         );
       })}
 
+      {/* Snap-mode anchors for TRANSFORM INSTANCES — the SAME set the
+          Alt-held guides show, so the snap button and Alt-drag offer
+          IDENTICAL targets (they used to differ: snap mode had only the
+          base/displayBbox dots, so a repeated/rotated cluster's cells had
+          no clickable anchors at all). Every replica (idx > 0) gets dots;
+          instance 0 gets them ONLY when the chain moved it away from the
+          base pose (rotate-about-centroid / duplicate_mirror / displace —
+          the meander "last cell" case), since unmoved bases are already
+          covered by the standard per-component dots above. Clicking
+          commits a from.instanceIdx endpoint (dropped if the replica ends
+          up on the child side — same rule as alt-drag). */}
+      {snapMode === 'creating' && (() => {
+        const consumedIds = new Set(solved.filter(cc => cc.consumedBy).map(cc => cc.id));
+        const solvedByIdInst = new Map(solved.map(cc => [cc.id, cc]));
+        // Viewport cull (mirrors the Alt-guide overlay): off-screen dots are
+        // unclickable anyway, and a big repeated meander would otherwise
+        // mount 9 event-bound circles PER cell across the whole scene.
+        const pad = Math.max(viewport.w, viewport.h) * 0.05;
+        const xMinS = viewport.x - viewport.w / 2 - pad, xMaxS = viewport.x + viewport.w / 2 + pad;
+        const yMinS = viewport.y - viewport.h / 2 - pad, yMaxS = viewport.y + viewport.h / 2 + pad;
+        const els = [];
+        for (const inst of visibleTransformInstances) {
+          if (consumedIds.has(inst.compId)) continue;
+          if (inst.cx < xMinS || inst.cx > xMaxS || inst.cy < yMinS || inst.cy > yMaxS) continue;
+          const oc = solvedByIdInst.get(inst.compId);
+          if (!oc) continue;
+          const iw = inst.w, ih = inst.h;
+          if (!Number.isFinite(iw) || !Number.isFinite(ih) || iw <= 0 || ih <= 0) continue;
+          const irot = inst.rotation || 0;
+          const isx = inst.scaleX ?? 1;
+          const isy = inst.scaleY ?? 1;
+          if (inst.idx === 0) {
+            const baseRot = compRotationDeg(oc, paramValues);
+            const moved = Math.abs(inst.cx - oc.cx) > 1e-9
+              || Math.abs(inst.cy - oc.cy) > 1e-9
+              || Math.abs(irot - baseRot) > 1e-9
+              || isx !== 1 || isy !== 1;
+            if (!moved) continue;
+          }
+          for (const a of ANCHORS) {
+            const lp = anchorLocalInstance(a, iw, ih, irot, isx, isy);
+            const axw = inst.cx + lp.x;
+            const ayw = inst.cy + lp.y;
+            const isPicked = snapPick?.compId === inst.compId && snapPick.anchor === a
+              && (Number.isInteger(snapPick.instanceIdx) ? snapPick.instanceIdx : null) === inst.idx;
+            const isHover = snapHover?.kind === 'anchor' && snapHover.compId === inst.compId
+              && snapHover.anchor === a
+              && (Number.isInteger(snapHover.instanceIdx) ? snapHover.instanceIdx : null) === inst.idx;
+            els.push(
+              <g key={`ia_${inst.compId}_${inst.idx}_${a}`}>
+                {isHover && !isPicked && (
+                  <circle cx={axw} cy={-ayw} r={hr * 2.2} fill="none" stroke="#06b6d4" strokeWidth={screen(1.2)} opacity={0.9} pointerEvents="none" />
+                )}
+                <circle
+                  cx={axw} cy={-ayw} r={isHover ? hr * 1.7 : hr * 1.2}
+                  fill={isPicked ? '#ef4444' : (isHover ? '#22d3ee' : '#f59e0b')}
+                  stroke="white" strokeWidth={0.2}
+                  style={{ cursor: 'crosshair' }}
+                  onMouseEnter={() => setSnapHover({ kind: 'anchor', compId: inst.compId, anchor: a, instanceIdx: inst.idx, x: axw, y: ayw })}
+                  onMouseLeave={() => setSnapHover(null)}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={(e) => { e.stopPropagation(); onAnchorClick(inst.compId, a, e, inst.idx); }}
+                />
+              </g>
+            );
+          }
+        }
+        return els.length ? <g>{els}</g> : null;
+      })()}
+
       {(() => {
         // Two-pass component rendering. Pass 1 draws all NON-selected components
         // in their normal layer order (waveguide, then electrode), preserving
@@ -4985,7 +5126,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           // anchor is on the replica — shift fromW so the dx/dy arrow measures
           // the ACTUAL gap (replica→child), not base→child.
           let fromW = anchorWorld(fromComp, s.from.anchor, paramValues);
-          if (s.from.instanceIdx > 0) {
+          if (Number.isInteger(s.from.instanceIdx) && s.from.instanceIdx >= 0) {
             const byIdSolvedForDims = Object.fromEntries(solved.map(cc => [cc.id, cc]));
             const ra = resolveInstanceAnchorNumeric(s.from.compId, s.from.anchor, s.from.instanceIdx, byIdSolvedForDims, transformInstances, paramValues);
             if (ra && Number.isFinite(ra.x) && Number.isFinite(ra.y)) fromW = ra;
@@ -5521,7 +5662,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           if (inst.cx < xMin || inst.cx > xMax || inst.cy < yMin || inst.cy > yMax) continue;
           const irot = inst.rotation || 0;
           for (let ai = 0; ai < ANCHORS.length; ai++) {
-            const lp = anchorLocalRotated(ANCHORS[ai], iw, ih, irot);
+            const lp = anchorLocalInstance(ANCHORS[ai], iw, ih, irot, inst.scaleX ?? 1, inst.scaleY ?? 1);
             dots.push({ x: inst.cx + lp.x, y: inst.cy + lp.y, k: `sg_${inst.compId}_${inst.idx}_${ai}` });
           }
         }
@@ -5955,7 +6096,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       {snapMode === 'creating' && snapPick && (() => {
         const fromComp = solved.find(c => c.id === snapPick.compId);
         if (!fromComp) return null;
-        const fromW = anchorWorld(fromComp, snapPick.anchor, paramValues);
+        const pickIdxPrev = Number.isInteger(snapPick.instanceIdx) ? snapPick.instanceIdx : null;
+        const fromW = (pickIdxPrev != null && transformInstances
+          && resolveInstanceAnchorNumeric(snapPick.compId, snapPick.anchor, pickIdxPrev,
+            Object.fromEntries(solved.map(cc => [cc.id, cc])), transformInstances, paramValues))
+          || anchorWorld(fromComp, snapPick.anchor, paramValues);
         // Endpoint: hover position if hovering on a different component's edge, else cursor
         let toX, toY, isLocked = false;
         if (snapHover && snapHover.compId !== snapPick.compId) {

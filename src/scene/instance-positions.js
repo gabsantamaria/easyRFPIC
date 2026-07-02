@@ -30,17 +30,24 @@ import { anchorLocal, parseAnchor } from './anchors.js';
 // instance idx (it's not transform-replicated; its parent boolean is).
 // Returns { cx, cy, w, h } or null.
 export function resolveInstanceCenterNumeric(compId, idx, byId, transformInstances) {
+  // Explicit integer idx (INCLUDING 0) addresses the RENDERED instance —
+  // for chains that move the base instance (rotate-about-centroid,
+  // duplicate_mirror interleaving, displace) instance 0's rendered
+  // position differs from the raw cx/cy, so an explicit 0 must resolve
+  // through the instance list. Absent/null idx keeps the legacy base
+  // fallback (Case C).
+  const explicitIdx = Number.isInteger(idx) && idx >= 0;
   // Case A: the component has its own instance at idx.
   const ownInst = transformInstances.find(i => i.compId === compId && i.idx === idx);
-  if (ownInst && idx > 0) {
-    return { cx: ownInst.cx, cy: ownInst.cy, w: ownInst.w, h: ownInst.h, rotation: ownInst.rotation || 0 };
+  if (ownInst && explicitIdx) {
+    return { cx: ownInst.cx, cy: ownInst.cy, w: ownInst.w, h: ownInst.h, rotation: ownInst.rotation || 0, scaleX: ownInst.scaleX ?? 1, scaleY: ownInst.scaleY ?? 1 };
   }
   // Case B: operand of a boolean whose cluster is transform-replicated.
   const comp = byId[compId];
   if (comp && comp.consumedBy) {
     const boolInst = transformInstances.find(i => i.compId === comp.consumedBy && i.idx === idx);
     const boolBase = transformInstances.find(i => i.compId === comp.consumedBy && i.idx === 0);
-    if (boolInst && boolBase && idx > 0) {
+    if (boolInst && boolBase && explicitIdx) {
       const dx = boolInst.cx - boolBase.cx;
       const dy = boolInst.cy - boolBase.cy;
       const opBase = transformInstances.find(i => i.compId === compId && i.idx === 0);
@@ -70,10 +77,19 @@ export function resolveInstanceAnchorNumeric(compId, anchor, instanceIdx, byId, 
   const inst = resolveInstanceCenterNumeric(compId, instanceIdx, byId, transformInstances);
   if (!inst) return null;
   if (!Number.isFinite(inst.w) || !Number.isFinite(inst.h)) return null;
-  const lp = anchorLocal(anchor, inst.w, inst.h);
-  // For repeat/displace there's no rotation on the operand; ignore the
-  // rotation field (set when the boolean has a rotate transform).
-  return { x: inst.cx + lp.x, y: inst.cy + lp.y };
+  // Instance-frame anchor: mirror scale first, then rotation — matches
+  // the rendered geometry exactly (rotate/mirror chains flip which
+  // corner an anchor NAME lands on; ignoring that put dots and solve
+  // positions up to one full bbox apart on 180°-rotated meander cells).
+  const l = anchorLocal(anchor, inst.w, inst.h);
+  const sx = inst.scaleX ?? 1;
+  const sy = inst.scaleY ?? 1;
+  const rad = ((inst.rotation || 0) * Math.PI) / 180;
+  const ca = Math.cos(rad);
+  const sa = Math.sin(rad);
+  const mx = l.x * sx;
+  const my = l.y * sy;
+  return { x: inst.cx + mx * ca - my * sa, y: inst.cy + mx * sa + my * ca };
 }
 
 // Anchor offset as parametric (xOff, yOff) expressions given parametric
@@ -149,9 +165,23 @@ export function instanceChainOffsetExpr(comp, instanceIdx, arg3, arg4, arg5, arg
     baseHExpr = '0',
     components = [],
     parametricPos = {},
+    // 'hfss' (default): trig angles emitted as HFSS quantities —
+    //   ((expr))*1deg — the same idiom the D6 rotation export uses (a
+    //   UNITLESS param × 1deg; bare cos(param) would be RADIANS in HFSS).
+    // 'numeric': angles emitted as ((expr)*pi/180) so evalExpr can
+    //   resolve cos/sin — 'cos(180deg)' is NOT evaluable by evalExpr
+    //   (a real bug: every numeric evaluation of a rotate chain came
+    //   out 0/NaN and replica snaps on rotated meanders collapsed to
+    //   the base anchor).
+    angleMode = 'hfss',
   } = opts;
-  if (!comp || instanceIdx === 0) return { dxExpr: '0um', dyExpr: '0um' };
+  if (!comp) return { dxExpr: '0um', dyExpr: '0um' };
   const transforms = (comp.transforms || []).filter(t => t && t.enabled !== false);
+  // Honest idx-0: chains that MOVE the base instance (rotate about the
+  // multi-instance centroid, mirror/rotate about the origin, displace)
+  // give instance 0 a NON-zero offset — walk the chain for idx 0 too.
+  // Fast path: no enabled transforms → base is the only instance.
+  if (instanceIdx === 0 && transforms.length === 0) return { dxExpr: '0um', dyExpr: '0um' };
   // Stream of { dxExpr, dyExpr } — each entry is one instance's offset
   // from the base. Starts with the base (idx 0) at zero offset.
   let stream = [{ dxExpr: '0um', dyExpr: '0um' }];
@@ -231,9 +261,9 @@ export function instanceChainOffsetExpr(comp, instanceIdx, arg3, arg4, arg5, arg
       //      location on the BASE w/h, so new_offset = old_offset +
       //      anchorLocal·(1-cos / sin) trig terms.
       const pivot = t.pivot || 'C';
-      const angleExpr = (typeof t.angle === 'string' && /[A-Za-z_]/.test(t.angle))
-        ? t.angle
-        : `${(t.angle ?? 0)}deg`;
+      const angleExpr = angleMode === 'numeric'
+        ? `((${t.angle ?? 0})*pi/180)`
+        : `((${t.angle ?? 0}))*1deg`;
       if (pivot === 'C') {
         if (stream.length <= 1) continue; // orientation-only, offset unchanged
         // Multi-instance pivot='C': rotate the cluster about the

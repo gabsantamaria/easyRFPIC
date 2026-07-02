@@ -60,6 +60,18 @@ export function anchorLocalRotated(anchorName, w, h, rotDeg = 0) {
   return rotateLocal(anchorLocal(anchorName, w, h), rotDeg);
 }
 
+// Anchor offset in the frame of a TRANSFORM INSTANCE: mirror scale
+// (±1 flips) applied FIRST, then rotation — the same composition
+// expandTransforms / rings.js use, so the returned offset lands on the
+// RENDERED instance's actual corner/edge. This is THE anchor math for
+// anything addressing a specific instance (snap-to-replica dots, the
+// alt-drag index, the solver's from.instanceIdx branch): keep every
+// consumer on it or dots and solve positions drift apart.
+export function anchorLocalInstance(anchorName, w, h, rotDeg = 0, sx = 1, sy = 1) {
+  const l = anchorLocal(anchorName, w, h);
+  return rotateLocal({ x: l.x * (sx || 1), y: l.y * (sy || 1) }, rotDeg);
+}
+
 // Numeric value of a component's first-class `rotation` field (degrees,
 // CCW). Only rect / circle / ellipse / polygon / bridge support it
 // (matching the seeding in expandTransforms); booleans and path-like

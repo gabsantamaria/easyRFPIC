@@ -21,9 +21,9 @@
 //
 // Extracted from PhotonicLayout.jsx as Stage 1.6 of the planned refactor.
 import { evalExpr } from './params.js';
-import { anchorLocalRotated, anchorWorld, compRotationDeg } from './anchors.js';
+import { anchorLocalRotated, anchorLocalInstance, anchorWorld, compRotationDeg } from './anchors.js';
 import { expandTransforms } from './transforms.js';
-import { instanceChainOffsetExpr, chainOwnerForInstance } from './instance-positions.js';
+import { chainOwnerForInstance } from './instance-positions.js';
 import { tessellatePolylinePath, polylineBbox, polyshapeBbox } from '../geometry/polyline.js';
 import { buildRacetrackCenterline } from '../geometry/racetrack.js';
 
@@ -400,40 +400,46 @@ export function solveLayout(components, snaps, paramValues) {
       // bbox center: place at fromAnchor + dx - toLocal where toLocal is
       // computed from the boolean's bbox-derived w/h.
       let fromAnchor = anchorWorld(fromComp, s.from.anchor, workingPV);
-      // Snap-to-replica: when the snap targets a specific instance produced
-      // by the parent's `repeat`/`displace` chain (from.instanceIdx > 0),
-      // shift the reference anchor by the parent's base→instance-k chain
-      // offset. Reuses the SAME instanceChainOffsetExpr machinery polyline
-      // snap-vertices use, evaluated numerically here. Exact for
-      // repeat/displace (size + orientation preserved, so the anchor offset
-      // is unchanged and instance-k anchor = base anchor + k·(dx,dy)); for
-      // rotate/mirror chains it's the centroid offset (orientation not
-      // tracked — matches the numeric exporters). Out-of-range / unsupported
-      // idx falls back to the base anchor with a solve diagnostic.
-      const fromIdx = (s.from && s.from.instanceIdx) || 0;
-      if (fromIdx > 0) {
+      // Snap-to-replica: an EXPLICIT integer from.instanceIdx (INCLUDING 0)
+      // targets the RENDERED instance — the from-anchor is computed by
+      // expanding the parent's transform chain and taking the instance's
+      // anchor in ITS OWN frame (mirror scale then rotation, matching the
+      // canvas dots / alt-drag index EXACTLY, for every chain kind).
+      // idx 0 matters: rotate-about-centroid / duplicate_mirror chains MOVE
+      // the base instance away from the raw cx/cy (a meander's "last cell"),
+      // and legacy snaps WITHOUT instanceIdx keep the base-anchor semantics
+      // (anchorWorld above — displayBbox perimeter for chained booleans).
+      // The old expr-based offset path was broken for rotate chains
+      // (evalExpr can't resolve 'cos(180deg)' → offsets silently 0) and
+      // used the wrong basis for chained booleans (cluster AABB anchor +
+      // centroid delta ≠ the rendered cell anchor).
+      const fromIdxRaw = s.from ? s.from.instanceIdx : undefined;
+      const hasExplicitIdx = Number.isInteger(fromIdxRaw) && fromIdxRaw >= 0;
+      if (hasExplicitIdx) {
         const owner = chainOwnerForInstance(fromComp, byId) || fromComp;
+        if (fromComp.kind === 'boolean') refreshBooleanBbox(fromComp);
         const fw = typeof fromComp.w === 'number' ? fromComp.w : evalExpr(fromComp.w, workingPV);
         const fh = typeof fromComp.h === 'number' ? fromComp.h : evalExpr(fromComp.h, workingPV);
-        const off = instanceChainOffsetExpr(owner, fromIdx, {
-          paramValues: workingPV,
-          exprWithUm: (x) => `(${x})`,
-          baseCxExpr: String(Number.isFinite(fromComp.cx) ? fromComp.cx : 0),
-          baseCyExpr: String(Number.isFinite(fromComp.cy) ? fromComp.cy : 0),
-          baseWExpr: String(Number.isFinite(fw) ? fw : 0),
-          baseHExpr: String(Number.isFinite(fh) ? fh : 0),
-          components,
-        });
-        if (off) {
-          const odx = evalExpr(off.dxExpr, workingPV);
-          const ody = evalExpr(off.dyExpr, workingPV);
-          if (Number.isFinite(odx) && Number.isFinite(ody)) {
-            fromAnchor = { x: fromAnchor.x + odx, y: fromAnchor.y + ody };
-          } else {
-            diag.issues.push({ kind: 'nan-instance-offset', message: `Snap ${s.id ?? `${s.from.compId}→${s.to.compId}`}: instance ${fromIdx} offset of ${s.from.compId} evaluated non-finite — treated as base` });
-          }
+        // Expand the OWNER's chain from the fromComp's base pose. For a
+        // boolean from-target owner === fromComp (operands aren't snap
+        // targets); numeric w/h ride the synthetic component so
+        // expandTransforms sees finite dims.
+        const insts = expandTransforms([{
+          ...owner,
+          cx: fromComp.cx,
+          cy: fromComp.cy,
+          w: Number.isFinite(fw) ? fw : 0,
+          h: Number.isFinite(fh) ? fh : 0,
+        }], workingPV);
+        const inst = insts.find(i => i.idx === fromIdxRaw);
+        if (inst && Number.isFinite(inst.cx) && Number.isFinite(inst.cy)) {
+          const lp = anchorLocalInstance(
+            s.from.anchor, inst.w, inst.h,
+            inst.rotation || 0, inst.scaleX ?? 1, inst.scaleY ?? 1,
+          );
+          fromAnchor = { x: inst.cx + lp.x, y: inst.cy + lp.y };
         } else {
-          diag.issues.push({ kind: 'dangling-instance', message: `Snap ${s.id ?? `${s.from.compId}→${s.to.compId}`}: from.instanceIdx ${fromIdx} out of range for ${s.from.compId} — treated as base` });
+          diag.issues.push({ kind: 'dangling-instance', message: `Snap ${s.id ?? `${s.from.compId}→${s.to.compId}`}: from.instanceIdx ${fromIdxRaw} out of range for ${s.from.compId} — treated as base` });
         }
       }
       // For boolean toComp: refresh bbox FIRST so its w/h reflect current

@@ -14,7 +14,7 @@
 // Extracted from PhotonicLayout.jsx as Stage 2.3 of the planned refactor.
 import { evalExpr, topoSortParams } from '../scene/params.js';
 import { effectiveConductorLayerId } from '../scene/conductor-binding.js';
-import { parseAnchor, anchorLocal } from '../scene/anchors.js';
+import { parseAnchor, anchorLocal, anchorLocalInstance } from '../scene/anchors.js';
 import { solveLayout, applyMirrors } from '../scene/solver.js';
 import { expandTransforms } from '../scene/transforms.js';
 import { detectPortIntegrationLine } from '../scene/lumpedPort.js';
@@ -481,14 +481,30 @@ export function computeParametricPositions(components, snaps, paramValues = {}) 
     // (the anchor's orientation under a rotate/mirror isn't expressible the
     // same way — same accepted contract as the vertex path).
     let instDx = null, instDy = null;
-    const fromInstanceIdx = (snap.from && snap.from.instanceIdx) || 0;
-    if (fromInstanceIdx > 0) {
+    // fromTerm overrides: when set, they REPLACE the whole
+    // parent-anchor term (parentPos + fromOff [+ instDx]) with an exact
+    // value — used for instance targets on non-translation chains, where
+    // the rendered instance anchor can't be expressed as base-anchor +
+    // translation (rotate/mirror flip which corner an anchor NAME lands
+    // on). The value is computed with the SAME expandTransforms +
+    // instance-frame anchor math the solver uses, so HFSS matches the
+    // canvas EXACTLY; it is emitted as a frozen numeric (noteFrozen'd by
+    // the caller's frozen-report path via the snap comment).
+    let fromTermX = null, fromTermY = null;
+    const fromIdxRaw = snap.from ? snap.from.instanceIdx : undefined;
+    const hasExplicitIdx = Number.isInteger(fromIdxRaw) && fromIdxRaw >= 0;
+    if (hasExplicitIdx) {
       const owner = chainOwnerForInstance(parent, byId) || parent;
       const simple = (owner.transforms || [])
         .filter(t => t && t.enabled !== false)
         .every(t => t.kind === 'repeat' || t.kind === 'displace');
       if (simple) {
-        const off = instanceChainOffsetExpr(owner, fromInstanceIdx, {
+        // Translation-only chain: instance anchor = base anchor + the
+        // PARAMETRIC chain offset (base + k·pitch — the same form the
+        // repeat exports as DuplicateAlongLine, so pitch sweeps move the
+        // replicas and this snapped child together). idx 0 on such a
+        // chain has a zero offset (repeat keeps the base in place).
+        const off = instanceChainOffsetExpr(owner, fromIdxRaw, {
           paramValues, exprWithUm: dimExprStr,
           baseCxExpr: parentPos.cxExpr, baseCyExpr: parentPos.cyExpr,
           baseWExpr: parentPos.wExpr, baseHExpr: parentPos.hExpr,
@@ -496,28 +512,40 @@ export function computeParametricPositions(components, snaps, paramValues = {}) 
         });
         if (off) { instDx = off.dxExpr; instDy = off.dyExpr; }
       } else {
-        // Non-translation chain → bake the numeric centroid offset (eval the
-        // chain with unit-free exprs so evalExpr can resolve cos/sin).
-        const offN = instanceChainOffsetExpr(owner, fromInstanceIdx, {
-          paramValues, exprWithUm: (x) => `(${x})`,
-          baseCxExpr: String(Number.isFinite(parent.cx) ? parent.cx : 0),
-          baseCyExpr: String(Number.isFinite(parent.cy) ? parent.cy : 0),
-          baseWExpr: String(typeof parent.w === 'number' ? parent.w : 0),
-          baseHExpr: String(typeof parent.h === 'number' ? parent.h : 0),
-          components, parametricPos: positions,
-        });
-        if (offN) {
-          const ndx = evalExpr(offN.dxExpr, paramValues);
-          const ndy = evalExpr(offN.dyExpr, paramValues);
-          instDx = `${Number.isFinite(ndx) ? ndx : 0}um`;
-          instDy = `${Number.isFinite(ndy) ? ndy : 0}um`;
+        // Rotate / mirror / duplicate_mirror in the chain: compute the
+        // rendered instance anchor EXACTLY like the solver (expand the
+        // chain numerically, anchor in the instance's own frame) and
+        // freeze the whole from-term. The old centroid-offset bake was
+        // doubly wrong: evalExpr can't resolve 'cos(180deg)' (offsets
+        // silently zeroed) and the anchor's orientation flip was
+        // ignored.
+        const fw = typeof parent.w === 'number' ? parent.w : evalExpr(parent.w, paramValues);
+        const fh = typeof parent.h === 'number' ? parent.h : evalExpr(parent.h, paramValues);
+        const insts = expandTransforms([{
+          ...owner,
+          cx: parent.cx, cy: parent.cy,
+          w: Number.isFinite(fw) ? fw : 0,
+          h: Number.isFinite(fh) ? fh : 0,
+        }], paramValues);
+        const inst = insts.find(i => i.idx === fromIdxRaw);
+        if (inst && Number.isFinite(inst.cx) && Number.isFinite(inst.cy)) {
+          const lp = anchorLocalInstance(
+            snap.from.anchor, inst.w, inst.h,
+            inst.rotation || 0, inst.scaleX ?? 1, inst.scaleY ?? 1,
+          );
+          fromTermX = `${(inst.cx + lp.x).toFixed(6)}um`;
+          fromTermY = `${(inst.cy + lp.y).toFixed(6)}um`;
         }
       }
     }
     // Solver: toComp.cx = fromAnchorWorld.x + dx - toAnchor.local.x
     //                  = (parent.cx + instOff.x + fromOff.x) + dx - toOff.x
-    const cxExpr = `(${parentPos.cxExpr})${instDx ? ` + (${instDx})` : ''} + (${fromOff.xOff}) + (${snap.dx}) - (${toOff.xOff})`;
-    const cyExpr = `(${parentPos.cyExpr})${instDy ? ` + (${instDy})` : ''} + (${fromOff.yOff}) + (${snap.dy}) - (${toOff.yOff})`;
+    const cxExpr = fromTermX
+      ? `(${fromTermX}) + (${snap.dx}) - (${toOff.xOff})`
+      : `(${parentPos.cxExpr})${instDx ? ` + (${instDx})` : ''} + (${fromOff.xOff}) + (${snap.dx}) - (${toOff.xOff})`;
+    const cyExpr = fromTermY
+      ? `(${fromTermY}) + (${snap.dy}) - (${toOff.yOff})`
+      : `(${parentPos.cyExpr})${instDy ? ` + (${instDy})` : ''} + (${fromOff.yOff}) + (${snap.dy}) - (${toOff.yOff})`;
     const result = { cxExpr, cyExpr, wExpr: cDims.wExpr, hExpr: cDims.hExpr };
     positions[compId] = result;
     visiting.delete(compId);
