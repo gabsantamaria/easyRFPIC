@@ -111,6 +111,33 @@ const saveBroadcastChannel = (typeof BroadcastChannel !== 'undefined')
   ? new BroadcastChannel('photonic_layout')
   : null;
 
+// Vertical panel divider: drag to resize, double-click to reset, chevron to
+// collapse/expand. Pure chrome — the Canvas re-measures via its own
+// ResizeObserver, so no layout math lives here.
+function PanelDivider({ side, collapsed, onResizeStart, onReset, onToggleCollapse }) {
+  const chev = side === 'left' ? (collapsed ? '▸' : '◂') : (collapsed ? '◂' : '▸');
+  return (
+    <div
+      className="flex-none relative group/divider"
+      style={{ width: 6, cursor: collapsed ? 'default' : 'col-resize', background: 'var(--app-slate-800)' }}
+      onPointerDown={collapsed ? undefined : onResizeStart}
+      onDoubleClick={collapsed ? undefined : onReset}
+      title={collapsed ? undefined : 'Drag to resize · double-click to reset width'}
+    >
+      <button
+        onClick={(e) => { e.stopPropagation(); onToggleCollapse(); }}
+        onPointerDown={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => e.stopPropagation()}
+        className="absolute top-1/2 left-1/2 rounded text-slate-400 hover:text-cyan-300 border border-slate-600"
+        style={{ transform: 'translate(-50%, -50%)', background: 'var(--app-slate-700)', width: 14, height: 36, fontSize: 9, zIndex: 5 }}
+        title={collapsed ? 'Expand panel' : 'Collapse panel'}
+      >
+        {chev}
+      </button>
+    </div>
+  );
+}
+
 // Canonical group membership: the union of the group's memberIds and every
 // component whose `group` field names it. The two sources drifted (duplicated
 // members carried c.group but were never appended to memberIds), so every
@@ -334,6 +361,70 @@ export default function App() {
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ----- Resizable / collapsible side panels -----
+  // Widths + collapsed flags persist in the layered ui-prefs store (same
+  // durability as paramNameWidth above). Pure chrome: the Canvas re-measures
+  // itself via ResizeObserver, and every coordinate conversion reads live
+  // geometry, so panel geometry never touches scene/export math.
+  const clampPanelW = (v) => (Number.isFinite(v) ? Math.min(600, Math.max(180, v)) : 288);
+  const [panelLayout, setPanelLayout] = useState(() => ({
+    leftW: clampPanelW(Number(getUiPref('leftPanelW', 288))),
+    rightW: clampPanelW(Number(getUiPref('rightPanelW', 288))),
+    leftCollapsed: !!getUiPref('leftPanelCollapsed', false),
+    rightCollapsed: !!getUiPref('rightPanelCollapsed', false),
+  }));
+  // Persist on REAL change (prev-value ref — survives StrictMode's double
+  // mount effect without clobbering the durable store; see paramNameWidth).
+  const prevPanelLayoutRef = useRef(panelLayout);
+  useEffect(() => {
+    const prev = prevPanelLayoutRef.current;
+    if (prev.leftW === panelLayout.leftW && prev.rightW === panelLayout.rightW
+      && prev.leftCollapsed === panelLayout.leftCollapsed && prev.rightCollapsed === panelLayout.rightCollapsed) return;
+    prevPanelLayoutRef.current = panelLayout;
+    setUiPrefs({
+      leftPanelW: panelLayout.leftW, rightPanelW: panelLayout.rightW,
+      leftPanelCollapsed: panelLayout.leftCollapsed, rightPanelCollapsed: panelLayout.rightCollapsed,
+    });
+  }, [panelLayout]);
+  useEffect(() => {
+    let cancelled = false;
+    hydrateUiPrefs().then((p) => {
+      if (cancelled || !p) return;
+      setPanelLayout(pl => ({
+        leftW: Number.isFinite(Number(p.leftPanelW)) ? clampPanelW(Number(p.leftPanelW)) : pl.leftW,
+        rightW: Number.isFinite(Number(p.rightPanelW)) ? clampPanelW(Number(p.rightPanelW)) : pl.rightW,
+        leftCollapsed: typeof p.leftPanelCollapsed === 'boolean' ? p.leftPanelCollapsed : pl.leftCollapsed,
+        rightCollapsed: typeof p.rightPanelCollapsed === 'boolean' ? p.rightPanelCollapsed : pl.rightCollapsed,
+      }));
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // Divider drag: same pointer choreography as the PARAMS name-column
+  // splitter above. The right divider inverts the delta (dragging left
+  // GROWS the right panel).
+  const startPanelResize = (side) => (e) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = side === 'left' ? panelLayout.leftW : panelLayout.rightW;
+    const key = side === 'left' ? 'leftW' : 'rightW';
+    const sign = side === 'left' ? 1 : -1;
+    const onMove = (ev) => {
+      const w = clampPanelW(startW + sign * (ev.clientX - startX));
+      setPanelLayout(pl => (pl[key] === w ? pl : { ...pl, [key]: w }));
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
   // Pointer-drag the name-column splitter. Any row's handle drives the
   // shared width, so the whole column resizes together.
   const startParamNameResize = useCallback((e) => {
@@ -6435,8 +6526,9 @@ export default function App() {
       )}
 
       <div className="flex-1 flex overflow-hidden">
-        {/* LEFT */}
-        <div className="w-72 border-r border-slate-700 flex flex-col" style={{ background: 'var(--app-slate-900)' }}>
+        {/* LEFT — resizable via the divider; display:none when collapsed so
+            the big panel subtree needs no conditional wrapping. */}
+        <div className="flex-none border-r border-slate-700 flex-col" style={{ width: panelLayout.leftW, display: panelLayout.leftCollapsed ? 'none' : 'flex', background: 'var(--app-slate-900)' }}>
           <div className="flex flex-wrap border-b border-slate-700 text-[10px]">
             {[
               { id: 'params', label: 'PARAMS', icon: Settings2 },
@@ -7533,7 +7625,14 @@ export default function App() {
         </div>
 
         {/* CENTER */}
-        <div className="flex-1 relative">
+        <PanelDivider
+          side="left"
+          collapsed={panelLayout.leftCollapsed}
+          onResizeStart={startPanelResize('left')}
+          onReset={() => setPanelLayout(pl => ({ ...pl, leftW: 288 }))}
+          onToggleCollapse={() => setPanelLayout(pl => ({ ...pl, leftCollapsed: !pl.leftCollapsed }))}
+        />
+        <div className="flex-1 relative min-w-0">
           <Canvas
             scene={scene}
             updateScene={updateScene}
@@ -7623,7 +7722,15 @@ export default function App() {
         </div>
 
         {/* RIGHT — Inspector */}
-        <div className="w-72 border-l border-slate-700 flex flex-col" style={{ background: 'var(--app-slate-900)' }}>
+        <PanelDivider
+          side="right"
+          collapsed={panelLayout.rightCollapsed}
+          onResizeStart={startPanelResize('right')}
+          onReset={() => setPanelLayout(pl => ({ ...pl, rightW: 288 }))}
+          onToggleCollapse={() => setPanelLayout(pl => ({ ...pl, rightCollapsed: !pl.rightCollapsed }))}
+        />
+        {/* RIGHT (Inspector) — resizable/collapsible, same mechanism as LEFT. */}
+        <div className="flex-none border-l border-slate-700 flex-col" style={{ width: panelLayout.rightW, display: panelLayout.rightCollapsed ? 'none' : 'flex', background: 'var(--app-slate-900)' }}>
           <div className="px-3 py-2 border-b border-slate-700 text-xs font-medium uppercase tracking-wider text-slate-400 flex items-center justify-between">
             <span>Inspector{selectedIds.size > 1 ? ` · ${selectedIds.size} selected` : ''}</span>
             {selectedIds.size > 0 && (

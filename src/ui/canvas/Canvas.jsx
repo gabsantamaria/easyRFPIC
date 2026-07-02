@@ -1378,6 +1378,22 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
   const [snapHover, setSnapHover] = useState(null); // { compId, side, t, x, y } for edge hover preview
   const [snapCursor, setSnapCursor] = useState(null); // { x, y } in world coords, while picking second anchor
   const [modifier, setModifier] = useState(false); // Cmd / Ctrl held (disables grid snap)
+  // Re-render on ANY container size change (panel divider drag / collapse,
+  // browser window resize). pxPerWorld and screen(px) read
+  // svgRef.current.clientWidth during RENDER, and the portal dim-edit
+  // overlays read getBoundingClientRect — both went stale after a resize
+  // until the next state-changing interaction (hit pads / labels / handle
+  // radii mis-scaled, overlays misplaced). ResizeObserver fires AFTER
+  // layout, so the bumped render reads fresh geometry. jsdom guard keeps
+  // the vitest suite green.
+  const [, bumpCanvasSize] = useState(0);
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => bumpCanvasSize(n => n + 1));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   const [altKey, setAltKey] = useState(false); // Option / Alt held (marquee mode)
   const [shiftKey, setShiftKey] = useState(false); // Shift held (axis-lock during snap)
   // Drag-to-create state. Active when the user enters addMode and starts a drag
