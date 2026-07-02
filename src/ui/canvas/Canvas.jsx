@@ -4494,7 +4494,8 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   const brCondL = (scene.stack || []).find(l => l.role === 'conductor' && l.id === c.conductorLayerId)
                     || (scene.stack || []).find(l => l.role === 'conductor');
                   const fmtBr = (v) => (Number.isFinite(v) ? +v.toFixed(2) : '?');
-                  const brTip = `airbridge: L=${fmtBr(inst.length)} W=${fmtBr(inst.width)} H=${fmtBr(inst.height)} above ${brCondL?.name || brCondL?.id || '(no conductor)'}`;
+                  const brPad = Number.isFinite(inst.padLength) && inst.padLength > 0 ? inst.padLength : 0;
+                  const brTip = `airbridge: L=${fmtBr(inst.length)} W=${fmtBr(inst.width)} H=${fmtBr(inst.height)}${brPad > 0 ? ` pads=${fmtBr(brPad)}` : ''} above ${brCondL?.name || brCondL?.id || '(no conductor)'}`;
                   // Glyph geometry (world units, pre-rotation): arc from
                   // landing to landing bulging north + a bar at each end.
                   const arcX0 = inst.cx - inst.w * 0.36;
@@ -4511,6 +4512,23 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   };
                   shapeElement = (
                     <g>
+                      {brPad > 0 && (
+                        // Landing pads: real strap metal beyond each end of
+                        // the span (outside the snap AABB — drawn dimmer so
+                        // the span rect still reads as the component).
+                        <>
+                          <rect
+                            x={bxBr - brPad} y={byBr} width={brPad} height={inst.h}
+                            fill={style.fill} stroke={style.stroke} strokeWidth={sw * 0.8}
+                            opacity={instOpacity * 0.7} pointerEvents="none"
+                          />
+                          <rect
+                            x={bxBr + inst.w} y={byBr} width={brPad} height={inst.h}
+                            fill={style.fill} stroke={style.stroke} strokeWidth={sw * 0.8}
+                            opacity={instOpacity * 0.7} pointerEvents="none"
+                          />
+                        </>
+                      )}
                       <rect x={bxBr} y={byBr} width={inst.w} height={inst.h} {...dataCompProps}>
                         <title>{brTip}</title>
                       </rect>

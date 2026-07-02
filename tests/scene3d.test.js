@@ -209,6 +209,28 @@ describe('buildScene3D — bridge', () => {
     expect(Math.max(...zs)).toBeCloseTo(computeNumericLayerZ(scene.stack, pvOf(scene)).l_cond.zTop + 3 + 0.05, 9);
     expect(warnings.some(w => /br2.*sheet/i.test(w))).toBe(true);
   });
+
+  it('landing pads (padLength > 0) extend the profile flat at the conductor top', () => {
+    const scene = sceneWith([
+      { id: 'br3', kind: 'bridge', layer: 'bridge', cx: 0, cy: 0, length: '30', width: '10', height: '3', padLength: '5' },
+    ]);
+    const pv = pvOf(scene);
+    const condTop = computeNumericLayerZ(scene.stack, pv).l_cond.zTop;
+    const { solids } = buildScene3D(scene, pv);
+    const br = solids.find(s => s.compId === 'br3');
+    const xs = br.profile.map(p => p[0]);
+    // Pad tips at ±(L/2 + P) = ±20.
+    expect(Math.min(...xs)).toBeCloseTo(-20, 9);
+    expect(Math.max(...xs)).toBeCloseTo(20, 9);
+    // The pad-tip points sit FLAT on the conductor top (lower path) and
+    // one strap thickness above (upper path).
+    const tipZs = br.profile.filter(p => Math.abs(Math.abs(p[0]) - 20) < 1e-9).map(p => p[1]);
+    const t = computeNumericLayerZ(scene.stack, pv).l_cond.thickness;
+    expect(Math.min(...tipZs)).toBeCloseTo(condTop, 9);
+    expect(Math.max(...tipZs)).toBeCloseTo(condTop + t, 9);
+    // Profile grew by 2 pad points per path (9+2 lower, 9+2 upper).
+    expect(br.profile.length).toBe(22);
+  });
 });
 
 describe('buildScene3D — punch boolean', () => {

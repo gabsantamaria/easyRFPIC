@@ -273,7 +273,13 @@ export function generateGDS(scene, paramValues) {
         }
         continue;
       }
-      const worldPts = shapeInstanceToRing(inst);
+      // Airbridge landing pads: the fabricated strap footprint on layer
+      // 150 is (length + 2·padLength) × width — the pads are real metal
+      // beyond the span, even though the scene AABB stays length × width.
+      const gdsInst = (c.kind === 'bridge' && Number.isFinite(inst.padLength) && inst.padLength > 0)
+        ? { ...inst, w: inst.w + 2 * inst.padLength }
+        : inst;
+      const worldPts = shapeInstanceToRing(gdsInst);
       writeNoData(BOUNDARY);
       writeInt2(LAYER, [layer]);
       writeInt2(DATATYPE, [0]);

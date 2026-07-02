@@ -75,14 +75,27 @@ scene = {
 //                              zOffset / cornerRadius do NOT apply — a via's
 //                              Z span is layer-bound; normalizeScene strips
 //                              them and exporters never emit them)
-//   'bridge':     length, width, height, thickness?, conductorLayerId?
+//   'bridge':     length, width, height, thickness?, padLength?,
+//                              conductorLayerId?
 //                              (RF AIRBRIDGE: conductor strap taking off at
 //                              the bound conductor layer's TOP, arcing up by
 //                              `height` and landing `length` away; layer=
 //                              'bridge'; w/h derived '(length)'×'(width)' so
 //                              the plan-view footprint feeds snaps/rings/GDS
 //                              via the rect fallback. thickness '' = the
-//                              conductor layer's thickness. HFSS native: ONE
+//                              conductor layer's thickness. padLength
+//                              (default '0') adds flat LANDING PADS — strap
+//                              metal extending padLength beyond EACH end of
+//                              the span on the conductor top; pads are EXTRA
+//                              geometry outside the AABB (snaps keep the
+//                              span bbox): canvas draws dimmer pad rects,
+//                              HFSS gains parametric flat Line profile
+//                              segments (solid AND sheet modes; emission
+//                              gated on the CURRENT numeric > 0), pyAEDT/3-D
+//                              extend the numeric profile, GDS layer 150
+//                              emits (length+2·padLength)×width. New inserts
+//                              seed `<id>_P` = 5 µm; the Inspector "pad
+//                              (landing)" field edits it. HFSS native: ONE
 //                              covered+closed CreatePolyline in the vertical
 //                              plane at Y=(cy)-(W)/2 — lower/upper 3-point
 //                              Spline arches + Line risers, ALL coordinates
@@ -708,10 +721,14 @@ a no-mutation test).
   emissive tint; `data-solid-count` attribute on the container for testability.
   Esc exits via `onExit`. Fit prefers device solids over the (possibly 250 µm
   thick) substrate slabs; `fitInfo`/`placeCamera` also drive SIX axis-view
-  buttons (T/B/F/K/L/R — top/bottom/front/back/left/right; top/bottom keep a
-  hair of −Y tilt to dodge the OrbitControls pole). The z=0 GridHelper tracks
-  the 2-D canvas grid setting (`gridVisible` prop = `settings.gridVisible`,
-  toggled live without a mesh rebuild).
+  buttons (top/bottom/front/back/left/right; top/bottom keep a hair of −Y
+  tilt to dodge the OrbitControls pole), rendered as `CubeIcon` mini
+  isometric cubes with the target face highlighted — the standard glyph is
+  the cube seen from the DEFAULT fit direction (visible faces top/front/
+  right); bottom/back/left rotate it 180° so the highlighted face is always
+  the one you'll face. The z=0 GridHelper tracks the 2-D canvas grid setting
+  (`gridVisible` prop = `settings.gridVisible`, toggled live without a mesh
+  rebuild).
 
 ## Rendering
 

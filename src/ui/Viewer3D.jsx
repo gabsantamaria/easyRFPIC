@@ -102,6 +102,41 @@ function buildLoftGeometry(THREE, solid, inflateZ) {
   return g;
 }
 
+// Mini isometric-cube icon with ONE face highlighted — the axis-view
+// buttons. The standard glyph is drawn as seen from the viewer's DEFAULT
+// fit direction (+X, −Y, +Z), so its visible faces are TOP, FRONT
+// (lower-left parallelogram) and RIGHT (lower-right). The bottom/back/left
+// icons use the SAME glyph rotated 180° (= viewed from the opposite
+// corner): top→bottom, front→back, right→left, so every highlighted face
+// is geometrically the face you'll be looking at.
+const CUBE_FACES = {
+  topF: 'M8 1.5 L14 4.5 L8 7.5 L2 4.5 Z',
+  frontF: 'M2 4.5 L8 7.5 L8 14.5 L2 11.5 Z',
+  rightF: 'M14 4.5 L8 7.5 L8 14.5 L14 11.5 Z',
+};
+function CubeIcon({ face }) {
+  const rotated = face === 'bottom' || face === 'back' || face === 'left';
+  const hi = (face === 'top' || face === 'bottom') ? 'topF'
+    : (face === 'front' || face === 'back') ? 'frontF'
+      : 'rightF';
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
+      <g transform={rotated ? 'rotate(180 8 8)' : undefined}>
+        {['topF', 'frontF', 'rightF'].map(k => (
+          <path
+            key={k}
+            d={CUBE_FACES[k]}
+            fill={k === hi ? '#22d3ee' : '#1e293b'}
+            stroke={k === hi ? '#67e8f9' : '#64748b'}
+            strokeWidth="0.9"
+            strokeLinejoin="round"
+          />
+        ))}
+      </g>
+    </svg>
+  );
+}
+
 // Solid spec → BufferGeometry with ALL placement baked in (identity mesh
 // transform — required so CSG brushes compose without matrix bookkeeping).
 // `inflateZ` grows the solid symmetrically in Z (used on CSG tools).
@@ -465,14 +500,15 @@ export default function Viewer3D({
   // Six axis-aligned views (Z-up: front = looking from −Y, right = from
   // +X, top = from +Z). Top/bottom keep a hair of −Y tilt so the view
   // direction is never exactly parallel to camera.up (OrbitControls'
-  // singular pole).
+  // singular pole). Rendered as cube icons with the target face
+  // highlighted (CubeIcon).
   const AXIS_VIEWS = [
-    { key: 'top', label: 'T', title: 'Top view (looking down −Z)', dir: [0, -1e-3, 1] },
-    { key: 'bottom', label: 'B', title: 'Bottom view (looking up +Z)', dir: [0, -1e-3, -1] },
-    { key: 'front', label: 'F', title: 'Front view (looking along +Y)', dir: [0, -1, 0] },
-    { key: 'back', label: 'K', title: 'Back view (looking along −Y)', dir: [0, 1, 0] },
-    { key: 'left', label: 'L', title: 'Left view (looking along +X)', dir: [-1, 0, 0] },
-    { key: 'right', label: 'R', title: 'Right view (looking along −X)', dir: [1, 0, 0] },
+    { key: 'top', title: 'Top view (looking down −Z)', dir: [0, -1e-3, 1] },
+    { key: 'bottom', title: 'Bottom view (looking up +Z)', dir: [0, -1e-3, -1] },
+    { key: 'front', title: 'Front view (looking along +Y)', dir: [0, -1, 0] },
+    { key: 'back', title: 'Back view (looking along −Y)', dir: [0, 1, 0] },
+    { key: 'left', title: 'Left view (looking along +X)', dir: [-1, 0, 0] },
+    { key: 'right', title: 'Right view (looking along −X)', dir: [1, 0, 0] },
   ];
 
   // ── Click → selection sync (raycast; small-move threshold vs orbit) ────
@@ -565,15 +601,16 @@ export default function Viewer3D({
             <button
               key={v.key}
               onClick={() => placeCamera(v.dir)}
-              className="px-1.5 py-1 text-[10px]"
+              className="px-1 py-0.5 flex items-center"
               style={{
                 background: 'rgba(15,23,42,0.85)',
-                color: '#e2e8f0',
                 borderLeft: i > 0 ? '1px solid #475569' : 'none',
               }}
               title={v.title}
+              aria-label={v.title}
+              data-view={v.key}
             >
-              {v.label}
+              <CubeIcon face={v.key} />
             </button>
           ))}
         </div>

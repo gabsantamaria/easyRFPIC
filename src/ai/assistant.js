@@ -108,7 +108,7 @@ Common fields: { id, kind, layer, cx (number), cy (number), w, h }.
   - "polygon":   r, n (exprs; regular n-gon, apex up). w = h = "2*(r)".
   - "racetrack": R, L_straight, p, wgWidth (exprs; hollow waveguide band racetrack resonator). Use on layer "waveguide".
   - "via":       r (expr), layerFrom, layerTo (stack-layer ids); layer MUST be "via". Vertical cylinder connecting two stack layers.
-  - "bridge":    length, width, height (exprs); layer MUST be "bridge". An RF AIRBRIDGE: a conductor strap that takes off at the conductor layer's TOP, arcs UP to an apex \`height\` above it, and lands back down \`length\` away; plan-view footprint = length x width (w = "(length)", h = "(width)"). Optional: thickness (expr; empty/omitted = the conductor layer's thickness), conductorLayerId (which conductor it takes off from), rotation (deg CCW — the strap spans the local X axis at rotation 0). Use it to jump one electrode OVER another (ground straps across a CPW, crossovers). Bridges canNOT be boolean operands and have no zOffset/cornerRadius.
+  - "bridge":    length, width, height (exprs); layer MUST be "bridge". An RF AIRBRIDGE: a conductor strap that takes off at the conductor layer's TOP, arcs UP to an apex \`height\` above it, and lands back down \`length\` away; plan-view footprint = length x width (w = "(length)", h = "(width)"). Optional: thickness (expr; empty/omitted = the conductor layer's thickness), padLength (expr, default "0": flat landing pads extending that far beyond EACH end of the span on the conductor top — extra metal outside the length x width AABB), conductorLayerId (which conductor it takes off from), rotation (deg CCW — the strap spans the local X axis at rotation 0). Use it to jump one electrode OVER another (ground straps across a CPW, crossovers). Bridges canNOT be boolean operands and have no zOffset/cornerRadius.
   - "polyline":  width (expr), vertices (array, >= 2), closed (bool, usually false). A constant- or tapered-width trace. w = "0", h = "0".
   - "polyshape": vertices (array, >= 3), closed: true. A filled 2-D polygon path. w = "0", h = "0".
 - Optional on rect/circle/ellipse/polygon: "rotation" (degrees CCW, expr string), "zOffset" (um expr, Z shift vs layer).
@@ -188,7 +188,7 @@ export const GEOMETRY_TOOL = {
             cy: { type: 'number' },
             w: EXPR, h: EXPR, r: EXPR, rx: EXPR, ry: EXPR, n: EXPR,
             R: EXPR, L_straight: EXPR, p: EXPR, wgWidth: EXPR,
-            length: EXPR, height: EXPR, thickness: EXPR,
+            length: EXPR, height: EXPR, thickness: EXPR, padLength: EXPR,
             width: EXPR, closed: { type: 'boolean' },
             vertices: { type: 'array', items: { type: 'object' } },
             rotation: EXPR, zOffset: EXPR, cornerRadius: EXPR,
@@ -258,7 +258,7 @@ export function normalizeFragment(fragment) {
   const components = (fragment.components || []).map(raw => {
     const c = { ...raw };
     for (const f of ['w', 'h', 'r', 'rx', 'ry', 'n', 'R', 'L_straight', 'p', 'wgWidth',
-      'width', 'length', 'height', 'thickness', 'rotation', 'zOffset', 'cornerRadius']) {
+      'width', 'length', 'height', 'thickness', 'padLength', 'rotation', 'zOffset', 'cornerRadius']) {
       if (c[f] != null) c[f] = asExpr(c[f]);
     }
     c.cx = Number(c.cx) || 0;
@@ -367,7 +367,7 @@ export function validateFragment(fragment, scene) {
     for (const field of KIND_REQUIRED[c.kind] || []) {
       if (c[field] == null) errors.push(`Component "${c.id}" (${c.kind}) is missing required field "${field}".`);
     }
-    for (const field of ['w', 'h', 'r', 'rx', 'ry', 'n', 'R', 'L_straight', 'p', 'wgWidth', 'width', 'length', 'height', 'thickness', 'rotation', 'zOffset', 'cornerRadius']) {
+    for (const field of ['w', 'h', 'r', 'rx', 'ry', 'n', 'R', 'L_straight', 'p', 'wgWidth', 'width', 'length', 'height', 'thickness', 'padLength', 'rotation', 'zOffset', 'cornerRadius']) {
       if (typeof c[field] === 'string' && !(c.kind === 'bridge' && field === 'thickness' && c[field].trim() === '')) checkExpr(c.id, field, c[field]);
     }
     if (c.kind === 'polyline' || c.kind === 'polyshape') {

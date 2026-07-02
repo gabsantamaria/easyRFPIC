@@ -21,6 +21,7 @@ const COMPONENT_EXPR_FIELDS = [
   'n',                                       // polygon side count
   'width',                                   // polyline trace width / bridge width
   'length', 'height', 'thickness',           // airbridge (D7) strap dimensions
+  'padLength',                               // airbridge landing-pad length
   'rotation',                                // first-class rotation (deg, CCW)
   'zOffset',                                 // Z shift relative to the layer (µm)
   'cornerRadius',                            // rect corner fillet radius (µm, D3)

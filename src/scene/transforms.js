@@ -74,6 +74,11 @@ export function expandTransforms(components, paramValues) {
       shapeFields.length = evalExpr(c.length ?? '30', paramValues);
       shapeFields.width = evalExpr(c.width ?? '10', paramValues);
       shapeFields.height = evalExpr(c.height ?? '3', paramValues);
+      // Landing pads: flat strap extensions beyond each end of the span
+      // ('0'/invalid = none). Numeric per instance so the canvas glyph /
+      // GDS footprint / 3-D profile reproduce them per clone.
+      const padVal = evalExpr(c.padLength ?? '0', paramValues);
+      shapeFields.padLength = Number.isFinite(padVal) && padVal > 0 ? padVal : 0;
       const tRaw = (c.thickness != null && String(c.thickness).trim() !== '') ? c.thickness : null;
       if (tRaw != null) {
         const tVal = evalExpr(tRaw, paramValues);
@@ -381,6 +386,7 @@ export function expandTransforms(components, paramValues) {
       if (inst.length !== undefined) out.length = inst.length;
       if (inst.height !== undefined) out.height = inst.height;
       if (inst.thickness !== undefined) out.thickness = inst.thickness;
+      if (inst.padLength !== undefined) out.padLength = inst.padLength;
       if (inst._resolvedVerts !== undefined) out._resolvedVerts = inst._resolvedVerts;
       if (inst._baseCx !== undefined) out._baseCx = inst._baseCx;
       if (inst._baseCy !== undefined) out._baseCy = inst._baseCy;

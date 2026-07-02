@@ -124,7 +124,7 @@ export function tokenizeComponentExprs(c) {
   push(c.width);
   // Airbridge (D7) strap dimensions - `width` above is shared. Mirrors
   // COMPONENT_EXPR_FIELDS in rename-ident.js; keep both in sync.
-  push(c.length); push(c.height); push(c.thickness);
+  push(c.length); push(c.height); push(c.thickness); push(c.padLength);
   for (const v of (c.vertices || [])) {
     if (!v) continue;
     push(v.dx); push(v.dy);

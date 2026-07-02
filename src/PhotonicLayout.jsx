@@ -2673,13 +2673,16 @@ export default function App() {
         const LParam = `${id}_L`;
         const WParam = `${id}_W`;
         const HParam = `${id}_H`;
+        const PParam = `${id}_P`;
         newParams[LParam] = { expr: width.toFixed(3), unit: 'µm', desc: `${id} airbridge span length` };
         newParams[WParam] = { expr: height.toFixed(3), unit: 'µm', desc: `${id} airbridge strap width` };
         newParams[HParam] = { expr: '3', unit: 'µm', desc: `${id} airbridge apex height above the conductor top` };
+        newParams[PParam] = { expr: '5', unit: 'µm', desc: `${id} airbridge landing-pad length beyond each end of the span` };
         newComp = {
           id, kind: 'bridge', layer: 'bridge',
           cx, cy,
           length: LParam, width: WParam, height: HParam,
+          padLength: PParam,
           thickness: '',
           w: `(${LParam})`, h: `(${WParam})`,
           cutouts: [], label: id,
@@ -8761,6 +8764,14 @@ export default function App() {
                       // layerTo — matching options are disabled in each
                       // select so an equal pair can't be picked.
                       const stackLayers = scene.stack || [];
+                      // Show the layer NAME; append the id only when two+
+                      // layers share the same display name (e.g. two fresh
+                      // "New layer" rows) so options stay distinguishable.
+                      const layerOptLabel = (l) => {
+                        const nm = l.name || l.id;
+                        const dup = stackLayers.filter(x => (x.name || x.id) === nm).length > 1;
+                        return dup ? `${nm} (${l.id})` : nm;
+                      };
                       const layerSelect = (key, label, value, otherValue) => (
                         <div>
                           <label className="text-[10px] uppercase tracking-wider text-slate-500">{label}</label>
@@ -8773,7 +8784,7 @@ export default function App() {
                             {!value && <option value="">— pick layer —</option>}
                             {stackLayers.map(l => (
                               <option key={l.id} value={l.id} disabled={l.id === otherValue}>
-                                {l.id} ({l.name || l.role})
+                                {layerOptLabel(l)}
                               </option>
                             ))}
                           </select>
@@ -8805,6 +8816,13 @@ export default function App() {
                       // anchors, canvas rect) would stay stuck at the old
                       // size (the known via/circle derived-dims bug).
                       const conductorsBr = (scene.stack || []).filter(l => l.role === 'conductor');
+                      // Name-first labels; id appended only on duplicate
+                      // display names (same rule as the via layer picker).
+                      const condOptLabel = (l) => {
+                        const nm = l.name || l.id;
+                        const dup = conductorsBr.filter(x => (x.name || x.id) === nm).length > 1;
+                        return dup ? `${nm} (${l.id})` : nm;
+                      };
                       return (
                         <>
                           <div className="grid grid-cols-2 gap-2">
@@ -8812,11 +8830,15 @@ export default function App() {
                             {fieldRow('width', 'width (strap)', selected.width ?? '10', (v) => updateComp(selected.id, { width: v, h: `(${v})` }))}
                             {fieldRow('height', 'height (apex)', selected.height ?? '3', (v) => updateComp(selected.id, { height: v }))}
                             {fieldRow('thickness', 'thickness', selected.thickness ?? '', (v) => updateComp(selected.id, { thickness: v }))}
+                            {fieldRow('padLength', 'pad (landing)', selected.padLength ?? '0', (v) => updateComp(selected.id, { padLength: v }))}
                           </div>
                           <p className="text-[9px] text-slate-500 mt-1 leading-snug">
                             thickness empty = the conductor layer's thickness. The strap takes
                             off at the conductor TOP and arcs up by the apex height; thickness
-                            is measured vertically (exact at the landings).
+                            is measured vertically (exact at the landings). pad &gt; 0 adds a
+                            flat landing pad of that length beyond EACH end of the span
+                            (extra metal on the conductor top — snaps/anchors keep the span
+                            bbox).
                           </p>
                           <div className="mt-2">
                             <label className="text-[10px] uppercase tracking-wider text-slate-500">conductor layer (take-off)</label>
@@ -8826,9 +8848,9 @@ export default function App() {
                               className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-slate-100 outline-none focus:border-cyan-400"
                               title="Conductor stack layer the strap takes off from — the HFSS export places the arch at this layer's parametric TOP, so thickness sweeps move the bridge with the stack."
                             >
-                              <option value="">(default — first conductor)</option>
+                              <option value="">{`(default — ${conductorsBr[0] ? condOptLabel(conductorsBr[0]) : 'first conductor'})`}</option>
                               {conductorsBr.map(l => (
-                                <option key={l.id} value={l.id}>{l.id} ({l.name || 'conductor'})</option>
+                                <option key={l.id} value={l.id}>{condOptLabel(l)}</option>
                               ))}
                             </select>
                           </div>

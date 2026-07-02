@@ -221,12 +221,20 @@ def build_wg(name, cx, cy, w, h):
         const yPl = c.cy - brW / 2;
         // 8-segment parabolic arch — sampler shared with the 3-D viewer
         // spec builder (src/geometry/bridge.js) so both emit the SAME
-        // 9-point profile.
+        // 9-point profile. Landing pads (padLength > 0) prepend/append a
+        // flat point at the conductor top beyond each end of the span.
+        const brPadRaw = evalExpr(c.padLength ?? '0', paramValues);
+        const brP = Number.isFinite(brPadRaw) && brPadRaw > 0 ? brPadRaw : 0;
         const archProfile = sampleBridgeArch(brL, brH, 8);
-        const arcPts = (zBase) => archProfile.map(([xa, zr]) => [c.cx + xa, yPl, zBase + zr]);
+        const arcPts = (zBase) => {
+          const arch = archProfile.map(([xa, zr]) => [c.cx + xa, yPl, zBase + zr]);
+          if (!(brP > 0)) return arch;
+          return [[c.cx - brL / 2 - brP, yPl, zBase], ...arch, [c.cx + brL / 2 + brP, yPl, zBase]];
+        };
         const fmtPts = (pts) => pts.map(([x, y, z]) => `["${x.toFixed(3)}um", "${y.toFixed(3)}um", "${z.toFixed(3)}um"]`).join(', ');
         code += `# ${c.id}: airbridge over "${brCondL ? ascii(brCondL.id) : '(none)'}" (numeric arch profile; use the native COM export for parametric tracking)\n`;
         code += `# Strap thickness is measured VERTICALLY (exact at landings, ~cos(slope) thinner on the flanks).\n`;
+        if (brP > 0) code += `# Landing pads: flat ${brP.toFixed(3)} um strap extensions beyond each end of the span.\n`;
         if (Math.abs(brT) < 1e-9) {
           // Zero-thickness conductor: open centerline profile swept by
           // the width -> a curved sheet (no cover/close).

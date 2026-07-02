@@ -27,16 +27,18 @@ import {
 // Shared fixture: blank scene + one electrode + one bridge snapped to it,
 // with a parametric rotation. Mirrors the export-smoke used during
 // development so every assertion runs on the same solved geometry.
-function bridgeScene({ hCond = null, rotation = '30', withSnap = true } = {}) {
+function bridgeScene({ hCond = null, rotation = '30', withSnap = true, pad = null } = {}) {
   const s = makeBlankScene();
   if (hCond != null) s.params.h_cond = { expr: String(hCond), unit: 'µm', desc: '' };
   s.params.br_L = { expr: '30', unit: 'µm', desc: '' };
   s.params.br_W = { expr: '10', unit: 'µm', desc: '' };
   s.params.br_H = { expr: '3', unit: 'µm', desc: '' };
+  if (pad != null) s.params.br_P = { expr: String(pad), unit: 'µm', desc: '' };
   s.components.push({ id: 'el1', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: '40', h: '20', cutouts: [], transforms: [] });
   s.components.push({
     id: 'br1', kind: 'bridge', cx: 100, cy: 50,
     length: 'br_L', width: 'br_W', height: 'br_H',
+    ...(pad != null ? { padLength: 'br_P' } : {}),
     ...(rotation != null ? { rotation } : {}),
   });
   const scene = normalizeScene(s);
@@ -355,6 +357,24 @@ describe('rename / tokenize coverage (bridge)', () => {
     expect(idents).toContain('br_H');
     expect(idents).toContain('br_T');
   });
+  it('padLength is covered by BOTH walkers (rename rewrites; tokenizer sees the pad param)', () => {
+    // The insert path seeds `<id>_P` referenced ONLY by padLength — if the
+    // walkers miss it, param rename orphans the field and "clean up unused
+    // params" deletes the param (pads silently vanish everywhere).
+    const scene = {
+      params: { br_P: { expr: '5', unit: 'µm' } },
+      components: [{
+        id: 'b1', kind: 'bridge', layer: 'bridge', cx: 0, cy: 0,
+        length: '30', width: '10', height: '3', padLength: 'br_P',
+        w: '(30)', h: '(10)', cutouts: [], transforms: [],
+      }],
+      snaps: [], stack: [],
+    };
+    const out = renameIdentInScene(scene, 'br_P', 'pad_len');
+    expect(out.components[0].padLength).toBe('pad_len');
+    const idents = tokenizeComponentExprs(scene.components[0]);
+    expect(idents).toContain('br_P');
+  });
 });
 
 // ── AI assistant registration ───────────────────────────────────────────
@@ -393,5 +413,139 @@ describe('AI assistant knows the bridge kind', () => {
     });
     const { errors } = validateFragment(f, scene);
     expect(errors.some(e => e.includes('missing required field "height"'))).toBe(true);
+  });
+  it('validateFragment expression-checks padLength (unknown ident blocks, valid passes)', () => {
+    const scene = makeBlankScene();
+    const bad = normalizeFragment({
+      components: [{ id: 'ai1_br', kind: 'bridge', layer: 'bridge', cx: 0, cy: 0, length: '30', width: '10', height: '3', padLength: 'ai1_missing_pad' }],
+    });
+    const { errors } = validateFragment(bad, scene);
+    expect(errors.some(e => e.includes('padLength') || e.includes('ai1_missing_pad'))).toBe(true);
+    const ok = normalizeFragment({
+      params: [{ name: 'ai1_pad', expr: '5', unit: 'um', desc: '' }],
+      components: [{ id: 'ai1_br', kind: 'bridge', layer: 'bridge', cx: 0, cy: 0, length: '30', width: '10', height: '3', padLength: 'ai1_pad' }],
+      snaps: [],
+    });
+    expect(validateFragment(ok, scene).errors).toEqual([]);
+    // Numeric padLength from the model is string-coerced by normalizeFragment.
+    const num = normalizeFragment({
+      components: [{ id: 'ai1_br', kind: 'bridge', layer: 'bridge', cx: 0, cy: 0, length: '30', width: '10', height: '3', padLength: 5 }],
+    });
+    expect(num.components[0].padLength).toBe('5');
+  });
+});
+
+// ── Landing pads (padLength) ────────────────────────────────────────────
+
+describe('bridge landing pads (padLength)', () => {
+  it('normalizeScene defaults padLength to "0" and coerces numerics', () => {
+    const s = normalizeScene({
+      params: {},
+      components: [
+        { id: 'b1', kind: 'bridge', cx: 0, cy: 0 },
+        { id: 'b2', kind: 'bridge', cx: 0, cy: 0, padLength: 5 },
+      ],
+      snaps: [],
+    });
+    expect(s.components.find(c => c.id === 'b1').padLength).toBe('0');
+    expect(s.components.find(c => c.id === 'b2').padLength).toBe('5');
+  });
+
+  it('expandTransforms propagates a numeric padLength per instance (0 when blank/invalid)', () => {
+    const scene = bridgeScene({ pad: 5, rotation: null, withSnap: false });
+    const pv = resolveParams(scene.params).values;
+    const [inst] = expandTransforms(scene.components.filter(c => c.id === 'br1'), pv);
+    expect(inst.padLength).toBe(5);
+    const scene0 = bridgeScene({ rotation: null, withSnap: false });
+    const [inst0] = expandTransforms(scene0.components.filter(c => c.id === 'br1'), resolveParams(scene0.params).values);
+    expect(inst0.padLength).toBe(0);
+  });
+
+  it('HFSS solid profile grows pad points + Line segments, all PARAMETRIC in br_P', () => {
+    const scene = bridgeScene({ pad: 5 });
+    const pv = resolveParams(scene.params).values;
+    const code = generateHfssNative(scene, pv);
+    // Pad tips extend the span by the parametric pad expression…
+    expect(code).toMatch(/"X:=", "\(\(br1_cx\)\) - \(\(br_L\)\)\/2 - \(\(br_P\)\)"/);
+    expect(code).toMatch(/"X:=", "\(\(br1_cx\)\) \+ \(\(br_L\)\)\/2 \+ \(\(br_P\)\)"/);
+    // …with the 11-point / 8-segment profile (2 splines + 6 lines).
+    const i = code.indexOf('AIRBRIDGE');
+    const block = code.slice(i, i + 5000);
+    const splines = block.match(/"SegmentType:=", "Spline"/g) || [];
+    const lines = block.match(/"SegmentType:=", "Line"/g) || [];
+    expect(splines.length).toBe(2);
+    expect(lines.length).toBe(6);
+    expect(block).toContain('Landing pads');
+    // Still parses as Python.
+    mkdirSync('tests/out', { recursive: true });
+    writeFileSync('tests/out/vitest_bridge_pads_hfss.py', code);
+    expect(() => execSync(
+      `python3 -c "import ast; ast.parse(open('tests/out/vitest_bridge_pads_hfss.py').read())"`,
+      { stdio: 'pipe' }
+    )).not.toThrow();
+  });
+
+  it('padLength "0" / absent emits the EXACT pre-pad profile (no pad points, 7-point ring)', () => {
+    const scene = bridgeScene();
+    const pv = resolveParams(scene.params).values;
+    const code = generateHfssNative(scene, pv);
+    expect(code).not.toContain('Landing pads');
+    const i = code.indexOf('AIRBRIDGE');
+    const block = code.slice(i, i + 5000);
+    expect((block.match(/"SegmentType:=", "Line"/g) || []).length).toBe(2);
+  });
+
+  it('HFSS sheet mode (h_cond = 0) gains flat pad Line segments around the open spline', () => {
+    const scene = bridgeScene({ hCond: 0, rotation: null, withSnap: false, pad: 4 });
+    const pv = resolveParams(scene.params).values;
+    const code = generateHfssNative(scene, pv);
+    const i = code.indexOf('AIRBRIDGE');
+    const block = code.slice(i, i + 4000);
+    expect(block).toMatch(/"IsPolylineClosed:=", False/);
+    expect(block).toMatch(/"SegmentType:=", "Line", "StartIndex:=", 0, "NoOfPoints:=", 2/);
+    expect(block).toMatch(/"SegmentType:=", "Spline", "StartIndex:=", 1, "NoOfPoints:=", 3/);
+    expect(block).toMatch(/"SegmentType:=", "Line", "StartIndex:=", 3, "NoOfPoints:=", 2/);
+    // Still joins the PEC_sheets boundary.
+    const m = code.match(/AssignImpedance\(\s*\["NAME:PEC_sheets",\s*"Objects:=", \[([^\]]*)\]/);
+    expect(m).toBeTruthy();
+    expect(m[1]).toContain('"br1"');
+  });
+
+  it('pyAEDT profile prepends/appends flat pad points at the conductor top', () => {
+    const scene = bridgeScene({ pad: 5, rotation: null, withSnap: false });
+    const pv = resolveParams(scene.params).values;
+    const code = generatePyAEDT(scene, pv);
+    expect(code).toContain('Landing pads: flat 5.000 um strap extensions');
+    // br1 at cx=100, L=30, P=5 → pad tips at x = 80 and 120.
+    expect(code).toMatch(/create_polyline\(points=\[\["80\.000um"/);
+    expect(code).toContain('["120.000um"');
+    mkdirSync('tests/out', { recursive: true });
+    writeFileSync('tests/out/vitest_bridge_pads_pyaedt.py', code);
+    expect(() => execSync(
+      `python3 -c "import ast; ast.parse(open('tests/out/vitest_bridge_pads_pyaedt.py').read())"`,
+      { stdio: 'pipe' }
+    )).not.toThrow();
+  });
+
+  it('GDS layer-150 footprint spans length + 2*padLength', () => {
+    const scene = bridgeScene({ pad: 5, rotation: null, withSnap: false });
+    const pv = resolveParams(scene.params).values;
+    const out = generateGDS(scene, pv);
+    // Find the layer-150 BOUNDARY, then read its XY record (int32 nm).
+    let idx = -1;
+    for (let i = 0; i + 5 < out.length; i++) {
+      if (out[i] === 0x00 && out[i + 1] === 0x06 && out[i + 2] === 0x0d && out[i + 3] === 0x02
+          && out[i + 4] === 0x00 && out[i + 5] === 0x96) { idx = i; break; }
+    }
+    expect(idx).toBeGreaterThan(-1);
+    // Records: LAYER(6) DATATYPE(6) then XY: [len][0x10][0x03][pairs…].
+    const xyStart = idx + 12;
+    expect(out[xyStart + 2]).toBe(0x10);
+    const xyLen = (out[xyStart] << 8) | out[xyStart + 1];
+    const dv = new DataView(out.buffer, out.byteOffset + xyStart + 4, xyLen - 4);
+    const xs = [];
+    for (let o = 0; o < dv.byteLength; o += 8) xs.push(dv.getInt32(o) / 1000);
+    const spanX = Math.max(...xs) - Math.min(...xs);
+    expect(spanX).toBeCloseTo(30 + 2 * 5, 3); // L + 2P
   });
 });

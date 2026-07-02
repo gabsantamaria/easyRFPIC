@@ -1657,6 +1657,18 @@ except Exception as e:
       const zApexBr = `(${z0Expr}) + (${brHgtExpr})`;
       const zBaseTBr = `(${z0Expr}) + (${brThkExpr})`;
       const zApexTBr = `(${z0Expr}) + (${brHgtExpr}) + (${brThkExpr})`;
+      // Landing pads (padLength > 0): flat strap extensions beyond each
+      // landing, sitting ON the conductor top — extra profile points, the
+      // pad length itself PARAMETRIC. Emission is gated on the CURRENT
+      // numeric value (padLength '0'/absent = byte-identical pre-pad
+      // output); sweeping the pad param from 0 upward re-sizes existing
+      // pads but cannot conjure the extra profile points, so start > 0.
+      const padRawBr = (c.padLength != null && String(c.padLength).trim() !== '') ? String(c.padLength) : null;
+      const brPadNum = padRawBr ? evalExpr(padRawBr, paramValues) : 0;
+      const hasPadsBr = Number.isFinite(brPadNum) && brPadNum > 0;
+      const brPadExpr = hasPadsBr ? exprWithUm(padRawBr) : null;
+      const xWP = hasPadsBr ? `(${CXBr}) - (${brLenExpr})/2 - (${brPadExpr})` : null; // west pad tip
+      const xEP = hasPadsBr ? `(${CXBr}) + (${brLenExpr})/2 + (${brPadExpr})` : null; // east pad tip
       const brMat = brLayer ? brLayer.material : condMaterial;
       const brPt = (x, z) => `["NAME:PLPoint", "X:=", "${x}", "Y:=", "${yPlaneBr}", "Z:=", "${z}"]`;
       const isSheetBr = !(Number.isFinite(brThkNum)) || Math.abs(brThkNum) < 1e-9;
@@ -1664,18 +1676,28 @@ except Exception as e:
       code += `# Take-off Z = the conductor layer's TOP; apex = +height above it. The strap\n`;
       code += `# thickness is measured VERTICALLY - exact at the landings, ~cos(slope) thinner\n`;
       code += `# normal to the flanks - representative of conformally deposited airbridge metal.\n`;
+      if (hasPadsBr) {
+        code += `# Landing pads: flat ${ascii(padRawBr)} um strap extensions beyond each end of the span.\n`;
+      }
       code += `set_var("${cxVarBr}", "${cxValExprBr}")\n`;
       code += `set_var("${cyVarBr}", "${cyValExprBr}")\n`;
       if (isSheetBr) {
-        // Zero-thickness conductor stack: emit only the OPEN 3-point
-        // spline centerline profile and sweep by width → a curved SHEET.
+        // Zero-thickness conductor stack: emit only the OPEN centerline
+        // profile (3-point spline arch, plus flat pad Line segments when
+        // padLength > 0) and sweep by width → a curved SHEET.
         // The name joins zeroThicknessSheets so the PEC_sheets impedance
         // boundary covers it like every other zero-thickness conductor.
-        const ptsBr = [
-          brPt(xW, zBaseBr),
-          brPt(CXBr, zApexBr),
-          brPt(xE, zBaseBr),
-        ].join(',\n          ');
+        const ptsBrList = hasPadsBr
+          ? [brPt(xWP, zBaseBr), brPt(xW, zBaseBr), brPt(CXBr, zApexBr), brPt(xE, zBaseBr), brPt(xEP, zBaseBr)]
+          : [brPt(xW, zBaseBr), brPt(CXBr, zApexBr), brPt(xE, zBaseBr)];
+        const ptsBr = ptsBrList.join(',\n          ');
+        const segsSheetBr = hasPadsBr
+          ? [
+            `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", 0, "NoOfPoints:=", 2]`,
+            `["NAME:PLSegment", "SegmentType:=", "Spline", "StartIndex:=", 1, "NoOfPoints:=", 3]`,
+            `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", 3, "NoOfPoints:=", 2]`,
+          ].join(',\n          ')
+          : `["NAME:PLSegment", "SegmentType:=", "Spline", "StartIndex:=", 0, "NoOfPoints:=", 3]`;
         code += `try:
     _delete_geom_if_exists("${id}")
     oEditor.CreatePolyline(
@@ -1685,7 +1707,7 @@ except Exception as e:
          ["NAME:PolylinePoints",
           ${ptsBr}],
          ["NAME:PolylineSegments",
-          ["NAME:PLSegment", "SegmentType:=", "Spline", "StartIndex:=", 0, "NoOfPoints:=", 3]],
+          ${segsSheetBr}],
          ["NAME:PolylineXSection",
           "XSectionType:=", "None",
           "XSectionOrient:=", "Auto",
@@ -1716,25 +1738,52 @@ except Exception as e:
 `;
         zeroThicknessSheets.push(id);
       } else {
-        // Solid strap: closed profile ring (7 points incl. the closing
-        // repeat) — lower Spline, up Line, upper Spline, closing Line.
+        // Solid strap: closed profile ring — lower Spline, up Line, upper
+        // Spline, closing Line (7 points incl. the closing repeat).
         // IsPolylineClosed=True is REQUIRED so IsPolylineCovered fills
         // the face; the sweep then produces a solid (polyshape rules).
-        const ptsBr = [
-          brPt(xW, zBaseBr),     // 0  west landing (bottom)
-          brPt(CXBr, zApexBr),   // 1  apex (bottom)
-          brPt(xE, zBaseBr),     // 2  east landing (bottom)
-          brPt(xE, zBaseTBr),    // 3  east landing (top)
-          brPt(CXBr, zApexTBr),  // 4  apex (top)
-          brPt(xW, zBaseTBr),    // 5  west landing (top)
-          brPt(xW, zBaseBr),     // 6  closing repeat of point 0
-        ].join(',\n          ');
-        const segsBr = [
-          `["NAME:PLSegment", "SegmentType:=", "Spline", "StartIndex:=", 0, "NoOfPoints:=", 3]`,
-          `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", 2, "NoOfPoints:=", 2]`,
-          `["NAME:PLSegment", "SegmentType:=", "Spline", "StartIndex:=", 3, "NoOfPoints:=", 3]`,
-          `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", 5, "NoOfPoints:=", 2]`,
-        ].join(',\n          ');
+        // With landing pads: flat Line pad segments at the conductor top
+        // flank the arch on BOTH the lower and upper paths (11 points).
+        const ptsBr = (hasPadsBr
+          ? [
+            brPt(xWP, zBaseBr),    // 0  west pad tip (bottom)
+            brPt(xW, zBaseBr),     // 1  west landing (bottom)
+            brPt(CXBr, zApexBr),   // 2  apex (bottom)
+            brPt(xE, zBaseBr),     // 3  east landing (bottom)
+            brPt(xEP, zBaseBr),    // 4  east pad tip (bottom)
+            brPt(xEP, zBaseTBr),   // 5  east pad tip (top)
+            brPt(xE, zBaseTBr),    // 6  east landing (top)
+            brPt(CXBr, zApexTBr),  // 7  apex (top)
+            brPt(xW, zBaseTBr),    // 8  west landing (top)
+            brPt(xWP, zBaseTBr),   // 9  west pad tip (top)
+            brPt(xWP, zBaseBr),    // 10 closing repeat of point 0
+          ]
+          : [
+            brPt(xW, zBaseBr),     // 0  west landing (bottom)
+            brPt(CXBr, zApexBr),   // 1  apex (bottom)
+            brPt(xE, zBaseBr),     // 2  east landing (bottom)
+            brPt(xE, zBaseTBr),    // 3  east landing (top)
+            brPt(CXBr, zApexTBr),  // 4  apex (top)
+            brPt(xW, zBaseTBr),    // 5  west landing (top)
+            brPt(xW, zBaseBr),     // 6  closing repeat of point 0
+          ]).join(',\n          ');
+        const segsBr = (hasPadsBr
+          ? [
+            `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", 0, "NoOfPoints:=", 2]`,
+            `["NAME:PLSegment", "SegmentType:=", "Spline", "StartIndex:=", 1, "NoOfPoints:=", 3]`,
+            `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", 3, "NoOfPoints:=", 2]`,
+            `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", 4, "NoOfPoints:=", 2]`,
+            `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", 5, "NoOfPoints:=", 2]`,
+            `["NAME:PLSegment", "SegmentType:=", "Spline", "StartIndex:=", 6, "NoOfPoints:=", 3]`,
+            `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", 8, "NoOfPoints:=", 2]`,
+            `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", 9, "NoOfPoints:=", 2]`,
+          ]
+          : [
+            `["NAME:PLSegment", "SegmentType:=", "Spline", "StartIndex:=", 0, "NoOfPoints:=", 3]`,
+            `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", 2, "NoOfPoints:=", 2]`,
+            `["NAME:PLSegment", "SegmentType:=", "Spline", "StartIndex:=", 3, "NoOfPoints:=", 3]`,
+            `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", 5, "NoOfPoints:=", 2]`,
+          ]).join(',\n          ');
         code += `try:
     _delete_geom_if_exists("${id}")
     oEditor.CreatePolyline(

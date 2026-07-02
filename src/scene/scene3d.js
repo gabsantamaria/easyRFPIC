@@ -374,10 +374,14 @@ export function buildScene3D(rawScene, paramValues) {
           warn(`brsheet:${c.id}`, `${c.id}: zero-thickness bridge strap rendered as a thin (~${BRIDGE_SHEET_T} µm) sheet for visibility`);
         }
         // Closed profile: lower arch + reversed upper arch (the SAME
-        // 9-point parabola generatePyAEDT sweeps).
+        // 9-point parabola generatePyAEDT sweeps). Landing pads
+        // (padLength > 0) add a flat point at the conductor top beyond
+        // each end of the span, exactly like the exporters.
+        const P = Number.isFinite(inst.padLength) && inst.padLength > 0 ? inst.padLength : 0;
         const arch = sampleBridgeArch(L, H, 8);
-        const lower = arch.map(([xa, zr]) => [xa, brZ0 + zr]);
-        const upper = arch.map(([xa, zr]) => [xa, brZ0 + zr + t]).reverse();
+        const withPads = (pts, z) => (P > 0 ? [[-L / 2 - P, z], ...pts, [L / 2 + P, z]] : pts);
+        const lower = withPads(arch.map(([xa, zr]) => [xa, brZ0 + zr]), brZ0);
+        const upper = withPads(arch.map(([xa, zr]) => [xa, brZ0 + zr + t]), brZ0 + t).reverse();
         const [cx, cy] = xfPoint(xfs, [inst.cx, inst.cy]);
         const mirrored = (inst.scaleX ?? 1) !== 1 || (inst.scaleY ?? 1) !== 1
           || xfs.some(xf => xf.sx === -1 || xf.sy === -1);

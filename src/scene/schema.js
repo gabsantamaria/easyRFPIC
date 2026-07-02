@@ -239,6 +239,13 @@ export function normalizeScene(s) {
   // lands back down. Plan-view footprint = length × width rect. Normalize
   // defaults so downstream consumers can assume:
   //   length / width / height — expression strings ('30' / '10' / '3')
+  //   padLength  — expression string ('0' = none): flat LANDING PADS at
+  //                each end of the span — strap metal extending padLength
+  //                beyond each landing, sitting on the conductor top.
+  //                Pads are EXTRA geometry beyond the AABB (w/h stay
+  //                length × width so existing snaps don't shift); the
+  //                canvas glyph, 3-D viewer, HFSS/pyAEDT profiles, and
+  //                the GDS layer-150 footprint all include them.
   //   thickness  — expression string; '' means "use the conductor layer's
   //                thickness" (resolved at export time)
   //   layer      — 'bridge' (drives canvas styling + exporter dispatch)
@@ -262,6 +269,7 @@ export function normalizeScene(s) {
       coerce('length', '30');
       coerce('width', '10');
       coerce('height', '3');
+      coerce('padLength', '0'); // '0' = no landing pads
       coerce('thickness', ''); // '' = use the conductor layer's thickness
       if (next.layer !== 'bridge') { next.layer = 'bridge'; changed = true; }
       if (next.conductorLayerId && !condsInStack.some(l => l.id === next.conductorLayerId)) {
