@@ -241,6 +241,54 @@ def build_wg(name, cx, cy, w, h):
         code += `# ${c.id}: via ${ascii(String(c.layerFrom))} -> ${ascii(String(c.layerTo))} (numeric Z span; use the native COM export for parametric stack tracking)\n`;
         code += `hfss.modeler.create_cylinder(cs_axis="Z", origin=["${cx}um", "${cy}um", "${zStart.toFixed(4)}um"], radius="${rNum}um", height="${heightNum.toFixed(4)}um", name="${id}", material="${viaMat}")\n`;
       }
+    } else if (shapeKind === 'bridge') {
+      // Airbridge (D7) — BASIC numeric emission: the vertical arch
+      // profile (a parabola through take-off / apex / landing — the
+      // numeric stand-in for the native export's 3-point NURBS spline)
+      // as a covered closed polyline in the XZ plane at y = cy - W/2,
+      // swept along +Y by the width. All values baked at export time;
+      // use the native COM export for parametric tracking.
+      const brL = evalExpr(c.length ?? '30', paramValues) || 0;
+      const brW = evalExpr(c.width ?? '10', paramValues) || 0;
+      const brH = evalExpr(c.height ?? '3', paramValues) || 0;
+      const conductorsPy = (scene.stack || []).filter(l => l.role === 'conductor');
+      const brCondL = (c.conductorLayerId && conductorsPy.find(l => l.id === c.conductorLayerId)) || conductorsPy[0] || null;
+      const brZ0 = brCondL && numericLayerZ[brCondL.id] ? numericLayerZ[brCondL.id].zTop : (evalExpr('h_wg', paramValues) || 0.6);
+      const tRawBr = (c.thickness != null && String(c.thickness).trim() !== '') ? c.thickness : null;
+      const brTRaw = tRawBr
+        ? evalExpr(tRawBr, paramValues)
+        : (brCondL && numericLayerZ[brCondL.id]
+            ? numericLayerZ[brCondL.id].zTop - numericLayerZ[brCondL.id].zBottom
+            : evalExpr('h_cond', paramValues));
+      const brT = Number.isFinite(brTRaw) ? brTRaw : 0;
+      const brMatPy = brCondL ? ascii(brCondL.material) : 'gold';
+      if (!(brL > 0) || !(brW > 0) || !(brH > 0)) {
+        code += `# Skipped bridge ${id}: length/width/height must all evaluate > 0\n`;
+      } else {
+        const yPl = c.cy - brW / 2;
+        const NARC = 8; // segments per arc — numeric stand-in for the NURBS
+        const arcPts = (zBase) => {
+          const pts = [];
+          for (let k = 0; k <= NARC; k++) {
+            const u = -1 + (2 * k) / NARC;
+            pts.push([c.cx + (u * brL) / 2, yPl, zBase + brH * (1 - u * u)]);
+          }
+          return pts;
+        };
+        const fmtPts = (pts) => pts.map(([x, y, z]) => `["${x.toFixed(3)}um", "${y.toFixed(3)}um", "${z.toFixed(3)}um"]`).join(', ');
+        code += `# ${c.id}: airbridge over "${brCondL ? ascii(brCondL.id) : '(none)'}" (numeric arch profile; use the native COM export for parametric tracking)\n`;
+        code += `# Strap thickness is measured VERTICALLY (exact at landings, ~cos(slope) thinner on the flanks).\n`;
+        if (Math.abs(brT) < 1e-9) {
+          // Zero-thickness conductor: open centerline profile swept by
+          // the width -> a curved sheet (no cover/close).
+          code += `hfss.modeler.create_polyline(points=[${fmtPts(arcPts(brZ0))}], name="${id}", material="${brMatPy}")\n`;
+        } else {
+          const lower = arcPts(brZ0);
+          const upper = arcPts(brZ0 + brT).reverse();
+          code += `hfss.modeler.create_polyline(points=[${fmtPts([...lower, ...upper])}], cover_surface=True, close_surface=True, name="${id}", material="${brMatPy}")\n`;
+        }
+        code += `hfss.modeler.sweep_along_vector("${id}", ["0um", "${brW.toFixed(3)}um", "0um"])\n`;
+      }
     } else if (shapeKind === 'ellipse') {
       const rxNum = (evalExpr(c.rx ?? '0', paramValues) || 0).toFixed(3);
       const ryNum = (evalExpr(c.ry ?? '0', paramValues) || 0).toFixed(3);
@@ -421,7 +469,7 @@ def build_wg(name, cx, cy, w, h):
     // Rotate about the part's own center via translate-rotate-translate
     // (HFSS rotates about the world origin). Numeric here; the native
     // COM export emits the rotation EXPRESSION parametrically.
-    if ((shapeKind === 'rect' || shapeKind === 'circle' || shapeKind === 'ellipse' || shapeKind === 'polygon')
+    if ((shapeKind === 'rect' || shapeKind === 'circle' || shapeKind === 'ellipse' || shapeKind === 'polygon' || shapeKind === 'bridge')
         && c.rotation != null && String(c.rotation).trim() !== '' && String(c.rotation).trim() !== '0') {
       const rotNum = evalExpr(c.rotation, paramValues);
       if (Number.isFinite(rotNum) && Math.abs(rotNum) > 1e-12) {

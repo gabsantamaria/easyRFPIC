@@ -2303,6 +2303,7 @@ export default function App() {
       : shapeKind === 'polyline' ? 'trace'
       : shapeKind === 'polyshape' ? 'pshape'
       : shapeKind === 'via' ? 'via'
+      : shapeKind === 'bridge' ? 'bridge'
       : layerPrefix;
     const idPrefix = shapeKind === 'rect' ? layerPrefix : shapePrefix;
     const baseId = `${idPrefix}${scene.components.filter(c => c.layer === layerKind).length + 1}`;
@@ -2566,6 +2567,30 @@ export default function App() {
           layerTo: spec.layerTo || null,
           w: `2*${rParam}`, h: `2*${rParam}`,
           cutouts: [], label: id,
+        };
+      } else if (shapeKind === 'bridge') {
+        // Airbridge (D7): drag-to-size conductor strap that arcs OVER
+        // the conductor plane. Drag width → strap LENGTH, drag height →
+        // strap WIDTH; apex height defaults to 3 µm. Auto params <id>_L
+        // / <id>_W / <id>_H (µm); the AABB w/h derive from L/W (the via
+        // convention) so snaps / anchors / transforms work uniformly.
+        // thickness '' = "use the conductor layer's thickness" (resolved
+        // at export). HFSS sees a parametric vertical-profile polyline
+        // (spline arch) swept by the width.
+        const LParam = `${id}_L`;
+        const WParam = `${id}_W`;
+        const HParam = `${id}_H`;
+        newParams[LParam] = { expr: width.toFixed(3), unit: 'µm', desc: `${id} airbridge span length` };
+        newParams[WParam] = { expr: height.toFixed(3), unit: 'µm', desc: `${id} airbridge strap width` };
+        newParams[HParam] = { expr: '3', unit: 'µm', desc: `${id} airbridge apex height above the conductor top` };
+        newComp = {
+          id, kind: 'bridge', layer: 'bridge',
+          cx, cy,
+          length: LParam, width: WParam, height: HParam,
+          thickness: '',
+          w: `(${LParam})`, h: `(${WParam})`,
+          cutouts: [], label: id,
+          ...(conductorLayerId ? { conductorLayerId } : {}),
         };
       } else if (shapeKind === 'polyline') {
         // Polyline trace. The drawing UX in Canvas hands us a vertex
@@ -5122,6 +5147,16 @@ export default function App() {
       alertDialog('One or more selected shapes is already part of another boolean. Use the parent boolean instead.', 'Cannot combine');
       return;
     }
+    // SCOPE EXCLUSION (D7): airbridges are NOT valid boolean operands.
+    // Their HFSS body is a swept vertical-profile solid that lives ABOVE
+    // the conductor plane — the plan-view boolean composition (SVG masks,
+    // planar Subtract/Unite semantics) has no meaningful interpretation
+    // for it, and the exporters' boolean paths assume in-layer bodies.
+    const bridgeOperand = ids.find(id => scene.components.find(cc => cc.id === id)?.kind === 'bridge');
+    if (bridgeOperand) {
+      alertDialog(`"${bridgeOperand}" is an airbridge — airbridges cannot participate in boolean operations. Deselect it and retry.`, 'Cannot combine');
+      return;
+    }
     // Compute the centroid of operand bboxes from the SOLVED scene so the
     // new component starts at the cluster's geometric center. After this
     // the boolean's cx/cy is what gets dragged; operand cx/cy stays at
@@ -5741,6 +5776,22 @@ export default function App() {
                 setSnapMode('idle');
                 setRulerMode(false);
               };
+              // Airbridge tool (D7): drag-to-size conductor strap over the
+              // conductor plane. Needs a conductor layer to land on.
+              const bridgeEligible = conductors.length >= 1;
+              const isBridgeActive = !!(addMode && addMode.shape === 'bridge');
+              const toggleBridge = () => {
+                if (isBridgeActive) { setAddMode(null); return; }
+                setAddMode({
+                  layer: 'bridge', shape: 'bridge',
+                  // Bind to the active conductor when one is selected in
+                  // the layer dropdown; else the first conductor (the
+                  // exporters' default resolution).
+                  conductorLayerId: activeConductorLayerId || conductors[0]?.id || null,
+                });
+                setSnapMode('idle');
+                setRulerMode(false);
+              };
               return (
                 <>
                   <select
@@ -5858,6 +5909,22 @@ export default function App() {
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <circle cx="12" cy="12" r="9" />
                       <circle cx="12" cy="12" r="2.5" fill="currentColor" stroke="none" />
+                    </svg>
+                  </button>
+                  <button
+                    key="add-bridge"
+                    onClick={toggleBridge}
+                    disabled={!bridgeEligible}
+                    className={baseBtn + (isBridgeActive ? activeRing : '') + (bridgeEligible ? '' : ' opacity-40 cursor-not-allowed')}
+                    style={{ background: 'var(--app-slate-800)', color: 'var(--app-slate-200)' }}
+                    title={bridgeEligible
+                      ? 'Add airbridge — drag on canvas: drag width = strap LENGTH, drag height = strap WIDTH. A conductor strap takes off at the conductor top, arcs up by the apex height (default 3 µm) and lands back down. HFSS sees a parametric vertical-profile polyline (spline arch) swept by the width; footprint lands on GDS layer 150.'
+                      : 'Airbridge tool needs a conductor layer in the stack (something to take off from).'}
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                      <path d="M3 18 Q 12 4 21 18" />
+                      <line x1="3" y1="14" x2="3" y2="21" />
+                      <line x1="21" y1="14" x2="21" y2="21" />
                     </svg>
                   </button>
                 </>
@@ -7927,6 +7994,10 @@ export default function App() {
                     </span>
                   </div>
                 )}
+                {/* Bridges live on their own fixed 'bridge' pseudo-layer
+                    (normalizeScene forces it) — hide the free-layer picker
+                    so the user can't detach the strap from its dispatch. */}
+                {selected.kind !== 'bridge' && (
                 <div>
                   <label className="text-[10px] uppercase tracking-wider text-slate-500">Layer</label>
                   <select value={selected.layer} onChange={(e) => updateComp(selected.id, { layer: e.target.value })} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-slate-100 outline-none">
@@ -7935,6 +8006,7 @@ export default function App() {
                     <option value="port">port</option>
                   </select>
                 </div>
+                )}
                 {/* Conductor-layer binding. Visible for both electrode
                     and port components when the stack defines at least
                     one conductor layer. For electrodes it picks the
@@ -8418,6 +8490,44 @@ export default function App() {
                         </>
                       );
                     }
+                    if (shapeKind === 'bridge') {
+                      // Airbridge (D7): strap dimensions + the conductor
+                      // layer it takes off from. Editing length / width
+                      // ALSO patches the derived AABB w / h in the SAME
+                      // updateComp call — otherwise the footprint (snaps,
+                      // anchors, canvas rect) would stay stuck at the old
+                      // size (the known via/circle derived-dims bug).
+                      const conductorsBr = (scene.stack || []).filter(l => l.role === 'conductor');
+                      return (
+                        <>
+                          <div className="grid grid-cols-2 gap-2">
+                            {fieldRow('length', 'length (span)', selected.length ?? '30', (v) => updateComp(selected.id, { length: v, w: `(${v})` }))}
+                            {fieldRow('width', 'width (strap)', selected.width ?? '10', (v) => updateComp(selected.id, { width: v, h: `(${v})` }))}
+                            {fieldRow('height', 'height (apex)', selected.height ?? '3', (v) => updateComp(selected.id, { height: v }))}
+                            {fieldRow('thickness', 'thickness', selected.thickness ?? '', (v) => updateComp(selected.id, { thickness: v }))}
+                          </div>
+                          <p className="text-[9px] text-slate-500 mt-1 leading-snug">
+                            thickness empty = the conductor layer's thickness. The strap takes
+                            off at the conductor TOP and arcs up by the apex height; thickness
+                            is measured vertically (exact at the landings).
+                          </p>
+                          <div className="mt-2">
+                            <label className="text-[10px] uppercase tracking-wider text-slate-500">conductor layer (take-off)</label>
+                            <select
+                              value={selected.conductorLayerId || ''}
+                              onChange={(e) => updateComp(selected.id, { conductorLayerId: e.target.value || undefined })}
+                              className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-slate-100 outline-none focus:border-cyan-400"
+                              title="Conductor stack layer the strap takes off from — the HFSS export places the arch at this layer's parametric TOP, so thickness sweeps move the bridge with the stack."
+                            >
+                              <option value="">(default — first conductor)</option>
+                              {conductorsBr.map(l => (
+                                <option key={l.id} value={l.id}>{l.id} ({l.name || 'conductor'})</option>
+                              ))}
+                            </select>
+                          </div>
+                        </>
+                      );
+                    }
                     // Default: rectangle.
                     return (
                       <div className="grid grid-cols-2 gap-2">
@@ -8437,7 +8547,7 @@ export default function App() {
                     variable would come out deg². zOffset params are µm. */}
                 {selected.kind !== 'boolean' && (() => {
                   const shapeKind = selected.kind || 'rect';
-                  const showRot = ['rect', 'circle', 'ellipse', 'polygon'].includes(shapeKind);
+                  const showRot = ['rect', 'circle', 'ellipse', 'polygon', 'bridge'].includes(shapeKind);
                   const showZ = ['rect', 'circle', 'ellipse', 'polygon', 'polyline', 'polyshape'].includes(shapeKind);
                   if (!showRot && !showZ) return null;
                   const exprField = (key, label, value, unitForCreate, fmt) => (

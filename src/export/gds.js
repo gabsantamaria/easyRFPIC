@@ -10,6 +10,7 @@
 //   electrode (per stack conductor)  → layers 10, 11, 12, … (one per
 //     conductor layer in stack order; falls back to 10 if no stack info)
 //   port      → layer 100
+//   bridge    → layer 150 (airbridge footprint)
 //
 // All coordinates are written as INT32 nanometers (typical GDS practice
 // when working in µm: 1 user unit = 1 µm = 1000 database units of 1 nm).
@@ -161,6 +162,9 @@ export function generateGDS(scene, paramValues) {
     if (c.kind === 'via') {
       return viaKeyToGdsLayer[`${c.layerFrom || '?'}->${c.layerTo || '?'}`] ?? 200;
     }
+    // Airbridge (D7): footprint BOUNDARY on its own layer (the ring
+    // fallback emits the length × width rect automatically).
+    if (c.kind === 'bridge') return 150;
     if (c.layer === 'waveguide') return 1;
     if (c.layer === 'port') return 100;
     if (c.layer === 'electrode') {

@@ -65,6 +65,20 @@ export function expandTransforms(components, paramValues) {
     } else if (kind === 'ellipse') {
       shapeFields.rx = evalExpr(c.rx ?? '0', paramValues);
       shapeFields.ry = evalExpr(c.ry ?? '0', paramValues);
+    } else if (kind === 'bridge') {
+      // Airbridge (D7): plan-view footprint is length × width (the AABB
+      // w/h already derive from these); height is the arch apex above
+      // the conductor top and thickness the strap metal thickness ('' =
+      // use the conductor layer's). Numeric copies ride each instance so
+      // the canvas glyph / exporters can reproduce the geometry per clone.
+      shapeFields.length = evalExpr(c.length ?? '30', paramValues);
+      shapeFields.width = evalExpr(c.width ?? '10', paramValues);
+      shapeFields.height = evalExpr(c.height ?? '3', paramValues);
+      const tRaw = (c.thickness != null && String(c.thickness).trim() !== '') ? c.thickness : null;
+      if (tRaw != null) {
+        const tVal = evalExpr(tRaw, paramValues);
+        if (Number.isFinite(tVal)) shapeFields.thickness = tVal;
+      }
     } else if (kind === 'polygon') {
       shapeFields.r = evalExpr(c.r ?? '0', paramValues);
       // Number of sides: rounded; clamped to >= 3 (a digon doesn't render).
@@ -128,7 +142,7 @@ export function expandTransforms(components, paramValues) {
     // GDS, and boolean masks pick it up with zero special-casing.
     // Transform-chain rotates then ADD to it (rotation composes).
     let baseRotation = 0;
-    if ((kind === 'rect' || kind === 'circle' || kind === 'ellipse' || kind === 'polygon') && c.rotation != null) {
+    if ((kind === 'rect' || kind === 'circle' || kind === 'ellipse' || kind === 'polygon' || kind === 'bridge') && c.rotation != null) {
       const rv = evalExpr(c.rotation, paramValues);
       if (Number.isFinite(rv)) baseRotation = rv;
     }
@@ -359,10 +373,14 @@ export function expandTransforms(components, paramValues) {
       if (inst.p !== undefined) out.p = inst.p;
       if (inst.wgWidth !== undefined) out.wgWidth = inst.wgWidth;
       // polyline + polyshape share the vertices field; only polyline
-      // actually uses the width scalar.
+      // actually uses the width scalar. Bridges (D7) reuse `width` and
+      // add length / height / thickness.
       if (inst.vertices !== undefined) out.vertices = inst.vertices;
       if (inst.closed !== undefined) out.closed = inst.closed;
       if (inst.width !== undefined) out.width = inst.width;
+      if (inst.length !== undefined) out.length = inst.length;
+      if (inst.height !== undefined) out.height = inst.height;
+      if (inst.thickness !== undefined) out.thickness = inst.thickness;
       if (inst._resolvedVerts !== undefined) out._resolvedVerts = inst._resolvedVerts;
       if (inst._baseCx !== undefined) out._baseCx = inst._baseCx;
       if (inst._baseCy !== undefined) out._baseCy = inst._baseCy;

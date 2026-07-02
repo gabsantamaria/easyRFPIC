@@ -122,6 +122,9 @@ export function tokenizeComponentExprs(c) {
   // arc cdx/cdy/angle, taper width). Non-string fields are skipped by
   // push(), so snap vertices pass through harmlessly.
   push(c.width);
+  // Airbridge (D7) strap dimensions - `width` above is shared. Mirrors
+  // COMPONENT_EXPR_FIELDS in rename-ident.js; keep both in sync.
+  push(c.length); push(c.height); push(c.thickness);
   for (const v of (c.vertices || [])) {
     if (!v) continue;
     push(v.dx); push(v.dy);

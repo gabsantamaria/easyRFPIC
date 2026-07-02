@@ -75,6 +75,31 @@ scene = {
 //                              zOffset / cornerRadius do NOT apply — a via's
 //                              Z span is layer-bound; normalizeScene strips
 //                              them and exporters never emit them)
+//   'bridge':     length, width, height, thickness?, conductorLayerId?
+//                              (RF AIRBRIDGE: conductor strap taking off at
+//                              the bound conductor layer's TOP, arcing up by
+//                              `height` and landing `length` away; layer=
+//                              'bridge'; w/h derived '(length)'×'(width)' so
+//                              the plan-view footprint feeds snaps/rings/GDS
+//                              via the rect fallback. thickness '' = the
+//                              conductor layer's thickness. HFSS native: ONE
+//                              covered+closed CreatePolyline in the vertical
+//                              plane at Y=(cy)-(W)/2 — lower/upper 3-point
+//                              Spline arches + Line risers, ALL coordinates
+//                              parametric (snap-chain center set_vars,
+//                              conductor-top zTopExpr) — swept along +Y by
+//                              the parametric width; h_cond=0 ⇒ open-spline
+//                              SHEET joining the PEC_sheets impedance
+//                              boundary. Strap thickness is measured
+//                              VERTICALLY (exact at landings, ~cos(slope)
+//                              thinner on the flanks). rotation KEPT (D6
+//                              sandwich in HFSS); zOffset/cornerRadius
+//                              stripped. GDS = footprint on layer 150;
+//                              pyAEDT = numeric parabola profile + sweep;
+//                              gdsfactory skips it. SCOPE: NOT a valid
+//                              boolean operand (createBoolean blocks it);
+//                              excluded from the 2-line/Q3D conductor picker
+//                              by the layer==='electrode' filter)
 //   'polyline':   width, vertices[], closed?   (w='0', h='0'; bbox refreshed
 //                              post-solve by refreshPolylineBbox, padded by the
 //                              WIDEST effective width)
@@ -663,6 +688,9 @@ node tests/test_edge_stickiness.mjs
 npx vitest run
 #   tests/curved-paths.test.js        — arc/spline/taper vertex model (geometry + solver + walkers)
 #   tests/fillet-via.test.js          — rect cornerRadius + via component (rings, schema, walkers)
+#   tests/bridge.test.js              — airbridge component (schema defaults, ring fallback, solver
+#                                       snap, transforms, HFSS spline-profile emission + sheet mode
+#                                       + PEC_sheets, GDS layer 150, pyAEDT AST, walkers, AI kind)
 #   tests/rotation_zoffset.test.js    — first-class rotation + per-component zOffset
 #   tests/sweep-ui.test.js            — analysis setup / frequency sweep / Optimetrics emission
 #   tests/solver_guards.test.js       — NaN guards, snap-graph validation

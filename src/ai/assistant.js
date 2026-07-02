@@ -34,7 +34,7 @@ import { normalizeScene } from '../scene/schema.js';
 import { ANCHORS } from '../scene/anchors.js';
 
 export const FRAGMENT_KINDS = [
-  'rect', 'circle', 'ellipse', 'polygon', 'racetrack', 'via', 'polyline', 'polyshape',
+  'rect', 'circle', 'ellipse', 'polygon', 'racetrack', 'via', 'bridge', 'polyline', 'polyshape',
 ];
 
 const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -108,6 +108,7 @@ Common fields: { id, kind, layer, cx (number), cy (number), w, h }.
   - "polygon":   r, n (exprs; regular n-gon, apex up). w = h = "2*(r)".
   - "racetrack": R, L_straight, p, wgWidth (exprs; hollow waveguide band racetrack resonator). Use on layer "waveguide".
   - "via":       r (expr), layerFrom, layerTo (stack-layer ids); layer MUST be "via". Vertical cylinder connecting two stack layers.
+  - "bridge":    length, width, height (exprs); layer MUST be "bridge". An RF AIRBRIDGE: a conductor strap that takes off at the conductor layer's TOP, arcs UP to an apex \`height\` above it, and lands back down \`length\` away; plan-view footprint = length x width (w = "(length)", h = "(width)"). Optional: thickness (expr; empty/omitted = the conductor layer's thickness), conductorLayerId (which conductor it takes off from), rotation (deg CCW — the strap spans the local X axis at rotation 0). Use it to jump one electrode OVER another (ground straps across a CPW, crossovers). Bridges canNOT be boolean operands and have no zOffset/cornerRadius.
   - "polyline":  width (expr), vertices (array, >= 2), closed (bool, usually false). A constant- or tapered-width trace. w = "0", h = "0".
   - "polyshape": vertices (array, >= 3), closed: true. A filled 2-D polygon path. w = "0", h = "0".
 - Optional on rect/circle/ellipse/polygon: "rotation" (degrees CCW, expr string), "zOffset" (um expr, Z shift vs layer).
@@ -182,11 +183,12 @@ export const GEOMETRY_TOOL = {
           properties: {
             id: { type: 'string' },
             kind: { type: 'string', enum: FRAGMENT_KINDS },
-            layer: { type: 'string', enum: ['electrode', 'waveguide', 'port', 'via'] },
+            layer: { type: 'string', enum: ['electrode', 'waveguide', 'port', 'via', 'bridge'] },
             cx: { type: 'number' },
             cy: { type: 'number' },
             w: EXPR, h: EXPR, r: EXPR, rx: EXPR, ry: EXPR, n: EXPR,
             R: EXPR, L_straight: EXPR, p: EXPR, wgWidth: EXPR,
+            length: EXPR, height: EXPR, thickness: EXPR,
             width: EXPR, closed: { type: 'boolean' },
             vertices: { type: 'array', items: { type: 'object' } },
             rotation: EXPR, zOffset: EXPR, cornerRadius: EXPR,
@@ -234,6 +236,7 @@ const KIND_REQUIRED = {
   polygon: ['r', 'n'],
   racetrack: ['R', 'L_straight', 'p', 'wgWidth'],
   via: ['r'],
+  bridge: ['length', 'width', 'height'],
   polyline: ['width', 'vertices'],
   polyshape: ['vertices'],
 };
@@ -255,7 +258,7 @@ export function normalizeFragment(fragment) {
   const components = (fragment.components || []).map(raw => {
     const c = { ...raw };
     for (const f of ['w', 'h', 'r', 'rx', 'ry', 'n', 'R', 'L_straight', 'p', 'wgWidth',
-      'width', 'rotation', 'zOffset', 'cornerRadius']) {
+      'width', 'length', 'height', 'thickness', 'rotation', 'zOffset', 'cornerRadius']) {
       if (c[f] != null) c[f] = asExpr(c[f]);
     }
     c.cx = Number(c.cx) || 0;
@@ -263,6 +266,11 @@ export function normalizeFragment(fragment) {
     // Derived AABBs per the app convention.
     if (c.kind === 'circle' && c.r != null) { c.w = `2*(${c.r})`; c.h = `2*(${c.r})`; }
     if (c.kind === 'via' && c.r != null) { c.layer = 'via'; c.w = `2*(${c.r})`; c.h = `2*(${c.r})`; }
+    if (c.kind === 'bridge') {
+      c.layer = 'bridge';
+      if (c.length != null) c.w = `(${c.length})`;
+      if (c.width != null) c.h = `(${c.width})`;
+    }
     if (c.kind === 'ellipse') { if (c.rx != null) c.w = `2*(${c.rx})`; if (c.ry != null) c.h = `2*(${c.ry})`; }
     if (c.kind === 'polygon' && c.r != null) { c.w = `2*(${c.r})`; c.h = `2*(${c.r})`; }
     if (c.kind === 'polyline' || c.kind === 'polyshape') {
@@ -353,14 +361,14 @@ export function validateFragment(fragment, scene) {
     fragIds.add(c.id);
     if (sceneIds.has(c.id)) warnings.push(`Component id "${c.id}" already exists — it will be renamed on insert.`);
     if (!FRAGMENT_KINDS.includes(c.kind)) { errors.push(`Component "${c.id}" has unknown kind "${c.kind}".`); continue; }
-    if (!['electrode', 'waveguide', 'port', 'via'].includes(c.layer)) {
+    if (!['electrode', 'waveguide', 'port', 'via', 'bridge'].includes(c.layer)) {
       errors.push(`Component "${c.id}" has invalid layer "${c.layer}".`);
     }
     for (const field of KIND_REQUIRED[c.kind] || []) {
       if (c[field] == null) errors.push(`Component "${c.id}" (${c.kind}) is missing required field "${field}".`);
     }
-    for (const field of ['w', 'h', 'r', 'rx', 'ry', 'n', 'R', 'L_straight', 'p', 'wgWidth', 'width', 'rotation', 'zOffset', 'cornerRadius']) {
-      if (typeof c[field] === 'string') checkExpr(c.id, field, c[field]);
+    for (const field of ['w', 'h', 'r', 'rx', 'ry', 'n', 'R', 'L_straight', 'p', 'wgWidth', 'width', 'length', 'height', 'thickness', 'rotation', 'zOffset', 'cornerRadius']) {
+      if (typeof c[field] === 'string' && !(c.kind === 'bridge' && field === 'thickness' && c[field].trim() === '')) checkExpr(c.id, field, c[field]);
     }
     if (c.kind === 'polyline' || c.kind === 'polyshape') {
       const minV = c.kind === 'polyshape' ? 3 : 2;

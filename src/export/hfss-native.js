@@ -97,10 +97,10 @@ export function hfssAngleDegExpr(expr) {
 }
 
 // The component's rotation expression, or null when absent / trivially
-// zero. Only rect / circle / ellipse / polygon support first-class
-// rotation (matching expandTransforms' seeding); booleans and path-like
-// kinds return null.
-const HFSS_ROTATABLE_KINDS = new Set(['rect', 'circle', 'ellipse', 'polygon']);
+// zero. Only rect / circle / ellipse / polygon / bridge support first-
+// class rotation (matching expandTransforms' seeding); booleans and
+// path-like kinds return null.
+const HFSS_ROTATABLE_KINDS = new Set(['rect', 'circle', 'ellipse', 'polygon', 'bridge']);
 export function componentRotationExpr(c) {
   if (!c || c.rotation == null) return null;
   if (!HFSS_ROTATABLE_KINDS.has(c.kind || 'rect')) return null;
@@ -1588,6 +1588,196 @@ except Exception as e:
 `;
       // Conductor bookkeeping: vias are metal plugs — the cladding
       // subtraction must carve them out like any electrode body.
+      emittedElecNames.push(id);
+      continue;
+    }
+
+    // ── AIRBRIDGE (D7): parametric vertical-profile polyline + sweep ──
+    // A conductor strap leaving the conductor plane: it takes off at the
+    // conductor TOP (z0), arcs UP to an apex `height` above it, and
+    // lands back down `length` away. Plan-view footprint = length ×
+    // width. Emission: ONE covered + closed CreatePolyline in the
+    // VERTICAL plane at Y = (cy) − (width)/2 — lower profile as a
+    // 3-point Spline (P0 → apex → P2), a Line up by the strap thickness,
+    // the upper profile Spline back, and an explicit closing Line — then
+    // SweepAlongVector along +Y by the parametric width. EVERY
+    // coordinate is a live HFSS expression (snap-chain center, length /
+    // width / height / thickness exprs, conductor-top Z from the layer
+    // stack), so HFSS-side sweeps re-evaluate the bridge end-to-end.
+    if (shapeKind === 'bridge') {
+      const { layer: brLayer, comment: brComment } = resolveCondForComp(c);
+      code += `${brComment}\n`;
+      // z0 = TOP of the bound conductor layer (the strap takes off from
+      // the metal surface). Parametric through the stack thickness vars.
+      const z0Expr = (brLayer && layerZ[brLayer.id]?.zTopExpr) || exprWithUm('h_wg');
+      const brLenExpr = exprWithUm(c.length ?? '30');
+      const brWidExpr = exprWithUm(c.width ?? '10');
+      const brHgtExpr = exprWithUm(c.height ?? '3');
+      // Strap thickness: blank = "use the conductor layer's thickness".
+      const tRawBr = (c.thickness != null && String(c.thickness).trim() !== '') ? String(c.thickness) : null;
+      const brThkExpr = tRawBr
+        ? exprWithUm(tRawBr)
+        : ((brLayer && layerZ[brLayer.id]?.thicknessExpr) || `${cond_z.toFixed(4)}um`);
+      const brThkNum = tRawBr
+        ? evalExpr(tRawBr, paramValues)
+        : ((brLayer && layerZ[brLayer.id]) ? layerZ[brLayer.id].thickness : cond_z);
+      const brHgtNum = evalExpr(c.height ?? '3', paramValues);
+      if (!Number.isFinite(brHgtNum) || brHgtNum <= 0) {
+        code += `# Skipped bridge ${c.id}: height "${ascii(String(c.height ?? ''))}" does not evaluate > 0.\n`;
+        noteFrozen(c.id, 'bridge skipped (height does not evaluate > 0)');
+        continue;
+      }
+      // Parametric center via per-shape HFSS variables (the native-
+      // primitive idiom). Scene-level mirror targets bake numerically
+      // (the arch profile is not chained through mirrorReflectedPos).
+      const isMirrorTgtBr = mirrorTargetIds.has(c.id);
+      const ppBr = parametricPos[c.id];
+      let cxValExprBr, cyValExprBr;
+      if (!isMirrorTgtBr && ppBr) {
+        cxValExprBr = spaceHyphens(exprWithUm(ppBr.cxExpr));
+        cyValExprBr = spaceHyphens(exprWithUm(ppBr.cyExpr));
+        notePara(c.id, 'pos, length/width/height/thickness, conductor-top Z (layer-stack exprs)');
+      } else {
+        cxValExprBr = `${cx.toFixed(4)}um`;
+        cyValExprBr = `${cy.toFixed(4)}um`;
+        noteFrozen(c.id, isMirrorTgtBr
+          ? 'mirror target - bridge position baked numerically'
+          : 'bridge position not derivable from snap chain - baked numerically');
+      }
+      const cxVarBr = `${id}_cx`;
+      const cyVarBr = `${id}_cy`;
+      const CXBr = `(${cxVarBr})`;
+      const CYBr = `(${cyVarBr})`;
+      // Profile coordinates (X carries the span, Z the arch; Y is the
+      // constant near-edge plane the sweep starts from).
+      const yPlaneBr = `(${CYBr}) - (${brWidExpr})/2`;
+      const xW = `(${CXBr}) - (${brLenExpr})/2`;   // west landing
+      const xE = `(${CXBr}) + (${brLenExpr})/2`;   // east landing
+      const zBaseBr = `(${z0Expr})`;                // conductor top
+      const zApexBr = `(${z0Expr}) + (${brHgtExpr})`;
+      const zBaseTBr = `(${z0Expr}) + (${brThkExpr})`;
+      const zApexTBr = `(${z0Expr}) + (${brHgtExpr}) + (${brThkExpr})`;
+      const brMat = brLayer ? brLayer.material : condMaterial;
+      const brPt = (x, z) => `["NAME:PLPoint", "X:=", "${x}", "Y:=", "${yPlaneBr}", "Z:=", "${z}"]`;
+      const isSheetBr = !(Number.isFinite(brThkNum)) || Math.abs(brThkNum) < 1e-9;
+      code += `# ${c.id}: AIRBRIDGE over "${brLayer ? brLayer.id : '(none)'}" (parametric vertical-profile polyline + sweep)\n`;
+      code += `# Take-off Z = the conductor layer's TOP; apex = +height above it. The strap\n`;
+      code += `# thickness is measured VERTICALLY - exact at the landings, ~cos(slope) thinner\n`;
+      code += `# normal to the flanks - representative of conformally deposited airbridge metal.\n`;
+      code += `set_var("${cxVarBr}", "${cxValExprBr}")\n`;
+      code += `set_var("${cyVarBr}", "${cyValExprBr}")\n`;
+      if (isSheetBr) {
+        // Zero-thickness conductor stack: emit only the OPEN 3-point
+        // spline centerline profile and sweep by width → a curved SHEET.
+        // The name joins zeroThicknessSheets so the PEC_sheets impedance
+        // boundary covers it like every other zero-thickness conductor.
+        const ptsBr = [
+          brPt(xW, zBaseBr),
+          brPt(CXBr, zApexBr),
+          brPt(xE, zBaseBr),
+        ].join(',\n          ');
+        code += `try:
+    _delete_geom_if_exists("${id}")
+    oEditor.CreatePolyline(
+        ["NAME:PolylineParameters",
+         "IsPolylineCovered:=", True,
+         "IsPolylineClosed:=", False,
+         ["NAME:PolylinePoints",
+          ${ptsBr}],
+         ["NAME:PolylineSegments",
+          ["NAME:PLSegment", "SegmentType:=", "Spline", "StartIndex:=", 0, "NoOfPoints:=", 3]],
+         ["NAME:PolylineXSection",
+          "XSectionType:=", "None",
+          "XSectionOrient:=", "Auto",
+          "XSectionWidth:=", "0um",
+          "XSectionTopWidth:=", "0um",
+          "XSectionHeight:=", "0um",
+          "XSectionNumSegments:=", "0",
+          "XSectionBendType:=", "Corner"]],
+        ["NAME:Attributes",
+         "Name:=", "${id}", "Flags:=", "",
+         "Color:=", "(245 158 11)", "Transparency:=", 0.0,
+         "PartCoordinateSystem:=", "Global",
+         "MaterialValue:=", "\\"${ascii(brMat)}\\"",
+         "SolveInside:=", False])
+    oEditor.SweepAlongVector(
+        ["NAME:Selections", "Selections:=", "${id}", "NewPartsModelFlag:=", "Model"],
+        ["NAME:VectorSweepParameters",
+         "DraftAngle:=", "0deg", "DraftType:=", "Round",
+         "CheckFaceFaceIntersection:=", False,
+         "SweepVectorX:=", "0um",
+         "SweepVectorY:=", "${brWidExpr}",
+         "SweepVectorZ:=", "0um"])
+except Exception as e:
+    try:
+        oDesktop.AddMessage("", "", 1, "Failed to build airbridge sheet ${id}: " + str(e))
+    except:
+        pass
+`;
+        zeroThicknessSheets.push(id);
+      } else {
+        // Solid strap: closed profile ring (7 points incl. the closing
+        // repeat) — lower Spline, up Line, upper Spline, closing Line.
+        // IsPolylineClosed=True is REQUIRED so IsPolylineCovered fills
+        // the face; the sweep then produces a solid (polyshape rules).
+        const ptsBr = [
+          brPt(xW, zBaseBr),     // 0  west landing (bottom)
+          brPt(CXBr, zApexBr),   // 1  apex (bottom)
+          brPt(xE, zBaseBr),     // 2  east landing (bottom)
+          brPt(xE, zBaseTBr),    // 3  east landing (top)
+          brPt(CXBr, zApexTBr),  // 4  apex (top)
+          brPt(xW, zBaseTBr),    // 5  west landing (top)
+          brPt(xW, zBaseBr),     // 6  closing repeat of point 0
+        ].join(',\n          ');
+        const segsBr = [
+          `["NAME:PLSegment", "SegmentType:=", "Spline", "StartIndex:=", 0, "NoOfPoints:=", 3]`,
+          `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", 2, "NoOfPoints:=", 2]`,
+          `["NAME:PLSegment", "SegmentType:=", "Spline", "StartIndex:=", 3, "NoOfPoints:=", 3]`,
+          `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", 5, "NoOfPoints:=", 2]`,
+        ].join(',\n          ');
+        code += `try:
+    _delete_geom_if_exists("${id}")
+    oEditor.CreatePolyline(
+        ["NAME:PolylineParameters",
+         "IsPolylineCovered:=", True,
+         "IsPolylineClosed:=", True,
+         ["NAME:PolylinePoints",
+          ${ptsBr}],
+         ["NAME:PolylineSegments",
+          ${segsBr}],
+         ["NAME:PolylineXSection",
+          "XSectionType:=", "None",
+          "XSectionOrient:=", "Auto",
+          "XSectionWidth:=", "0um",
+          "XSectionTopWidth:=", "0um",
+          "XSectionHeight:=", "0um",
+          "XSectionNumSegments:=", "0",
+          "XSectionBendType:=", "Corner"]],
+        ["NAME:Attributes",
+         "Name:=", "${id}", "Flags:=", "",
+         "Color:=", "(245 158 11)", "Transparency:=", 0.0,
+         "PartCoordinateSystem:=", "Global",
+         "MaterialValue:=", "\\"${ascii(brMat)}\\"",
+         "SolveInside:=", False])
+    oEditor.SweepAlongVector(
+        ["NAME:Selections", "Selections:=", "${id}", "NewPartsModelFlag:=", "Model"],
+        ["NAME:VectorSweepParameters",
+         "DraftAngle:=", "0deg", "DraftType:=", "Round",
+         "CheckFaceFaceIntersection:=", False,
+         "SweepVectorX:=", "0um",
+         "SweepVectorY:=", "${brWidExpr}",
+         "SweepVectorZ:=", "0um"])
+except Exception as e:
+    try:
+        oDesktop.AddMessage("", "", 1, "Failed to build airbridge ${id}: " + str(e))
+    except:
+        pass
+`;
+      }
+      // Conductor bookkeeping: the strap is metal — cladding subtraction
+      // carves it like any electrode body (sheets are skipped there by
+      // the zeroThicknessSheets guard). First-class rotation (D6) and
+      // transform chains act on the named part downstream.
       emittedElecNames.push(id);
       continue;
     }

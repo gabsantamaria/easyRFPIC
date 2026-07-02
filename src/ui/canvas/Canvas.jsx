@@ -3309,6 +3309,10 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     // body with an amber center dot (drawn in the via render branch) so
     // it reads as "plug through the stack" rather than a plain circle.
     via:       { fill: '#94a3b8', stroke: '#334155', opacity: 0.9 },
+    // Airbridge (D7): conductor strap arcing OVER the conductor plane.
+    // Low-alpha amber fill + amber outline; the render branch adds an
+    // arch glyph (arc + landing bars) so it reads as "flying metal".
+    bridge:    { fill: '#f59e0b', stroke: '#b45309', opacity: 0.45 },
   };
 
   // Stack-layer lookup so per-component fills can read the BOUND layer's
@@ -4176,9 +4180,10 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         const isBoolOperand = (c) => booleanClusters.operandIds.has(c.id) && !selectedIds.has(c.id);
         const isBoolComp = (c) => c.kind === 'boolean';
         const pass1 = [];
-        // 'via' renders above electrodes (it's a plug THROUGH the metal)
-        // but below ports (translucent overlays stay on top).
-        for (const layer of ['waveguide', 'electrode', 'via', 'port']) {
+        // 'via' renders above electrodes (it's a plug THROUGH the metal),
+        // 'bridge' above vias (it flies OVER the metal plane), both below
+        // ports (translucent overlays stay on top).
+        for (const layer of ['waveguide', 'electrode', 'via', 'bridge', 'port']) {
           for (const c of solved) {
             if (c.layer === layer && isInPass1(c) && !isBoolOperand(c) && !isBoolComp(c)) pass1.push(c);
           }
@@ -4476,6 +4481,45 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                         opacity={instOpacity}
                         pointerEvents="none"
                       />
+                    </g>
+                  );
+                } else if (shapeKind === 'bridge') {
+                  // Airbridge (D7): footprint rect (length × width, the
+                  // AABB) + a distinctive arch glyph — an arc spanning
+                  // the long axis plus two short end-bars marking the
+                  // landings. Rotation rides the wrapping <g> like plain
+                  // rects. Tooltip names the conductor it flies over.
+                  const bxBr = inst.cx - inst.w / 2;
+                  const byBr = -(inst.cy + inst.h / 2);
+                  const brCondL = (scene.stack || []).find(l => l.role === 'conductor' && l.id === c.conductorLayerId)
+                    || (scene.stack || []).find(l => l.role === 'conductor');
+                  const fmtBr = (v) => (Number.isFinite(v) ? +v.toFixed(2) : '?');
+                  const brTip = `airbridge: L=${fmtBr(inst.length)} W=${fmtBr(inst.width)} H=${fmtBr(inst.height)} above ${brCondL?.name || brCondL?.id || '(no conductor)'}`;
+                  // Glyph geometry (world units, pre-rotation): arc from
+                  // landing to landing bulging north + a bar at each end.
+                  const arcX0 = inst.cx - inst.w * 0.36;
+                  const arcX1 = inst.cx + inst.w * 0.36;
+                  const bulge = Math.min(inst.h * 0.6, inst.w * 0.3);
+                  const barX = inst.w * 0.42;
+                  const barY = inst.h * 0.38;
+                  const glyphStroke = {
+                    stroke: style.stroke,
+                    strokeWidth: sw * 1.1,
+                    fill: 'none',
+                    opacity: Math.min(1, instOpacity * 1.6),
+                    pointerEvents: 'none',
+                  };
+                  shapeElement = (
+                    <g>
+                      <rect x={bxBr} y={byBr} width={inst.w} height={inst.h} {...dataCompProps}>
+                        <title>{brTip}</title>
+                      </rect>
+                      <path
+                        d={`M ${arcX0} ${-inst.cy} Q ${inst.cx} ${-(inst.cy + bulge)} ${arcX1} ${-inst.cy}`}
+                        {...glyphStroke}
+                      />
+                      <line x1={inst.cx - barX} y1={-(inst.cy - barY)} x2={inst.cx - barX} y2={-(inst.cy + barY)} {...glyphStroke} />
+                      <line x1={inst.cx + barX} y1={-(inst.cy - barY)} x2={inst.cx + barX} y2={-(inst.cy + barY)} {...glyphStroke} />
                     </g>
                   );
                 } else {
@@ -5708,9 +5752,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
               : null);
         const defaultFill = layer === 'waveguide' ? '#3ec27a'
           : layer === 'port' ? '#b91c1c'
+          : layer === 'bridge' ? '#f59e0b'
           : '#f4a72e';
         const defaultStroke = layer === 'waveguide' ? '#1a5e36'
           : layer === 'port' ? '#7f1d1d'
+          : layer === 'bridge' ? '#b45309'
           : '#7a4d00';
         const previewFill = (previewBound?.color) || defaultFill;
         const previewStroke = (previewBound?.color && darkenHex(previewBound.color)) || defaultStroke;
@@ -5786,6 +5832,22 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   <g>
                     <circle cx={cxP} cy={-cyP} r={rp} {...previewProps} />
                     <circle cx={cxP} cy={-cyP} r={rp * 0.35} fill={previewStroke} fillOpacity={0.6} />
+                  </g>
+                );
+              }
+              if (shape === 'bridge') {
+                // Airbridge (D7): drag-to-size — drag width → strap LENGTH,
+                // drag height → strap WIDTH. Preview = footprint + arch glyph.
+                const bulgeP = Math.min(h * 0.6, w * 0.3);
+                return (
+                  <g>
+                    <rect x={minX} y={-maxY} width={w} height={h} {...previewProps} />
+                    <path
+                      d={`M ${cxP - w * 0.36} ${-cyP} Q ${cxP} ${-(cyP + bulgeP)} ${cxP + w * 0.36} ${-cyP}`}
+                      fill="none" stroke={previewStroke} strokeWidth={sw}
+                    />
+                    <line x1={cxP - w * 0.42} y1={-(cyP - h * 0.38)} x2={cxP - w * 0.42} y2={-(cyP + h * 0.38)} stroke={previewStroke} strokeWidth={sw} />
+                    <line x1={cxP + w * 0.42} y1={-(cyP - h * 0.38)} x2={cxP + w * 0.42} y2={-(cyP + h * 0.38)} stroke={previewStroke} strokeWidth={sw} />
                   </g>
                 );
               }

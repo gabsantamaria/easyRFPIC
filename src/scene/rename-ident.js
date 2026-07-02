@@ -19,7 +19,8 @@ const COMPONENT_EXPR_FIELDS = [
   'r', 'rx', 'ry',                           // circle / ellipse / polygon / via
   'R', 'L_straight', 'p', 'wgWidth',         // racetrack
   'n',                                       // polygon side count
-  'width',                                   // polyline trace width
+  'width',                                   // polyline trace width / bridge width
+  'length', 'height', 'thickness',           // airbridge (D7) strap dimensions
   'rotation',                                // first-class rotation (deg, CCW)
   'zOffset',                                 // Z shift relative to the layer (µm)
   'cornerRadius',                            // rect corner fillet radius (µm, D3)

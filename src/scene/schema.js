@@ -234,6 +234,56 @@ export function normalizeScene(s) {
       return changed ? next : c;
     });
   }
+  // Bridge components (D7 — RF airbridge): a conductor strap that leaves
+  // the conductor plane, arcs UP by `height` above the conductor top and
+  // lands back down. Plan-view footprint = length × width rect. Normalize
+  // defaults so downstream consumers can assume:
+  //   length / width / height — expression strings ('30' / '10' / '3')
+  //   thickness  — expression string; '' means "use the conductor layer's
+  //                thickness" (resolved at export time)
+  //   layer      — 'bridge' (drives canvas styling + exporter dispatch)
+  //   conductorLayerId — OPTIONAL binding to a stack conductor id; a
+  //                stale binding falls back to the first conductor.
+  //   w / h      — derived AABB '(length)' × '(width)' so snaps / anchors
+  //                / solver see a consistent bbox (the via convention).
+  //   rotation   — KEPT (orientation matters, unlike vias); zOffset /
+  //                cornerRadius are stripped (the Z placement is bound to
+  //                the conductor top, and fillets are rect-only).
+  {
+    const condsInStack = stack.filter(l => l.role === 'conductor');
+    migratedComponents = migratedComponents.map(c => {
+      if (c.kind !== 'bridge') return c;
+      const next = { ...c };
+      let changed = false;
+      const coerce = (f, dflt) => {
+        if (next[f] == null) { next[f] = dflt; changed = true; }
+        else if (typeof next[f] !== 'string') { next[f] = String(next[f]); changed = true; }
+      };
+      coerce('length', '30');
+      coerce('width', '10');
+      coerce('height', '3');
+      coerce('thickness', ''); // '' = use the conductor layer's thickness
+      if (next.layer !== 'bridge') { next.layer = 'bridge'; changed = true; }
+      if (next.conductorLayerId && !condsInStack.some(l => l.id === next.conductorLayerId)) {
+        // Stale binding — fall back to the first conductor (or drop it).
+        if (condsInStack[0]) next.conductorLayerId = condsInStack[0].id;
+        else delete next.conductorLayerId;
+        changed = true;
+      }
+      const derivedW = `(${next.length})`;
+      const derivedH = `(${next.width})`;
+      if (typeof next.w !== 'string' || next.w.trim() === '' || next.w.trim() === '0') { next.w = derivedW; changed = true; }
+      if (typeof next.h !== 'string' || next.h.trim() === '' || next.h.trim() === '0') { next.h = derivedH; changed = true; }
+      if (!Array.isArray(next.cutouts)) { next.cutouts = []; changed = true; }
+      // KEEP rotation (a bridge's orientation matters — it's coerced to a
+      // string by the general migration above). Strip zOffset (the strap's
+      // Z is bound to the conductor top) and cornerRadius (rect-only).
+      for (const f of ['zOffset', 'cornerRadius']) {
+        if (next[f] != null) { delete next[f]; changed = true; }
+      }
+      return changed ? next : c;
+    });
+  }
   // Polyline / polyshape vertex expression fields: coerce stray numerics
   // (hand-edited JSON, older saves) to strings so every downstream
   // consumer — solver, exporters, rename walker — can assume expression
