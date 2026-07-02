@@ -78,7 +78,8 @@ import { HelpTutorial } from './ui/HelpTutorial.jsx';
 import { AiAssistantDialog } from './ui/AiAssistantDialog.jsx';
 import { TwoLineWizard } from './ui/TwoLineWizard.jsx';
 import { SettingsPanel } from './ui/SettingsPanel.jsx';
-import { DEFAULT_SETTINGS, loadSettings, saveSettings, buildSettingsExport, parseSettingsImport } from './ui/settings.js';
+import { DEFAULT_SETTINGS, loadSettings, saveSettings, hydrateSettings, buildSettingsExport, parseSettingsImport } from './ui/settings.js';
+import { getUiPref, setUiPrefs, hydrateUiPrefs } from './ui/ui-prefs.js';
 import { resolveCanvasTheme, applyThemeAttr } from './ui/theme.js';
 import { applyFragment as applyAiGeometryFragment } from './ai/assistant.js';
 import { WorkspaceCreateRow, LibraryItemRow } from './ui/panels/LibraryPanelRows.jsx';
@@ -250,20 +251,42 @@ export default function App() {
   const [activePanel, setActivePanel] = useState('params');
   // C7: PARAMS panel search + collapsible prefix groups (UI-only state).
   const [paramSearch, setParamSearch] = useState('');
-  // Resizable PARAMS name column. Shared by every ParamRow and persisted
-  // in localStorage (a tiny UI pref — kept out of design/workspace data).
-  // Clamped to [48, 400] px; defaults to the old fixed width (80px).
-  const PARAM_NAME_WIDTH_KEY = 'photonic_layout_param_name_width';
+  // Resizable PARAMS name column. Shared by every ParamRow and persisted in
+  // the LAYERED ui-prefs store (session cache → IndexedDB → localStorage —
+  // bare localStorage silently drops writes in this user's browser). Kept out
+  // of design/workspace data. Clamped to [48, 400] px; default 80px.
+  const clampParamW = (v) => (Number.isFinite(v) ? Math.min(400, Math.max(48, v)) : 80);
   const [paramNameWidth, setParamNameWidth] = useState(() => {
+    const v = Number(getUiPref('paramNameWidth', NaN));
+    if (Number.isFinite(v)) return clampParamW(v);
+    // Legacy standalone localStorage key (pre-ui-prefs) — one-shot migration.
     try {
-      const v = Number(window.localStorage?.getItem(PARAM_NAME_WIDTH_KEY));
-      if (Number.isFinite(v) && v >= 48 && v <= 400) return v;
+      const legacy = Number(window.localStorage?.getItem('photonic_layout_param_name_width'));
+      if (Number.isFinite(legacy) && legacy >= 48 && legacy <= 400) return legacy;
     } catch { /* ignore */ }
     return 80;
   });
+  // Persist on REAL change only — a prev-value ref, NOT a mount-count flag
+  // (StrictMode double-invokes the mount effect, which would flip a mount flag
+  // and then write the default over the durable store before hydration — the
+  // exact clobber the 2-line wizard hit; see CLAUDE.md). The hydrated durable
+  // value merges once below, unless the user already dragged this session.
+  const prevParamWRef = useRef(paramNameWidth);
   useEffect(() => {
-    try { window.localStorage?.setItem(PARAM_NAME_WIDTH_KEY, String(paramNameWidth)); } catch { /* ignore */ }
+    if (prevParamWRef.current === paramNameWidth) return;
+    prevParamWRef.current = paramNameWidth;
+    setUiPrefs({ paramNameWidth });
   }, [paramNameWidth]);
+  useEffect(() => {
+    let cancelled = false;
+    hydrateUiPrefs().then((p) => {
+      if (cancelled || !p) return;
+      const v = Number(p.paramNameWidth);
+      if (Number.isFinite(v)) setParamNameWidth(clampParamW(v));
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // Pointer-drag the name-column splitter. Any row's handle drives the
   // shared width, so the whole column resizes together.
   const startParamNameResize = useCallback((e) => {
@@ -314,9 +337,28 @@ export default function App() {
   // Settings panel. Derived consts + thin proxy setters below keep every
   // existing call site (setShowGrid, toggleEditDims, etc.) working unchanged.
   const [settings, setSettings] = useState(() => loadSettings());
-  // Persist on every change. Runs on mount too, which establishes the storage
-  // key and makes the legacy edit-dims migration (in loadSettings) stick.
-  useEffect(() => { saveSettings(settings); }, [settings]);
+  // Merge the DURABLE (IndexedDB) settings once at boot — the synchronous
+  // loadSettings initializer only covers the localStorage fast path, which is
+  // silently non-functional in this user's browser. Persisting is GATED on
+  // hydration completing: saving the (possibly-default) initial state on
+  // mount would overwrite the durable store before we've read it.
+  const [settingsHydrated, setSettingsHydrated] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    hydrateSettings().then((durable) => {
+      if (cancelled) return;
+      if (durable) setSettings(prev => ({ ...prev, ...durable }));
+      setSettingsHydrated(true);
+    });
+    return () => { cancelled = true; };
+  }, []);
+  // Persist on change (post-hydration). The first post-hydration run also
+  // establishes the storage key and makes the legacy edit-dims migration
+  // (in loadSettings) stick.
+  useEffect(() => {
+    if (!settingsHydrated) return;
+    saveSettings(settings);
+  }, [settings, settingsHydrated]);
   const updateSetting = useCallback((key, value) => {
     setSettings(prev => ({ ...prev, [key]: typeof value === 'function' ? value(prev[key]) : value }));
   }, []);

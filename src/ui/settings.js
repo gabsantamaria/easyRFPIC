@@ -1,13 +1,22 @@
 // User settings model: a small, fully-serializable preference object persisted
-// to localStorage and exportable/importable as JSON.
+// with LAYERED durability and exportable/importable as JSON.
 //
-// Lives under its OWN localStorage key (`photonic_layout_settings`), outside
-// any workspace prefix, so settings never ride along in design/workspace
-// exports. The AI API key is deliberately NOT here — it stays in
-// src/ai/settings.js and must never be exported with settings.
+// Lives under its OWN key (`photonic_layout_settings`), outside any workspace
+// prefix, so settings never ride along in design/workspace exports. The AI API
+// key is deliberately NOT here — it stays in src/ai/settings.js and must never
+// be exported with settings.
 //
-// Pure except for the localStorage I/O in loadSettings/saveSettings, so the
-// load/merge/validate/export/import logic unit-tests directly.
+// PERSISTENCE is layered exactly like src/ui/twoLineSettings.js (see the
+// rationale there — this user's browser silently drops localStorage writes):
+//   1. in-memory module cache — authoritative for the session, cannot fail;
+//   2. window.storage (IndexedDB) — durable, written fire-and-forget on every
+//      save and hydrated once at boot via hydrateSettings();
+//   3. localStorage — best-effort synchronous fast path for a fresh reload.
+// Do NOT revert to bare localStorage — that reintroduces the silent-reset bug.
+//
+// The pure load/merge/validate/export/import logic still unit-tests directly:
+// loadSettings/saveSettings keep an explicit `storage` parameter that, when
+// provided (tests), bypasses the layering entirely.
 
 import { isThemeId, DEFAULT_THEME_ID } from './theme.js';
 
@@ -63,10 +72,24 @@ export function coerceSettings(obj) {
   return { values, applied, skipped };
 }
 
+// In-memory session cache (layer 1) + one-shot hydrate promise. `cache`
+// non-null means a saveSettings ran this session (or hydrate landed) — the
+// session value always wins over a late IDB read.
+let cache = null;
+let hydratePromise = null;
+
+// TEST HOOK: reset the module-level layers between unit tests.
+export function _resetSettingsLayersForTests() {
+  cache = null;
+  hydratePromise = null;
+}
+
 // Read persisted settings, merged over defaults. On the first run of the new
 // model (no SETTINGS_KEY yet) migrate the legacy edit-dims toggle. Read-only —
-// the caller persists once on mount so the migration sticks.
+// the caller persists once (after hydration) so the migration sticks.
+// With an explicit `storage` (tests) the layered cache is bypassed.
 export function loadSettings(storage) {
+  if (!storage && cache) return { ...cache };
   const ls = storage || safeLocalStorage();
   let parsed = null;
   if (ls) {
@@ -90,16 +113,53 @@ export function loadSettings(storage) {
   return out;
 }
 
-// Persist settings (whitelisted keys only). Returns true on success.
-export function saveSettings(settings, storage) {
-  const ls = storage || safeLocalStorage();
-  if (!ls) return false;
-  try {
-    ls.setItem(SETTINGS_KEY, JSON.stringify(whitelist(settings)));
-    return true;
-  } catch {
-    return false;
+// ASYNC hydrate from the durable IndexedDB store (window.storage). Memoized:
+// main.jsx warms it pre-mount and PhotonicLayout awaits the SAME promise to
+// merge the durable values into React state — both get one consistent result.
+// A saveSettings that lands first wins (cache is authoritative for the session).
+export function hydrateSettings() {
+  if (!hydratePromise) {
+    hydratePromise = (async () => {
+      try {
+        if (typeof window !== 'undefined' && window.storage && typeof window.storage.get === 'function') {
+          const r = await window.storage.get(SETTINGS_KEY);
+          const raw = r == null ? null : (typeof r === 'string' ? r : r.value);
+          if (raw && cache == null) {
+            const { values } = coerceSettings(JSON.parse(raw));
+            cache = { ...DEFAULT_SETTINGS, ...values };
+          }
+        }
+      } catch { /* durable store unavailable — localStorage/defaults stand */ }
+      return cache ? { ...cache } : null;
+    })();
   }
+  return hydratePromise;
+}
+
+// Persist settings (whitelisted keys only). Returns true on success.
+// Layered: session cache (cannot fail) → IndexedDB write-through
+// (fire-and-forget) → localStorage best-effort. An explicit `storage`
+// (tests) bypasses the layering and writes only there.
+export function saveSettings(settings, storage) {
+  if (storage) {
+    try {
+      storage.setItem(SETTINGS_KEY, JSON.stringify(whitelist(settings)));
+      return true;
+    } catch { return false; }
+  }
+  const clean = whitelist(settings);
+  cache = clean;
+  const json = JSON.stringify(clean);
+  try {
+    if (typeof window !== 'undefined' && window.storage && typeof window.storage.set === 'function') {
+      Promise.resolve(window.storage.set(SETTINGS_KEY, json)).catch(() => {});
+    }
+  } catch { /* ignore */ }
+  const ls = safeLocalStorage();
+  if (ls) {
+    try { ls.setItem(SETTINGS_KEY, json); } catch { /* blocked — cache+IDB hold it */ }
+  }
+  return true;
 }
 
 // JSON payload for "Export settings".

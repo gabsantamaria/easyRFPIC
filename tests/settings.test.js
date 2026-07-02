@@ -161,3 +161,61 @@ describe('buildSettingsExport', () => {
     expect(settings).toEqual(original);
   });
 });
+
+describe('layered persistence (session cache → window.storage → localStorage)', () => {
+  // The no-arg load/save path must survive a browser that silently drops
+  // localStorage writes (this user's environment) by writing through to
+  // window.storage and holding a session cache. See twoLineSettings.js for
+  // the pattern's origin. Explicit-storage calls (all tests above) bypass it.
+  const withDeadLocalStorage = (idb) => {
+    globalThis.window = {
+      storage: {
+        get: async (k) => (idb.has(k) ? { value: idb.get(k) } : null),
+        set: async (k, v) => { idb.set(k, v); },
+      },
+      // localStorage that SILENTLY DROPS writes (the user's browser).
+      localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+    };
+  };
+  const setup = async (idb) => {
+    withDeadLocalStorage(idb);
+    const mod = await import('../src/ui/settings.js');
+    mod._resetSettingsLayersForTests();
+    return mod;
+  };
+
+  it('saveSettings writes through to window.storage and the session cache serves loads', async () => {
+    const idb = new Map();
+    const mod = await setup(idb);
+    try {
+      mod.saveSettings({ ...DEFAULT_SETTINGS, theme: 'midnight', gridSize: 7 });
+      // Session cache: load restores despite the dead localStorage.
+      expect(mod.loadSettings().theme).toBe('midnight');
+      expect(mod.loadSettings().gridSize).toBe(7);
+      // Durable layer got the write.
+      await new Promise((r) => setTimeout(r, 0));
+      expect(idb.has(SETTINGS_KEY)).toBe(true);
+      expect(JSON.parse(idb.get(SETTINGS_KEY)).theme).toBe('midnight');
+    } finally { mod._resetSettingsLayersForTests(); delete globalThis.window; }
+  });
+
+  it('hydrateSettings restores durable values on a fresh boot', async () => {
+    const idb = new Map([[SETTINGS_KEY, JSON.stringify({ ...DEFAULT_SETTINGS, theme: 'paper' })]]);
+    const mod = await setup(idb);
+    try {
+      const durable = await mod.hydrateSettings();
+      expect(durable.theme).toBe('paper');
+      expect(mod.loadSettings().theme).toBe('paper'); // cache populated by hydrate
+    } finally { mod._resetSettingsLayersForTests(); delete globalThis.window; }
+  });
+
+  it('a session save made before hydrate resolves wins over the durable value', async () => {
+    const idb = new Map([[SETTINGS_KEY, JSON.stringify({ ...DEFAULT_SETTINGS, theme: 'paper' })]]);
+    const mod = await setup(idb);
+    try {
+      mod.saveSettings({ ...DEFAULT_SETTINGS, theme: 'blueprint' });
+      const durable = await mod.hydrateSettings();
+      expect(durable.theme).toBe('blueprint'); // session cache authoritative
+    } finally { mod._resetSettingsLayersForTests(); delete globalThis.window; }
+  });
+});
