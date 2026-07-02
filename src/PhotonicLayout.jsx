@@ -110,6 +110,19 @@ const saveBroadcastChannel = (typeof BroadcastChannel !== 'undefined')
   ? new BroadcastChannel('photonic_layout')
   : null;
 
+// Canonical group membership: the union of the group's memberIds and every
+// component whose `group` field names it. The two sources drifted (duplicated
+// members carried c.group but were never appended to memberIds), so every
+// consumer — the SHAPES tree, select-group, delete-group, the Canvas
+// outline — must use THIS union or they disagree about who's in the group.
+export function groupMembersOf(group, components) {
+  const members = new Set(group?.memberIds || []);
+  if (group?.name) {
+    for (const c of components || []) if (c.group === group.name) members.add(c.id);
+  }
+  return members;
+}
+
 // Delete a set of component ids from a scene, keeping every derived
 // structure consistent. Deleting a BOOLEAN releases its consumed operands
 // (clears their consumedBy — same contract as the SHAPES-tree deleteBoolean):
@@ -1623,6 +1636,12 @@ export default function App() {
       id: idMap[c.id],
       cx: (Number.isFinite(c.cx) ? c.cx : 0) + dx,
       cy: (Number.isFinite(c.cy) ? c.cy : 0) + dy,
+      // Strip the group tag: fragments don't carry scene.groups, so a pasted
+      // copy naming a group in the DESTINATION scene would half-join it
+      // (visible in the tree via the c.group union, invisible to
+      // memberIds-based ops) — the membership-desync class. A paste is a new,
+      // ungrouped set; the user can ⌘G it.
+      group: undefined,
     }));
     // Keep ONLY snaps whose BOTH endpoints are inside the inserted set — links
     // to shapes outside the fragment are dropped (and a stray external endpoint
@@ -2724,6 +2743,14 @@ export default function App() {
       ...prev,
       components: [...prev.components, ...newComps],
       snaps: [...prev.snaps, ...newSnaps],
+      // Copies keep their `group` tag ({...c}), so ALSO append them to the
+      // group's memberIds — the SHAPES tree and transform propagation
+      // already treated the copy as a member (they union on c.group), but
+      // select-group / delete-group read memberIds and silently skipped it.
+      groups: (prev.groups || []).map(g => {
+        const added = comps.filter(c => c.group === g.name).map(c => idMap[c.id]);
+        return added.length ? { ...g, memberIds: [...g.memberIds, ...added] } : g;
+      }),
     }));
     const newSel = new Set(newComps.map(c => c.id));
     setSelection({ ids: newSel, primary: newComps[newComps.length - 1].id });
@@ -2818,6 +2845,10 @@ export default function App() {
       { divider: true },
       // Grouping: the ref pattern lets us call createGroup/dissolveGroup
       // even though they're declared later in App's body.
+      { label: 'Select group', icon: FolderTree, hint: '⇧click',
+        onClick: () => ungroupId && selectGroup(ungroupId),
+        disabled: !ungroupId,
+      },
       { label: 'Group', icon: FolderTree, hint: '⌘G',
         onClick: () => createGroupRef.current && createGroupRef.current(),
         disabled: selectedIds.size < 2,
@@ -3081,26 +3112,39 @@ export default function App() {
         aliases: aliasMap, // record so we can ungroup later
       };
 
+      // Re-grouping: pull the new members OUT of every other group's
+      // memberIds (and drop groups that become empty). Without this a
+      // component grouped into A then into B stayed in A.memberIds — and
+      // deleteGroup(A) would DELETE a component the user considers part
+      // of B (silent data loss).
+      const prunedGroups = prev.groups
+        .map(g => ({ ...g, memberIds: g.memberIds.filter(id => !memberIds.has(id)) }))
+        .filter(g => groupMembersOf(g, newComponents).size > 0);
+
       return {
         ...prev,
         params: newParams,
         components: newComponents,
         snaps: newSnaps,
-        groups: [...prev.groups, newGroup],
+        groups: [...prunedGroups, newGroup],
       };
     });
   };
 
-  // Delete the entire group, including all its member components
+  // Delete the entire group, including all its member components. Members
+  // come from the groupMembersOf UNION (memberIds + c.group tags) — the same
+  // set the SHAPES tree displays — so duplicated members that only carry the
+  // c.group tag die with the group instead of being orphaned with a stale tag.
   const deleteGroup = async (groupId) => {
     const g = scene.groups.find(x => x.id === groupId);
     if (!g) return;
+    const members = groupMembersOf(g, scene.components);
     const ok = await confirmDialog(
-      `Delete group "${g.name}" and all ${g.memberIds.length} of its component${g.memberIds.length === 1 ? '' : 's'}?\n\nGroup-scoped parameters (${Object.keys(g.aliases || {}).length}) will become unused — you can clean them up later in PARAMS.`,
-      'Delete group'
+      `Delete group "${g.name}" and all ${members.size} of its component${members.size === 1 ? '' : 's'}?\n\nGroup-scoped parameters (${Object.keys(g.aliases || {}).length}) will become unused — you can clean them up later in PARAMS.`,
+      'Delete group', { confirmLabel: 'Delete group', confirmTone: 'danger' }
     );
     if (!ok) return;
-    deleteComp(new Set(g.memberIds));
+    deleteComp(members);
   };
 
   // Remove the group metadata but keep the components and their group-scoped params (= "ungroup")
@@ -3112,11 +3156,17 @@ export default function App() {
       'Ungroup'
     );
     if (!ok) return;
-    updateScene(prev => ({
-      ...prev,
-      components: prev.components.map(c => g.memberIds.includes(c.id) ? { ...c, group: undefined } : c),
-      groups: prev.groups.filter(x => x.id !== groupId),
-    }));
+    updateScene(prev => {
+      // Clear the tag from the UNION (memberIds + c.group), not just
+      // memberIds — a duplicated member carrying only the tag would
+      // otherwise keep pointing at a group that no longer exists.
+      const members = groupMembersOf(g, prev.components);
+      return {
+        ...prev,
+        components: prev.components.map(c => members.has(c.id) ? { ...c, group: undefined } : c),
+        groups: prev.groups.filter(x => x.id !== groupId),
+      };
+    });
   };
 
   // Resolve "the current group context" for the ungroup shortcut: walk
@@ -3161,7 +3211,11 @@ export default function App() {
   const selectGroup = (groupId) => {
     const g = scene.groups.find(x => x.id === groupId);
     if (!g) return;
-    const ids = new Set(g.memberIds.filter(id => scene.components.some(c => c.id === id)));
+    // Union of memberIds and c.group tags (groupMembersOf) — the same set
+    // the SHAPES tree displays, so "click the group name" selects exactly
+    // what the tree shows (duplicated members used to be skipped).
+    const existing = new Set(scene.components.map(c => c.id));
+    const ids = new Set([...groupMembersOf(g, scene.components)].filter(id => existing.has(id)));
     setSelection({ ids, primary: ids.size > 0 ? Array.from(ids)[0] : null });
   };
 
@@ -6674,13 +6728,9 @@ export default function App() {
               for (const c of scene.components) {
                 if (c.group && groupNames.has(c.group)) groupedIds.add(c.id);
               }
-              const groupMembers = (g) => {
-                const ids = new Set(g.memberIds);
-                for (const c of scene.components) {
-                  if (c.group === g.name) ids.add(c.id);
-                }
-                return Array.from(ids);
-              };
+              // Same union groupMembersOf provides — the ONE membership rule
+              // shared with selectGroup / deleteGroup / the Canvas outline.
+              const groupMembers = (g) => Array.from(groupMembersOf(g, scene.components));
               const consumedIds = new Set();
               for (const c of scene.components) if (c.consumedBy) consumedIds.add(c.id);
 

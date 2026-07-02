@@ -8,7 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   collectNudgeCluster, cloneSnapsForDuplicate, groupParamPrefixes,
-  deleteComponentsFromScene,
+  deleteComponentsFromScene, groupMembersOf,
 } from '../src/PhotonicLayout.jsx';
 
 // ── C4: collectNudgeCluster ──────────────────────────────────────────────
@@ -224,5 +224,27 @@ describe('deleteComponentsFromScene', () => {
     expect(next.snaps).toHaveLength(0);        // both snaps hung off 'free'
     expect(next.mirrors).toHaveLength(0);      // mirror member referenced 'free'
     expect(next.groups[0].memberIds).toEqual(['u']);
+  });
+});
+
+// ── groupMembersOf (canonical membership union) ──────────────────────────
+
+describe('groupMembersOf', () => {
+  it('unions memberIds with c.group tags (the membership-desync fix)', () => {
+    const g = { id: 'g1', name: 'grp', memberIds: ['a', 'b'] };
+    const components = [
+      rect('a', { group: 'grp' }),
+      rect('b'),                        // in memberIds only
+      rect('b_copy', { group: 'grp' }), // duplicated member: tag only — used to be
+                                        // INVISIBLE to select-group / delete-group
+      rect('other', { group: 'different' }),
+    ];
+    expect([...groupMembersOf(g, components)].sort()).toEqual(['a', 'b', 'b_copy']);
+  });
+
+  it('tolerates missing fields', () => {
+    expect(groupMembersOf(null, []).size).toBe(0);
+    expect(groupMembersOf({ id: 'g', name: 'x' }, null).size).toBe(0);
+    expect([...groupMembersOf({ memberIds: ['q'] }, [])]).toEqual(['q']);
   });
 });

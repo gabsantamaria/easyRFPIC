@@ -1230,6 +1230,40 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     [solved, paramValues, dimsByCompId, transformInstances]
   );
 
+  // Group awareness. Members of a group = union of g.memberIds and every
+  // component whose `group` field names it (the same union the SHAPES tree
+  // uses). `groupOfComp` powers Shift-click whole-group selection and group
+  // co-drag; `activeGroups` (every member currently selected) drives the
+  // encompassing dashed outline. All render/selection-side — the scene and
+  // exports are untouched.
+  const groupsInfo = useMemo(() => {
+    const groupOfComp = {}; // compId -> { name, members:Set }
+    const groups = [];
+    for (const g of (scene.groups || [])) {
+      const members = new Set(g.memberIds || []);
+      for (const c of scene.components) if (c.group === g.name) members.add(c.id);
+      if (members.size === 0) continue;
+      const entry = { id: g.id, name: g.name, members };
+      groups.push(entry);
+      for (const m of members) groupOfComp[m] = entry;
+    }
+    return { groups, groupOfComp };
+  }, [scene.groups, scene.components]);
+  const activeGroups = useMemo(() => {
+    if (!selectedIds || selectedIds.size === 0) return [];
+    return groupsInfo.groups.filter(g => {
+      for (const m of g.members) if (!selectedIds.has(m)) return false;
+      return true;
+    });
+  }, [groupsInfo, selectedIds]);
+  // Members of any fully-selected group — their halos soften so the
+  // encompassing outline reads as THE selection.
+  const activeGroupMemberIds = useMemo(() => {
+    const s = new Set();
+    for (const g of activeGroups) for (const m of g.members) s.add(m);
+    return s;
+  }, [activeGroups]);
+
   // Related components: anything snapped to or from the selected component, plus mirror partners
   const relatedIds = useMemo(() => {
     if (!selectedId) return { parents: new Set(), children: new Set(), mirrors: new Set() };
@@ -2141,6 +2175,19 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         return;
       }
 
+      // Shift-click a grouped component: select the WHOLE group. Plain click
+      // stays precise (single member — this app's convention); the violet
+      // composite outline confirms the group selection. Shift is free here:
+      // Cmd toggles, Alt is parametric snap-drag; Shift range-select exists
+      // only in the SHAPES panel.
+      if (e.shiftKey) {
+        const grp = groupsInfo.groupOfComp[id];
+        if (grp) {
+          setSelection({ ids: new Set(grp.members), primary: id });
+          return;
+        }
+      }
+
       // Find root of snap chain for the clicked component.
       const findSnapRoot = (startId) => {
         let rid = startId;
@@ -2173,6 +2220,19 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       if (cluster) {
         for (const memberId of cluster) {
           coMoverIds.add(findSnapRoot(memberId));
+        }
+      }
+      // Multi-selection co-drag: dragging an ALREADY-SELECTED member of a
+      // multi-selection translates every selected root — matching the
+      // arrow-nudge semantics (collectNudgeCluster expands ALL of
+      // selectedIds) and standard CAD behavior. Previously the drag tore
+      // the selection apart by moving only the clicked component's cluster.
+      // This also gives fully-selected GROUPS (Shift-click / SHAPES panel)
+      // co-drag for free. Each added root goes through the same boolean
+      // expansion below, so mixed selections behave like their parts.
+      if (selectedIds.has(id) && selectedIds.size > 1) {
+        for (const sid of selectedIds) {
+          coMoverIds.add(findSnapRoot(sid));
         }
       }
       // Walk consumedBy upward to the topmost containing boolean (if any).
@@ -3916,7 +3976,13 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           const haloColor = '#0ea5e9';
           const outlineW = sw * 0.7;
           const haloW = HALO_W;
-          const isSelected = selectedIds.has(b.id);
+          // The cluster-extent halo fires when the boolean itself OR ANY of
+          // its cluster members is selected. Clicking an operand on canvas
+          // selects only that operand, yet a drag co-moves the whole cluster
+          // — without this, the user dragged a many-part composite with no
+          // visual indication of its extent (only the small operand halo).
+          const isSelected = selectedIds.has(b.id)
+            || [...selectedIds].some(sid => booleanClusters.memberToCluster[sid]?.has(b.id));
           const bbox = collectBbox(b);
           // Don't render if the bbox is degenerate (e.g., missing operands).
           if (!Number.isFinite(bbox.minX)) return null;
@@ -4092,6 +4158,12 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           let strokeColor = style.stroke;
           let strokeWidth = sw * 0.5;
           if (isPrimary) { strokeColor = '#0ea5e9'; strokeWidth = HALO_W; }
+          else if (isSelected && activeGroupMemberIds.has(c.id)) {
+            // Member of a FULLY-selected group: the encompassing violet
+            // outline is the selection cue; the member halo softens so the
+            // group reads as one object with visible contents.
+            strokeColor = '#38bdf8'; strokeWidth = HALO_W * 0.45;
+          }
           else if (isSelected) { strokeColor = '#38bdf8'; strokeWidth = HALO_W * 0.8; }
           // Parent/child/mirror highlight is part of the snap-network
           // overlay — gated on showGrid alongside the grid pattern,
@@ -5481,6 +5553,85 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           ))}
         </g>
       )}
+
+      {/* GROUP selection outline: when EVERY member of a group is selected,
+          draw one encompassing dashed violet rect (the GroupTreeItem violet —
+          distinct from cyan selection / amber snap / magenta guides) + the
+          group name at the NW corner. The composite outline reads as THE
+          selection; member halos soften via activeGroupMemberIds in the
+          stroke ladder. Covers ALL transform instances of every member. */}
+      {activeGroups.length > 0 && (
+        <g pointerEvents="none">
+          {activeGroups.map(g => {
+            let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+            for (const mId of g.members) {
+              const dims = dimsByCompId[mId];
+              if (!dims || !Number.isFinite(dims.w) || !Number.isFinite(dims.h)) continue;
+              // Booleans: prefer the post-transform footprint.
+              const sc = solved.find(c => c.id === mId);
+              if (sc && sc.displayBbox) {
+                const bb = sc.displayBbox;
+                minX = Math.min(minX, bb.cx - bb.w / 2); maxX = Math.max(maxX, bb.cx + bb.w / 2);
+                minY = Math.min(minY, bb.cy - bb.h / 2); maxY = Math.max(maxY, bb.cy + bb.h / 2);
+                continue;
+              }
+              for (const inst of (instancesByCompId[mId] || [])) {
+                minX = Math.min(minX, inst.cx - dims.w / 2); maxX = Math.max(maxX, inst.cx + dims.w / 2);
+                minY = Math.min(minY, inst.cy - dims.h / 2); maxY = Math.max(maxY, inst.cy + dims.h / 2);
+              }
+            }
+            if (!Number.isFinite(minX)) return null;
+            const pad = HALO_W * 2;
+            const fontSize = Math.max(2, Math.max(viewport.w, viewport.h) * 0.012);
+            return (
+              <g key={`group-outline-${g.id}`}>
+                <rect
+                  x={minX - pad} y={-(maxY + pad)}
+                  width={(maxX - minX) + pad * 2} height={(maxY - minY) + pad * 2}
+                  fill="none" stroke="#a78bfa" strokeWidth={HALO_W}
+                  strokeDasharray={`${HALO_W * 1.6},${HALO_W * 1.1}`}
+                />
+                <text
+                  x={minX - pad} y={-(maxY + pad) - fontSize * 0.5}
+                  fontSize={fontSize} fill="#a78bfa" fontFamily="monospace"
+                >
+                  {g.name}
+                </text>
+              </g>
+            );
+          })}
+        </g>
+      )}
+
+      {/* Cluster-extent outline DURING a multi-part move drag: the drag
+          co-moves boolean clusters / multi-selections whose extent was
+          previously invisible (only the clicked operand's halo showed).
+          Computed from the LIVE solved positions of the co-movers, so it
+          tracks the drag frame by frame. */}
+      {drag && drag.kind === 'move' && (drag.coMovers || []).length > 1 && (() => {
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        for (const m of drag.coMovers) {
+          const c = solved.find(cc => cc.id === m.id);
+          const dims = dimsByCompId[m.id];
+          if (!c || !dims || !Number.isFinite(dims.w) || !Number.isFinite(dims.h)) continue;
+          minX = Math.min(minX, c.cx - dims.w / 2); maxX = Math.max(maxX, c.cx + dims.w / 2);
+          minY = Math.min(minY, c.cy - dims.h / 2); maxY = Math.max(maxY, c.cy + dims.h / 2);
+        }
+        if (!Number.isFinite(minX)) return null;
+        const fontSize = Math.max(2, Math.max(viewport.w, viewport.h) * 0.011);
+        return (
+          <g pointerEvents="none" opacity={0.6}>
+            <rect
+              x={minX} y={-maxY} width={maxX - minX} height={maxY - minY}
+              fill="none" stroke="#0ea5e9" strokeWidth={HALO_W * 0.7}
+              strokeDasharray={`${HALO_W * 1.6},${HALO_W * 1.1}`}
+            />
+            <text x={minX} y={-maxY - fontSize * 0.4} fontSize={fontSize} fill="#0ea5e9" fontFamily="monospace">
+              {drag.coMovers.length} parts
+            </text>
+          </g>
+        );
+      })()}
 
       {/* Add-drag preview: live rectangle while user drags to size a new
           component. Snapped corners get a brighter halo so you can see they
