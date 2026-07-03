@@ -796,6 +796,33 @@ Transform chain emission uses the same logic as pyAEDT (separate helper `emitTra
 output-variable + report block before `oProject.Save()` (see "2-line method
 wizard"). Absent the option, output is byte-identical to before.
 
+**Parametric union-boolean chains** (`computeParametricPositions`): the
+snap DAG walker keeps EVERYTHING around a union cluster live in HFSS:
+`boolBBoxParametric(c)` (memoized) derives the union's bbox DIMS **and
+natural CENTER** from the extremal operands' `resolveNoCluster` chains;
+the cluster-operand pass-through emits `operand = boolPos + (opNatural −
+centerNatural)` (was a frozen numeric offset — the "meander grows in an
+HFSS sweep but its snapped children stay put and intersect" bug); free
+unions resolve to the parametric natural center; and an explicit
+`from.instanceIdx` on a rotate/mirror chain emits `parentCenter +
+instanceChainOffsetExpr(angleMode 'hfss') + numeric-trig instance-frame
+anchor on parametric dims` (frozen-numeric fallback kept). Gold test:
+`tests/instance-anchors.test.js` sweep-parity — exprs computed at one
+param value re-evaluated at another must match a FRESH canvas solve.
+CAVEATS (surfaced as safety-report NOTES via the `outMeta` 4th arg →
+`noteCaveat`): instance ORIENTATION trig is baked (rotate-ANGLE sweeps
+need re-export); the extremal-operand identity is frozen at export
+(huge sweeps that change which operand is outermost need re-export);
+`boolBBoxParametric` BAILS to the exact frozen fallback when any operand
+carries first-class rotation (the solver grows rotated AABBs by
+|cos|+|sin|; rotation-blind edges would be silently wrong AT EXPORT
+VALUES). `flattenReplicas`'s cxExpr injection has a ROUND-TRIP GUARD
+(evalExpr must reproduce the solved position, else stay baked) because
+HFSS-only forms like `cos(((a))*1deg)` evaluate to a SILENT finite 0 in
+evalExpr. gdsfactory's `exprToPython` converts `deg` with a NUMERIC
+radian factor (inserting `math.pi` before the bare-pi pass garbled it
+into `math.math.pi`).
+
 `options.sheetImpedance = { resistance, reactance }` overrides the zero-thickness
 conductor sheet boundary (`PEC_sheets` `AssignImpedance`): the two strings are
 emitted VERBATIM into the Resistance/Reactance fields (Ω/sq), so they may be HFSS

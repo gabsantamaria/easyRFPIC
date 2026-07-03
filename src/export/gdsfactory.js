@@ -65,7 +65,10 @@ function exprToPython(expr) {
   // so Python's math.cos/math.sin get radians.
   //   "30deg"        → "(30*math.pi/180)"
   //   "(tilt)*1deg"  → "(tilt)*(1*math.pi/180)"
-  s = s.replace(/(\d+(?:\.\d+)?)\s*deg\b/g, '($1*math.pi/180)');
+  // NOTE: emit the numeric radian factor (NOT "math.pi") — the bare-pi
+  // pass below would re-match the "pi" inside a freshly-inserted
+  // "math.pi" and garble it into "math.math.pi" (runtime AttributeError).
+  s = s.replace(/(\d+(?:\.\d+)?)\s*deg\b/g, '($1*3.141592653589793/180)');
   // Prefix known math fns with "math." (only when followed by "(")
   // so a param literally named "sin" — unlikely but possible — wouldn't
   // get rewritten.

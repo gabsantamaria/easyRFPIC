@@ -315,8 +315,23 @@ export function flattenReplicas(components, pv, pp) {
         const isUnionCell = consumer && consumer.kind === 'boolean' && consumer.op === 'union';
         if (base && m.kind !== 'boolean' && !hasRot && isUnionCell
             && m.layer !== 'port' && !m.lumpedPort && base.cxExpr && base.cyExpr) {
-          comp.cxExpr = o.dxExpr === '0' ? base.cxExpr : `(${base.cxExpr}) + (${o.dxExpr})`;
-          comp.cyExpr = o.dyExpr === '0' ? base.cyExpr : `(${base.cyExpr}) + (${o.dyExpr})`;
+          const cxE = o.dxExpr === '0' ? base.cxExpr : `(${base.cxExpr}) + (${o.dxExpr})`;
+          const cyE = o.dyExpr === '0' ? base.cyExpr : `(${base.cyExpr}) + (${o.dyExpr})`;
+          // ROUND-TRIP GUARD: the injected expressions become live cxExpr
+          // that the CANVAS SOLVER evaluates via evalExpr. HFSS-only forms
+          // (e.g. cos(((angle))*1deg) from a rotate chain on the snap
+          // parent) evaluate to a SILENT 0 in evalExpr — which is finite,
+          // so the solver's NaN gate never fires and the cell collapses
+          // to the origin. Only inject when the expression reproduces the
+          // component's solved position numerically; else stay baked
+          // (numerically exact, just not parametric — the safe contract).
+          const evX = evalExpr(String(cxE).replace(/um/g, ''), pv);
+          const evY = evalExpr(String(cyE).replace(/um/g, ''), pv);
+          if (Number.isFinite(evX) && Number.isFinite(evY)
+              && Math.abs(evX - comp.cx) < 1e-6 && Math.abs(evY - comp.cy) < 1e-6) {
+            comp.cxExpr = cxE;
+            comp.cyExpr = cyE;
+          }
         }
         out.push(comp);
       }

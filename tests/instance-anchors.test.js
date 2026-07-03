@@ -139,7 +139,11 @@ describe('HFSS parity + parametricity', () => {
     const pv = resolveParams(scene.params).values;
     const solved = solveLayout(scene.components, scene.snaps, pv);
     const pp = computeParametricPositions(solved, scene.snaps, pv);
-    const ev = (e) => evalExpr(String(e).replace(/um/g, ''), pv);
+    // HFSS-expr evaluator: strip units, convert the '((angle))*1deg' HFSS
+    // quantity form to radians for evalExpr. The non-translation from-term
+    // is now PARAMETRIC (parent center + chain offset + numeric-trig
+    // instance-frame anchor), so it references cos/sin of the chain angle.
+    const ev = (e) => evalExpr(String(e).replace(/\*1deg/g, '*pi/180').replace(/um/g, ''), pv);
     for (const id of ['child0', 'child3']) {
       const c = solved.find(x => x.id === id);
       expect(ev(pp[id].cxExpr)).toBeCloseTo(c.cx, 4);
@@ -215,5 +219,69 @@ describe('resolveInstanceAnchorNumeric is rotation/scale-aware', () => {
     const want = renderedAnchor(u1, pv, 0, 'SE');
     expect(got.x).toBeCloseTo(want.x, 6);
     expect(got.y).toBeCloseTo(want.y, 6);
+  });
+});
+
+describe('HFSS SWEEP parity (the "snapped to meander breaks under cell_w sweep" bug)', () => {
+  // Gold test: expressions are computed ONCE at export values, then
+  // re-evaluated at a DIFFERENT parameter value and compared against a
+  // FRESH canvas solve at that value — exactly what an HFSS-side sweep
+  // does. Covers all three formerly-frozen pieces: the cluster-root
+  // operand offset, the boolean-as-child bbox anchor, and the
+  // instance-anchor from-term on a rotate/mirror chain.
+  it('operands + instance-snapped children track a cell-size sweep exactly', () => {
+    const build = (pitchExpr) => {
+      const s = makeBlankScene();
+      s.params.pitch = { expr: pitchExpr, unit: 'µm', desc: '' };
+      s.params.moff = { expr: '120', unit: 'µm', desc: '' };
+      s.components.push(
+        { id: 'anchorEl', kind: 'rect', layer: 'electrode', cx: -30, cy: -30, w: '8', h: '8', cutouts: [], transforms: [] },
+        { id: 'barA', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: '10', h: '2', cutouts: [], transforms: [], consumedBy: 'u1' },
+        { id: 'barB', kind: 'rect', layer: 'electrode', cx: 0, cy: 10, w: '10', h: 'pitch/5', cutouts: [], transforms: [], consumedBy: 'u1' },
+        {
+          id: 'u1', kind: 'boolean', op: 'union', operandIds: ['barA', 'barB'],
+          layer: 'electrode', cx: 0, cy: 5, w: '0', h: '0', cutouts: [],
+          transforms: [
+            { id: 't1', kind: 'repeat', enabled: true, n: '2', dx: '0', dy: 'pitch', includeOriginal: true },
+            { id: 't2', kind: 'rotate', enabled: true, angle: '180', pivot: 'C' },
+            { id: 't3', kind: 'duplicate_mirror', enabled: true, axis: 'x', offset: 'moff', includeOriginal: true },
+          ],
+        },
+        { id: 'kid', kind: 'rect', layer: 'electrode', cx: 50, cy: 50, w: '2', h: '2', cutouts: [], transforms: [] },
+        { id: 'kid2', kind: 'rect', layer: 'electrode', cx: 70, cy: 50, w: '2', h: '2', cutouts: [], transforms: [] },
+      );
+      const scene = normalizeScene(s);
+      scene.snaps.push(
+        // internal snap: barB positioned from barA (pitch-dependent)
+        { id: 'si', from: { compId: 'barA', anchor: 'N' }, to: { compId: 'barB', anchor: 'S' }, dx: '0', dy: 'pitch/4' },
+        // the boolean is a CHILD (bbox SE pinned to anchorEl.N)
+        { id: 'sb', from: { compId: 'anchorEl', anchor: 'N' }, to: { compId: 'u1', anchor: 'SE' }, dx: '0', dy: '2' },
+        // children snapped to instance anchors (moved idx 0 + mirrored idx 3)
+        { id: 's0', from: { compId: 'u1', anchor: 'SW', instanceIdx: 0 }, to: { compId: 'kid', anchor: 'NW' }, dx: '1', dy: '0' },
+        { id: 's3', from: { compId: 'u1', anchor: 'SE', instanceIdx: 3 }, to: { compId: 'kid2', anchor: 'C' }, dx: '0', dy: '0' },
+      );
+      return scene;
+    };
+    const evH = (e, pv) => evalExpr(String(e).replace(/\*1deg/g, '*pi/180').replace(/um/g, ''), pv);
+    // Export at pitch = 27
+    const sceneA = build('27');
+    const pvA = resolveParams(sceneA.params).values;
+    const solvedA = solveLayout(sceneA.components, sceneA.snaps, pvA);
+    const pp = computeParametricPositions(solvedA, sceneA.snaps, pvA);
+    const ids = ['barA', 'barB', 'kid', 'kid2'];
+    for (const id of ids) {
+      const c = solvedA.find(x => x.id === id);
+      expect(evH(pp[id].cxExpr, pvA)).toBeCloseTo(c.cx, 6);
+      expect(evH(pp[id].cyExpr, pvA)).toBeCloseTo(c.cy, 6);
+    }
+    // SWEEP: pitch 27 → 40 with the SAME expressions vs a FRESH solve
+    const sceneB = build('40');
+    const pvB = resolveParams(sceneB.params).values;
+    const solvedB = solveLayout(sceneB.components, sceneB.snaps, pvB);
+    for (const id of ids) {
+      const c = solvedB.find(x => x.id === id);
+      expect(evH(pp[id].cxExpr, pvB)).toBeCloseTo(c.cx, 6);
+      expect(evH(pp[id].cyExpr, pvB)).toBeCloseTo(c.cy, 6);
+    }
   });
 });

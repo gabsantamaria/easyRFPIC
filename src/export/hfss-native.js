@@ -125,7 +125,16 @@ function rotateOffsetExprs(off, rotExpr) {
   };
 }
 
-export function computeParametricPositions(components, snaps, paramValues = {}) {
+export function computeParametricPositions(components, snaps, paramValues = {}, outMeta = null) {
+  // outMeta (optional): caller-owned collector for parametric CAVEATS —
+  //   outMeta.orientationBaked: [{ id, detail }] — instance-anchor from-
+  //     terms whose orientation trig/scale is baked (a rotate-ANGLE sweep
+  //     in HFSS needs a re-export);
+  //   outMeta.extremalBBox: [id, …] — components whose position rides a
+  //     union-bbox expression whose EXTREMAL-OPERAND identity is frozen at
+  //     export values (very large sweeps that change which operand is
+  //     extremal need a re-export).
+  // generateHfssNative feeds these into the safety report's NOTES section.
   const byId = Object.fromEntries(components.map(c => [c.id, c]));
   // Helper: produce an expression for the X/Y offset of an anchor on a comp
   // whose width-expression is wExpr and height-expression is hExpr.
@@ -250,6 +259,37 @@ export function computeParametricPositions(components, snaps, paramValues = {}) 
       // Singleton union: bbox = operand bbox.
       return dimExprForComp(ops[0]);
     }
+    const bb = boolBBoxParametric(c);
+    if (!bb) return fallbackDims();
+    return { wExpr: bb.wExpr, hExpr: bb.hExpr };
+  };
+
+  // Parametric union bbox: DIMS + NATURAL-center expressions, via the
+  // extremal-operand technique (the operands extremal along each axis at
+  // export numerics stay extremal under moderate sweeps, so the bbox
+  // edges are those operands' parametric edge expressions — no min/max
+  // needed in HFSS). The NATURAL center is the bbox center of the
+  // operands' own snap chains (cluster pass-through NOT applied), used to
+  // express an operand's offset from the boolean center PARAMETRICALLY:
+  //   operand = boolPos + (operandNatural − centerNatural)
+  // — the shared chain-root literal cancels numerically, leaving the
+  // internal cell geometry (meander_cell_w etc.) live in HFSS. Freezing
+  // that offset numerically was the "meander grows but snapped children
+  // stay put / cells pinned to frozen centers" bug. Returns null when the
+  // structure isn't expressible (caller falls back to frozen numerics).
+  const boolBBoxCache = new Map();
+  const boolBBoxParametric = (c) => {
+    if (!c || c.kind !== 'boolean') return null;
+    if (boolBBoxCache.has(c.id)) return boolBBoxCache.get(c.id);
+    boolBBoxCache.set(c.id, null); // cycle guard
+    const ops = (c.operandIds || []).map(id => byId[id]).filter(Boolean);
+    if (ops.length === 0) return null;
+    // ROTATED OPERANDS: the solver's refreshBooleanBbox grows a first-
+    // class-rotated operand's AABB half-extents by |w·cos|/2 + |h·sin|/2;
+    // the unrotated cx ± w/2 edges below would disagree with the solver
+    // AT EXPORT VALUES (silent wrong geometry — worse than frozen). Bail
+    // to the exact numeric fallback whenever any operand is rotated.
+    if (ops.some(op => componentRotationExpr(op) != null)) return null;
     // Find extremal operands using SOLVED numerics
     let minXOp = ops[0], maxXOp = ops[0], minYOp = ops[0], maxYOp = ops[0];
     let minX = +Infinity, maxX = -Infinity, minY = +Infinity, maxY = -Infinity;
@@ -269,7 +309,7 @@ export function computeParametricPositions(components, snaps, paramValues = {}) 
     const maxXPos = resolveNoCluster(maxXOp.id);
     const minYPos = resolveNoCluster(minYOp.id);
     const maxYPos = resolveNoCluster(maxYOp.id);
-    if (!minXPos || !maxXPos || !minYPos || !maxYPos) return fallbackDims();
+    if (!minXPos || !maxXPos || !minYPos || !maxYPos) return null;
     // Per-operand dimensions for the parametric edge expressions.
     // For boolean operands we'd recurse — bail out to numeric for now
     // (nested-union bboxes are rare and not worth the complexity).
@@ -283,10 +323,19 @@ export function computeParametricPositions(components, snaps, paramValues = {}) 
     };
     const dMinX = opDims(minXOp), dMaxX = opDims(maxXOp);
     const dMinY = opDims(minYOp), dMaxY = opDims(maxYOp);
-    if (!dMinX || !dMaxX || !dMinY || !dMaxY) return fallbackDims();
-    const wExpr = `((${maxXPos.cxExpr}) + (${dMaxX.wExpr})/2) - ((${minXPos.cxExpr}) - (${dMinX.wExpr})/2)`;
-    const hExpr = `((${maxYPos.cyExpr}) + (${dMaxY.hExpr})/2) - ((${minYPos.cyExpr}) - (${dMinY.hExpr})/2)`;
-    return { wExpr, hExpr };
+    if (!dMinX || !dMaxX || !dMinY || !dMaxY) return null;
+    const xMinE = `((${minXPos.cxExpr}) - (${dMinX.wExpr})/2)`;
+    const xMaxE = `((${maxXPos.cxExpr}) + (${dMaxX.wExpr})/2)`;
+    const yMinE = `((${minYPos.cyExpr}) - (${dMinY.hExpr})/2)`;
+    const yMaxE = `((${maxYPos.cyExpr}) + (${dMaxY.hExpr})/2)`;
+    const out = {
+      wExpr: `(${xMaxE}) - (${xMinE})`,
+      hExpr: `(${yMaxE}) - (${yMinE})`,
+      cxNatExpr: `((${xMaxE}) + (${xMinE}))/2`,
+      cyNatExpr: `((${yMaxE}) + (${yMinE}))/2`,
+    };
+    boolBBoxCache.set(c.id, out);
+    return out;
   };
 
   // Non-memoized snap-chain resolution used by dimExprForComp(union) to
@@ -410,19 +459,40 @@ export function computeParametricPositions(components, snaps, paramValues = {}) 
         const boolComp = byId[c.consumedBy];
         if (boolComp && incomingSnap.has(boolComp.id)) {
           const boolPos = resolve(boolComp.id);
-          const opCx = Number.isFinite(c.cx) ? c.cx : 0;
-          const opCy = Number.isFinite(c.cy) ? c.cy : 0;
-          const bCx  = Number.isFinite(boolComp.cx) ? boolComp.cx : 0;
-          const bCy  = Number.isFinite(boolComp.cy) ? boolComp.cy : 0;
-          const dx = opCx - bCx;
-          const dy = opCy - bCy;
           const dims = dimExprForComp(c);
-          const result = {
-            cxExpr: `(${boolPos.cxExpr}) + (${dx}um)`,
-            cyExpr: `(${boolPos.cyExpr}) + (${dy}um)`,
-            wExpr: dims.wExpr,
-            hExpr: dims.hExpr,
-          };
+          // PARAMETRIC operand offset: operand = boolPos + (operand's own
+          // NATURAL chain − the cluster's NATURAL bbox center). The shared
+          // chain-root literal cancels numerically, so the offset is live
+          // in the cell parameters — sweeping meander_cell_w in HFSS now
+          // spreads the operands exactly like the canvas solver, instead
+          // of resizing them about frozen centers (the numeric
+          // (op.cx − bool.cx) offset was the "cells deform / cluster
+          // doesn't grow" residue of the plain native export).
+          const bbNat = (boolComp.op === 'union') ? boolBBoxParametric(boolComp) : null;
+          const opNat = bbNat ? resolveNoCluster(compId) : null;
+          let result;
+          if (bbNat && opNat) {
+            if (outMeta) (outMeta.extremalBBox = outMeta.extremalBBox || []).push(compId);
+            result = {
+              cxExpr: `(${boolPos.cxExpr}) + ((${opNat.cxExpr}) - (${bbNat.cxNatExpr}))`,
+              cyExpr: `(${boolPos.cyExpr}) + ((${opNat.cyExpr}) - (${bbNat.cyNatExpr}))`,
+              wExpr: dims.wExpr,
+              hExpr: dims.hExpr,
+            };
+          } else {
+            // Fallback (non-union / unresolvable): frozen numeric offset,
+            // as before.
+            const opCx = Number.isFinite(c.cx) ? c.cx : 0;
+            const opCy = Number.isFinite(c.cy) ? c.cy : 0;
+            const bCx  = Number.isFinite(boolComp.cx) ? boolComp.cx : 0;
+            const bCy  = Number.isFinite(boolComp.cy) ? boolComp.cy : 0;
+            result = {
+              cxExpr: `(${boolPos.cxExpr}) + (${opCx - bCx}um)`,
+              cyExpr: `(${boolPos.cyExpr}) + (${opCy - bCy}um)`,
+              wExpr: dims.wExpr,
+              hExpr: dims.hExpr,
+            };
+          }
           positions[compId] = result;
           visiting.delete(compId);
           return result;
@@ -434,8 +504,19 @@ export function computeParametricPositions(components, snaps, paramValues = {}) 
       // Numeric leaves get "um" appended so that when composed into a
       // chain expression with parameters (which are unit-bearing),
       // HFSS evaluates the whole chain in length units.
+      // Free UNION booleans: the bbox center is NOT a constant — it moves
+      // when the cell parameters change (the cluster grows about its
+      // fixed chain root). Use the parametric NATURAL center so anchors
+      // on a free union track its size parameters.
       const dims = dimExprForComp(c);
-      const result = { cxExpr: rootPosExpr(c, 'x'), cyExpr: rootPosExpr(c, 'y'), wExpr: dims.wExpr, hExpr: dims.hExpr };
+      let result;
+      const bbFree = (c.kind === 'boolean' && c.op === 'union') ? boolBBoxParametric(c) : null;
+      if (bbFree) {
+        if (outMeta) (outMeta.extremalBBox = outMeta.extremalBBox || []).push(compId);
+        result = { cxExpr: `(${bbFree.cxNatExpr})`, cyExpr: `(${bbFree.cyNatExpr})`, wExpr: dims.wExpr, hExpr: dims.hExpr };
+      } else {
+        result = { cxExpr: rootPosExpr(c, 'x'), cyExpr: rootPosExpr(c, 'y'), wExpr: dims.wExpr, hExpr: dims.hExpr };
+      }
       positions[compId] = result;
       visiting.delete(compId);
       return result;
@@ -482,14 +563,16 @@ export function computeParametricPositions(components, snaps, paramValues = {}) 
     // same way — same accepted contract as the vertex path).
     let instDx = null, instDy = null;
     // fromTerm overrides: when set, they REPLACE the whole
-    // parent-anchor term (parentPos + fromOff [+ instDx]) with an exact
-    // value — used for instance targets on non-translation chains, where
-    // the rendered instance anchor can't be expressed as base-anchor +
-    // translation (rotate/mirror flip which corner an anchor NAME lands
-    // on). The value is computed with the SAME expandTransforms +
-    // instance-frame anchor math the solver uses, so HFSS matches the
-    // canvas EXACTLY; it is emitted as a frozen numeric (noteFrozen'd by
-    // the caller's frozen-report path via the snap comment).
+    // parent-anchor term (parentPos + fromOff [+ instDx]) with the
+    // instance-anchor term — used for instance targets on non-translation
+    // chains, where the rendered instance anchor can't be expressed as
+    // base-anchor + translation (rotate/mirror flip which corner an
+    // anchor NAME lands on). Primary branch: PARAMETRIC composition
+    // (parent center + chain offsets + numeric-trig instance-frame anchor
+    // on parametric dims); the ORIENTATION coefficients are baked, which
+    // the caller surfaces via outMeta.orientationBaked → a report NOTE.
+    // Fallback branch: exact frozen numeric when the chain/pose can't be
+    // resolved.
     let fromTermX = null, fromTermY = null;
     const fromIdxRaw = snap.from ? snap.from.instanceIdx : undefined;
     const hasExplicitIdx = Number.isInteger(fromIdxRaw) && fromIdxRaw >= 0;
@@ -512,13 +595,25 @@ export function computeParametricPositions(components, snaps, paramValues = {}) 
         });
         if (off) { instDx = off.dxExpr; instDy = off.dyExpr; }
       } else {
-        // Rotate / mirror / duplicate_mirror in the chain: compute the
-        // rendered instance anchor EXACTLY like the solver (expand the
-        // chain numerically, anchor in the instance's own frame) and
-        // freeze the whole from-term. The old centroid-offset bake was
-        // doubly wrong: evalExpr can't resolve 'cos(180deg)' (offsets
-        // silently zeroed) and the anchor's orientation flip was
-        // ignored.
+        // Rotate / mirror / duplicate_mirror in the chain: PARAMETRIC
+        // composition —
+        //   fromTerm = parentCenterExpr            (parametric chain/bbox)
+        //            + chainOffset_k               (instanceChainOffsetExpr,
+        //                                           angleMode 'hfss' — live
+        //                                           in pitch / mirror-offset
+        //                                           params)
+        //            + R_k·S_k · anchorOffset(wExpr, hExpr)
+        //                                          (instance-frame anchor:
+        //                                           NUMERIC trig/scale
+        //                                           coefficients from the
+        //                                           instance pose × the
+        //                                           PARAMETRIC dims)
+        // This keeps children snapped to a meander cell tracking
+        // meander_cell_* sweeps in HFSS exactly like the canvas. The
+        // instance ORIENTATION (rotation angle / mirror sense) is baked as
+        // numeric coefficients — sweeping the rotate ANGLE itself needs a
+        // re-export (reported as a caveat note). Falls back to the frozen
+        // numeric from-term when the chain/pose can't be resolved.
         const fw = typeof parent.w === 'number' ? parent.w : evalExpr(parent.w, paramValues);
         const fh = typeof parent.h === 'number' ? parent.h : evalExpr(parent.h, paramValues);
         const insts = expandTransforms([{
@@ -528,7 +623,32 @@ export function computeParametricPositions(components, snaps, paramValues = {}) 
           h: Number.isFinite(fh) ? fh : 0,
         }], paramValues);
         const inst = insts.find(i => i.idx === fromIdxRaw);
-        if (inst && Number.isFinite(inst.cx) && Number.isFinite(inst.cy)) {
+        const off = instanceChainOffsetExpr(owner, fromIdxRaw, {
+          paramValues, exprWithUm: dimExprStr,
+          baseCxExpr: parentPos.cxExpr, baseCyExpr: parentPos.cyExpr,
+          baseWExpr: parentPos.wExpr, baseHExpr: parentPos.hExpr,
+          components, parametricPos: positions, angleMode: 'hfss',
+        });
+        if (inst && off && Number.isFinite(inst.cx) && Number.isFinite(inst.cy)) {
+          const rad = ((inst.rotation || 0) * Math.PI) / 180;
+          const ca = Math.cos(rad);
+          const sa = Math.sin(rad);
+          const isx = inst.scaleX ?? 1;
+          const isy = inst.scaleY ?? 1;
+          // Unrotated anchor offsets on the parent's PARAMETRIC dims.
+          const base = anchorOffsetExpr(snap.from.anchor, parentPos.wExpr, parentPos.hExpr);
+          const cS = ca.toFixed(12);
+          const sS = sa.toFixed(12);
+          fromTermX = `(${parentPos.cxExpr}) + (${off.dxExpr}) + ((${cS}) * (${isx}) * (${base.xOff}) - (${sS}) * (${isy}) * (${base.yOff}))`;
+          fromTermY = `(${parentPos.cyExpr}) + (${off.dyExpr}) + ((${sS}) * (${isx}) * (${base.xOff}) + (${cS}) * (${isy}) * (${base.yOff}))`;
+          if (outMeta && ((inst.rotation || 0) !== 0 || isx !== 1 || isy !== 1)) {
+            (outMeta.orientationBaked = outMeta.orientationBaked || []).push({
+              id: compId,
+              detail: `snapped to instance #${fromIdxRaw} of ${parent.id}: position tracks the chain params, but the instance ORIENTATION (rotation ${inst.rotation || 0} deg, scale ${isx}/${isy}) is baked - sweeping the rotate ANGLE itself needs a re-export`,
+            });
+          }
+        } else if (inst && Number.isFinite(inst.cx) && Number.isFinite(inst.cy)) {
+          // Chain not expressible — frozen exact numeric (matches solver).
           const lp = anchorLocalInstance(
             snap.from.anchor, inst.w, inst.h,
             inst.rotation || 0, inst.scaleX ?? 1, inst.scaleY ?? 1,
@@ -703,7 +823,14 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   // `_comp_<id>_cx` / `_comp_<id>_cy` to track each parent's CURRENT solved
   // position. HFSS doesn't know about those synthetics — we expand them to
   // each parent's full parametric chain expression (which IS valid HFSS).
-  const parametricPosForExport = computeParametricPositions(solved, snaps, paramValues);
+  const ppMeta = {};
+  const parametricPosForExport = computeParametricPositions(solved, snaps, paramValues, ppMeta);
+  // Surface the parametric CAVEATS in the safety report's NOTES section —
+  // these are positions that TRACK most sweeps but carry a baked piece.
+  for (const it of ppMeta.orientationBaked || []) noteCaveat(it.id, it.detail);
+  for (const id of ppMeta.extremalBBox || []) {
+    noteCaveat(id, 'position rides a union-bbox expression whose EXTREMAL-OPERAND identity is frozen at export values - very large sweeps that change which operand is outermost need a re-export');
+  }
   const compsById = Object.fromEntries(components.map(c => [c.id, c]));
   const resolveSynthetics = (expr) => {
     if (typeof expr !== 'string') return expr;
