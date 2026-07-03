@@ -290,3 +290,61 @@ describe('generateTidy3DNotebook — options & variants', () => {
     expect(mdTextAll(nb)).toContain('no Tidy3D cloud account');
   });
 });
+
+// Parse "OPT_WIN_X, OPT_WIN_Z = <wx>, <wz>" out of the notebook's params cell.
+const optWin = (ipynb) => {
+  const t = codeText(JSON.parse(ipynb));
+  const m = t.match(/OPT_WIN_X, OPT_WIN_Z = ([\d.]+), ([\d.]+)/);
+  return m ? { wx: +m[1], wz: +m[2] } : null;
+};
+
+describe('generateTidy3DNotebook — optical solve is CROPPED (RF stays full)', () => {
+  it('RF solves the full cross-section; optical is a tight window around the core', () => {
+    const { ipynb } = generateTidy3DNotebook(FIXTURE_CROSS);
+    const t = codeText(JSON.parse(ipynb));
+    // RF simulation + mode plane span the full domain (T_SPAN x Z_SPAN)
+    expect(t).toContain('size=(T_SPAN, Z_SPAN, 4.0 * GRID_DL_RF)');
+    expect(t).toContain('plane=td.Box(center=(T_MID, Z_MID, 0.0), size=(T_SPAN, Z_SPAN, 0.0))');
+    // optical simulation + mode plane use the cropped window, NOT the full span
+    expect(t).toContain('size=(OPT_WIN_X, OPT_WIN_Z, 1.0)');
+    expect(t).toContain('plane=td.Box(center=(OPT_CENTER_T, OPT_CENTER_Z, 0.0), size=(OPT_WIN_X, OPT_WIN_Z, 0.0))');
+    const w = optWin(ipynb);
+    // fixture: 120 um wide domain, ~2.2 um core -> window is a few um, far
+    // smaller than the full T_SPAN (120) / Z_SPAN (76).
+    expect(w.wx).toBeLessThan(20);
+    expect(w.wz).toBeLessThan(20);
+    expect(w.wx).toBeGreaterThan(2.2); // must still CONTAIN the core
+  });
+
+  it('a wide / unetched "core" (wg-uniform) is CAPPED, not re-expanded to full width', () => {
+    // The old 6*core_width sizing collapsed min(tSpan, ...) back to the full
+    // width for a core spanning the whole crossing — the memory blow-up.
+    const fx = clone(FIXTURE_CROSS);
+    fx.waveguides = [{
+      id: 'wg1', layerId: 'l_wg', material: 'LiNbO3', color: '#7dd3fc',
+      slabBand: { z0: 0, z1: 0.6, intervals: [{ t0: 0, t1: 120 }] },
+      core: { zBot: 0, zTop: 0.6, segments: [{ botT0: 0, botT1: 120, topT0: 0, topT1: 120 }] },
+    }];
+    const { ipynb, warnings } = generateTidy3DNotebook(fx);
+    const w = optWin(ipynb);
+    expect(w.wx).toBeLessThanOrEqual(40);        // hard cap, NOT 120
+    expect(warnings.some((s) => /optical window capped/.test(s))).toBe(true);
+  });
+
+  it('multi-waveguide slice crops to wgs[0] and warns about the dual arm', () => {
+    const fx = clone(FIXTURE_CROSS);
+    const mkWg = (id, t) => ({
+      id, layerId: 'l_wg', material: 'LiNbO3', color: '#7dd3fc',
+      slabBand: { z0: 0, z1: 0.3, intervals: [{ t0: 0, t1: 120 }] },
+      core: { zBot: 0.3, zTop: 0.6, segments: [{ botT0: t - 0.6, botT1: t + 0.6, topT0: t - 0.45, topT1: t + 0.45 }] },
+    });
+    fx.waveguides = [mkWg('wgA', 40), mkWg('wgB', 80)];
+    fx.wgCenter = { t: 40, z: 0.45, compId: 'wgA' };
+    const { ipynb, warnings } = generateTidy3DNotebook(fx);
+    const t = codeText(JSON.parse(ipynb));
+    // window centered on wgA (40), tightly cropped (not spanning to wgB)
+    expect(t).toMatch(/OPT_CENTER_T, OPT_CENTER_Z = 40(\.0)?,/);
+    expect(optWin(ipynb).wx).toBeLessThan(20);
+    expect(warnings.some((s) => /2 waveguides crossed/.test(s))).toBe(true);
+  });
+});

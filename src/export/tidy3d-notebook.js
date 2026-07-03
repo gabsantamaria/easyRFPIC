@@ -257,16 +257,56 @@ export function generateTidy3DNotebook(cross, opts = {}) {
     if (idx >= 0 && idx + 1 < slabs.length && slabs[idx + 1].role !== 'air') wgFillMaterial = slabs[idx + 1].material;
   }
 
-  // optical window around the crossed core (clamped to the domain)
-  let optCT = 0, optCZ = 0, optWX = 10, optWZ = 6, coreW = 1;
+  // Optical mode window — CROPPED (see the big note in the params cell).
+  // The RF quasi-TEM solve runs over the FULL cross-section (grounds return
+  // over the whole domain); the OPTICAL mode at LAMBDA_UM is confined to the
+  // waveguide core, and meshing the full RF domain at ~lambda/20 (~35 nm for
+  // LN) over 100+ um would be tens of millions of cells. So the optical
+  // Simulation + mode plane are cropped to the core BOUNDING BOX plus a
+  // few-wavelength evanescent margin, clamped to the domain, and HARD-CAPPED
+  // per axis. The cap matters: the old window scaled as 6*core_width, which
+  // for a wide / unetched "core" (the wg-uniform path, where the segment
+  // spans the whole crossing) collapsed min(tSpan, ...) back to the full
+  // width — silently re-inflating memory to the exact size this crop avoids.
+  const OPT_CAP_UM = 40;                              // hard per-axis ceiling
+  const optMargin = Math.max(3.0, 2.5 * lambdaUm);   // ~2-3 lambda decay room
+  let optCT = 0, optCZ = 0, optWX = 10, optWZ = 6;
   if (hasWg) {
     const w0 = wgs[0];
-    coreW = Math.max(0.5, ...((w0.core && w0.core.segments) || []).map((s) => Math.abs(s.botT1 - s.botT0)));
-    const zLo = Math.max(dom.zMin, ((w0.slabBand && w0.slabBand.z0) ?? w0.core.zBot) - 2.5);
-    const zHi = Math.min(dom.zMax, w0.core.zTop + 2.5);
-    optCT = cross.wgCenter.t; optCZ = 0.5 * (zLo + zHi);
-    optWX = Math.min(tSpan, Math.max(8, 6 * coreW));
-    optWZ = Math.max(2, zHi - zLo);
+    const segs = (w0.core && w0.core.segments) || [];
+    // Core t-extent from every etch-trapezoid corner (bottom AND top).
+    // Seed from the segments ONLY — seeding with wgCenter.t would stretch
+    // the window from the core to the section midpoint when they differ
+    // (multi-waveguide slices, where wgCenter need not equal wgs[0]).
+    let tLoCore = Infinity, tHiCore = -Infinity;
+    for (const s of segs) {
+      tLoCore = Math.min(tLoCore, s.botT0, s.topT0);
+      tHiCore = Math.max(tHiCore, s.botT1, s.topT1);
+    }
+    if (!Number.isFinite(tLoCore)) { tLoCore = cross.wgCenter.t; tHiCore = cross.wgCenter.t; }
+    // Core z-extent: slab band bottom (if partially etched) up to core top.
+    const zLoCore = (w0.slabBand && Number.isFinite(w0.slabBand.z0)) ? w0.slabBand.z0 : w0.core.zBot;
+    const zHiCore = w0.core.zTop;
+    // Window = core bbox + margin, clamped to the domain, then capped about
+    // the core center with a warning (a genuinely wide guide needs the mem).
+    const crop = (loCore, hiCore, domLo, domHi, axisLabel) => {
+      let lo = Math.max(domLo, loCore - optMargin);
+      let hi = Math.min(domHi, hiCore + optMargin);
+      if (hi - lo > OPT_CAP_UM) {
+        const c = 0.5 * (loCore + hiCore);
+        lo = Math.max(domLo, c - 0.5 * OPT_CAP_UM);
+        hi = Math.min(domHi, c + 0.5 * OPT_CAP_UM);
+        warnings.push(`optical window capped at ${OPT_CAP_UM} um in ${axisLabel} (wide guiding region) — widen OPT_WIN_${axisLabel === 't' ? 'X' : 'Z'} in the params cell if the mode touches the boundary.`);
+      }
+      return { c: 0.5 * (lo + hi), w: hi - lo };
+    };
+    const tw = crop(tLoCore, tHiCore, dom.tMin, dom.tMax, 't');
+    const zw = crop(zLoCore, zHiCore, dom.zMin, dom.zMax, 'z');
+    optCT = tw.c; optWX = tw.w;
+    optCZ = zw.c; optWZ = zw.w;
+    if (wgs.length > 1) {
+      warnings.push(`${wgs.length} waveguides crossed — the optical solve is cropped to the one nearest the section midpoint ("${w0.id}"); a dual-arm VpiL needs a per-arm run.`);
+    }
   }
 
   // ---------------------------------------------------------------- cells --
@@ -397,9 +437,15 @@ export function generateTidy3DNotebook(cross, opts = {}) {
   P.push('NEFF_GUESS_RF = 2.25  # initial n_eff guess (TFLN CPW microwave index ~2.2-2.5); the solver returns the modes NEAREST this');
   if (hasWg) {
     P.push('');
-    P.push('# --- optical solve window (um; clamped to the domain) ---');
+    P.push('# --- optical solve window (um) ---------------------------------------');
+    P.push('# CROPPED on purpose. The RF mode solves over the FULL cross-section');
+    P.push('# (T_SPAN x Z_SPAN); the optical mode is confined to the waveguide, so');
+    P.push('# it solves in this small window around the core at ~lambda/20 mesh.');
+    P.push('# Meshing the full RF domain at optical resolution would be tens of');
+    P.push('# millions of cells. Widen these if the mode profile looks clipped');
+    P.push('# at the window edge (check the plotted |E| tails).');
     P.push(`OPT_CENTER_T, OPT_CENTER_Z = ${pf(optCT)}, ${pf(optCZ)}`);
-    P.push(`OPT_WIN_X, OPT_WIN_Z = ${pf(optWX)}, ${pf(optWZ)}`);
+    P.push(`OPT_WIN_X, OPT_WIN_Z = ${pf(optWX)}, ${pf(optWZ)}  # << optical crop (vs full T_SPAN x Z_SPAN for RF)`);
   }
   cells.push(codeCell(P));
 
