@@ -4949,6 +4949,7 @@ export default function App() {
     'param-error':       { heading: 'Parameter expressions that do not evaluate', hint: 'Fix in the PARAMS panel (circular or unresolvable expression).' },
     'bad-dims':          { heading: 'Components with degenerate size', hint: 'Give w/h a positive value — anchors and exports misbehave at ≤ 0.' },
     'stale-conductor':   { heading: 'Stale conductor-layer bindings', hint: 'Rebind the component to an existing conductor layer in the Inspector.' },
+    'port-no-excitation': { heading: 'Port rects without an excitation', hint: 'Select the port rect and enable "Lumped port" in the Inspector — otherwise the HFSS export emits the sheet as geometry only, with no port assigned.' },
     'unbound-conductor': { heading: 'Ambiguous conductor bindings', hint: 'Multiple conductor layers exist — pick one explicitly in the Inspector.' },
     'nan-pos-expr':      { heading: 'Parametric positions (cx/cy expressions) that do not evaluate', hint: 'Fix the cxExpr/cyExpr in the Inspector; the numeric position is used meanwhile.' },
     'dangling-instance': { heading: 'Snaps targeting a repeat replica that no longer exists', hint: 'Lower the snap\'s instance index or increase the repeat count.' },
@@ -5131,6 +5132,15 @@ export default function App() {
           out.push({ kind: 'unbound-conductor', snapId: null, compId: c.id, message: `"${c.id}" has no explicit conductor binding — export falls back to the first conductor ("${conductorLayers[0].name || conductorLayers[0].id}") in a ${conductorLayers.length}-conductor stack` });
         }
       }
+    }
+    // 5b) Port-layer rects whose Lumped-port flag is off: the HFSS export
+    //     emits the sheet but assigns NO excitation — a solve with no
+    //     ports fails downstream with confusing errors. Flag it here so
+    //     the forgotten checkbox is visible before export.
+    for (const c of scene.components || []) {
+      if (c.layer !== 'port' || (c.kind || 'rect') !== 'rect') continue;
+      if (c.lumpedPort && c.lumpedPort.enabled) continue;
+      out.push({ kind: 'port-no-excitation', snapId: null, compId: c.id, message: `"${c.id}" is on the port layer but "Lumped port" is not enabled — the HFSS export will NOT assign an excitation to it (enable it in the Inspector)` });
     }
     // 6) Solver diagnostics from the main solve (captured in the paramValues
     //    memo right after solveLayout): nan-pos-expr, dangling-instance, and

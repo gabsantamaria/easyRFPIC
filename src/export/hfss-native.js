@@ -5121,6 +5121,30 @@ except Exception as e:
   // so the IronPython 2.7 reader can't choke on stray unicode.
   {
     const lines = [];
+    // Export-mode banner FIRST — the two silently-confusing states are
+    // append mode (no project/setup/sweep created) and port-layer rects
+    // whose Lumped-port flag is off (no excitation emitted). Both cost a
+    // solve-with-no-excitations round trip in HFSS when missed.
+    if (appendToActive) {
+      lines.push('# ===== APPEND MODE =====');
+      lines.push('# This script only ADDS GEOMETRY to the currently active HFSS design.');
+      lines.push('# NO project, analysis setup, or frequency sweep is created (the active');
+      lines.push('# design is assumed to have its own). For a self-contained script, turn');
+      lines.push('# OFF "Append to active design" in the SETUP panel and re-export.');
+      lines.push('#');
+    }
+    const portRectsAll = (solved || []).filter(c => c.layer === 'port' && c.kind === 'rect');
+    const portRectsOff = portRectsAll.filter(c => !c.lumpedPort || !c.lumpedPort.enabled);
+    if (portRectsOff.length > 0) {
+      lines.push('# ===== WARNING: PORT RECT(S) WITHOUT AN EXCITATION =====');
+      for (const c of portRectsOff) {
+        lines.push(`#   - ${ascii(String(c.id))}: drawn on the port layer but its "Lumped port" checkbox`);
+      }
+      lines.push('#     is OFF, so NO lumped port is assigned by this script (the sheet is');
+      lines.push('#     emitted as geometry only). Select the port rect in the app and');
+      lines.push('#     enable "Lumped port" in the Inspector, then re-export.');
+      lines.push('#');
+    }
     lines.push('# ===== PARAMETRIC-SWEEP SAFETY REPORT =====');
     lines.push('# Fully parametric (tracks HFSS variable changes):');
     if (reportParametric.length === 0) {

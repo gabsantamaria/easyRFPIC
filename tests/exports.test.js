@@ -7,7 +7,7 @@ import { writeFileSync, mkdirSync } from 'fs';
 import { generateGDS } from '../src/export/gds.js';
 import { generatePyAEDT } from '../src/export/pyaedt.js';
 import { generateHfssNative } from '../src/export/hfss-native.js';
-import { makeDefaultScene, makeBlankScene } from '../src/scene/schema.js';
+import { makeDefaultScene, makeBlankScene, normalizeScene } from '../src/scene/schema.js';
 import { resolveParams, topoSortParams } from '../src/scene/params.js';
 
 const scene = makeDefaultScene();
@@ -1593,5 +1593,45 @@ describe('D3/D4 exports: rounded rects + vias', () => {
     expect(out).toContain('rotation = 30 deg CCW about own center');
     expect(out).toContain('hfss.modeler.rotate(["rr"], "Z", "30.0000deg")');
     pyParses3(out, 'vitest_pyaedt_rounded_rect_rot');
+  });
+});
+
+describe('HFSS export-mode banners (silent-skip failures made loud)', () => {
+  const mkScene = (portFlag) => {
+    const s = makeBlankScene();
+    s.components.push(
+      { id: 'g1', kind: 'rect', layer: 'electrode', cx: -6, cy: 0, w: '10', h: '10', cutouts: [], transforms: [] },
+      { id: 'g2', kind: 'rect', layer: 'electrode', cx: 6, cy: 0, w: '10', h: '10', cutouts: [], transforms: [] },
+      {
+        id: 'p1', kind: 'rect', layer: 'port', cx: 0, cy: 0, w: '2', h: '2', cutouts: [], transforms: [],
+        ...(portFlag ? { lumpedPort: { enabled: true, impedance: '50' } } : {}),
+      },
+    );
+    return normalizeScene(s);
+  };
+  it('append mode: APPEND banner at top; no setup; flagged ports STILL emitted', () => {
+    const scene = mkScene(true);
+    const pv = resolveParams(scene.params).values;
+    const code = generateHfssNative(scene, pv, { appendToActive: true });
+    expect(code).toContain('===== APPEND MODE =====');
+    expect(code).not.toContain('InsertSetup');
+    expect(code).toContain('AssignLumpedPort'); // ports are geometry-bound, not setup-bound
+  });
+  it('port rect with the Lumped-port flag OFF gets a loud WARNING banner', () => {
+    const scene = mkScene(false);
+    const pv = resolveParams(scene.params).values;
+    const code = generateHfssNative(scene, pv, {});
+    expect(code).toContain('PORT RECT(S) WITHOUT AN EXCITATION');
+    expect(code).toContain('- p1:');
+    expect(code).not.toContain('AssignLumpedPort');
+  });
+  it('fresh mode with the flag on: full script, no banners', () => {
+    const scene = mkScene(true);
+    const pv = resolveParams(scene.params).values;
+    const code = generateHfssNative(scene, pv, {});
+    expect(code).toContain('InsertSetup');
+    expect(code).toContain('AssignLumpedPort');
+    expect(code).not.toContain('===== APPEND MODE =====');
+    expect(code).not.toContain('PORT RECT(S) WITHOUT AN EXCITATION');
   });
 });
