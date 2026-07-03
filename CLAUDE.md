@@ -694,10 +694,21 @@ tests/tidy3d-notebook.test.js): `generateTidy3DNotebook(cross, opts)` →
 `{ ipynb, warnings }` (THROWS on unusable cross — wizard catches).
 nbformat-4; every code cell ast.parse-checked in tests. Coordinates:
 tidy3d x = t, y = stack z, z = propagation; local ModeSolver only (no
-cloud). RF: quasi-TEM mode → n_eff = √εeff, Z0 via microwave plugin
+cloud). RF: quasi-TEM mode → n_eff = √εeff over the FULL cross-section
+(grounds return over the whole domain), Z0 via microwave plugin
 V-path/I-loop integrals (classic class names = 2.11 aliases; pinned
 `tidy3d>=2.7,<3`); SEPARATE `MATERIAL_EPS_RF` table (RF εr ≠ optical n²
-— LN εr≈28/43 vs n≈2.2). Optical: AnisotropicMedium with ne on
+— LN εr≈28/43 vs n≈2.2). **The OPTICAL solve is CROPPED** (the mode is
+core-confined; the full RF domain at ~λ/20 ≈ 35 nm cells would be tens of
+millions of cells): window = core bounding box + a few-λ evanescent
+margin, clamped to the domain, HARD-CAPPED at 40 µm/axis. Seeded from the
+core SEGMENTS only — NOT `wgCenter.t`, which differs from `wgs[0]` on
+multi-guide slices (seeding with it stretched the window from the core to
+the section midpoint). A wide/unetched `wg-uniform` core hits the cap
+with a warning instead of the old `6*core_width` re-expanding to full
+width (the memory blow-up); a multi-waveguide slice crops to `wgs[0]` +
+warns a dual-arm VπL needs a per-arm run. `OPT_WIN_X/Z` + `OPT_CENTER_T/Z`
+are editable notebook variables for widening. Optical: AnisotropicMedium with ne on
 `extraordinaryAxis` ('vertical' = z-cut → yy, 'horizontal' = x-cut → xx).
 VπL: E_RF normalized to 1 V by the mode's own voltage integral, Δn = ½n³r·E
 overlap-averaged over the EO layer with the optical intensity weight
