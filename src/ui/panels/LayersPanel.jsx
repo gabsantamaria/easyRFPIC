@@ -272,6 +272,46 @@ export function LayerCard({ layer, idx, scene, paramValues, updateScene, commitE
             className="w-12 h-5 bg-transparent border border-slate-700 rounded cursor-pointer"
           />
         </div>
+        {/* Gate matches the HFSS exporter's sheet-vs-solid decision
+            (abs(t) < 1e-9): a tiny-positive thickness still exports as an
+            impedance SHEET, so the fields must stay visible; a negative
+            thickness exports as a solid, so they hide. */}
+        {layer.role === 'conductor' && Math.abs(thicknessVal) < 1e-9 && (
+          <div className="mt-1 pt-1 border-t border-slate-700 space-y-1">
+            <div className="text-[9px] uppercase tracking-wider text-amber-400/80 font-semibold px-0.5">
+              Sheet impedance (thickness = 0)
+            </div>
+            <p className="text-[9px] text-slate-500 leading-snug px-0.5">
+              This conductor exports as a 2-D SHEET with a surface-impedance
+              boundary Rs + j·Xs (Ω/sq). HFSS expressions — may use the
+              intrinsic <span className="font-mono">Freq</span> (Hz),{' '}
+              <span className="font-mono">pi</span>, and design variables.
+              E.g. kinetic inductance Lk pH/sq:{' '}
+              <span className="font-mono">Xs = 2*pi*Freq*Lk*1e-12</span>.
+              Blank = near-PEC (0.001 + j0).
+            </p>
+            <div className="flex items-center gap-1">
+              <label className="text-[9px] text-slate-500 w-16">Rs (Ω/sq)</label>
+              <DeferredTextInput
+                value={layer.sheetRs || ''}
+                onCommit={(v) => updateLayer({ sheetRs: v })}
+                placeholder="0.001 (near-PEC)"
+                className="flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-amber-300 outline-none focus:border-amber-400"
+                spellCheck={false}
+              />
+            </div>
+            <div className="flex items-center gap-1">
+              <label className="text-[9px] text-slate-500 w-16">Xs (Ω/sq)</label>
+              <DeferredTextInput
+                value={layer.sheetXs || ''}
+                onCommit={(v) => updateLayer({ sheetXs: v })}
+                placeholder="e.g. 2*pi*Freq*10e-12"
+                className="flex-1 min-w-0 bg-slate-900 border border-slate-700 rounded px-1 py-0.5 text-[10px] font-mono text-amber-300 outline-none focus:border-amber-400"
+                spellCheck={false}
+              />
+            </div>
+          </div>
+        )}
         {layer.role === 'waveguide' && (() => {
           const cwVal = evalExpr(layer.core_width, paramValues);
           const shVal = evalExpr(layer.slab_height, paramValues);

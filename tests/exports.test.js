@@ -1635,3 +1635,136 @@ describe('HFSS export-mode banners (silent-skip failures made loud)', () => {
     expect(code).not.toContain('PORT RECT(S) WITHOUT AN EXCITATION');
   });
 });
+
+describe('zero-thickness sheet impedance: replicas + per-layer Rs/Xs', () => {
+  // Meander-shaped fixture: sheet union (h_cond = 0) with the full
+  // repeat → rotate → duplicate_mirror chain, exactly the cluster whose
+  // replicas were silently exported WITHOUT the impedance boundary (the
+  // clone-extend check ran before the united-survivor rename).
+  const sheetMeanderScene = (stackPatch) => {
+    const s = makeBlankScene();
+    s.params.h_cond = { expr: '0', unit: 'µm', desc: '' };
+    s.components.push(
+      { id: 'barA', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: '10', h: '2', cutouts: [], transforms: [], consumedBy: 'u1' },
+      { id: 'barB', kind: 'rect', layer: 'electrode', cx: 0, cy: 10, w: '10', h: '2', cutouts: [], transforms: [], consumedBy: 'u1' },
+      {
+        id: 'u1', kind: 'boolean', op: 'union', operandIds: ['barA', 'barB'],
+        layer: 'electrode', cx: 0, cy: 5, w: '0', h: '0', cutouts: [],
+        transforms: [
+          { id: 't1', kind: 'repeat', enabled: true, n: '2', dx: '0', dy: '27', includeOriginal: true },
+          { id: 't2', kind: 'rotate', enabled: true, angle: '180', pivot: 'C' },
+          { id: 't3', kind: 'duplicate_mirror', enabled: true, axis: 'x', offset: '120', includeOriginal: true },
+        ],
+      },
+    );
+    let scene = normalizeScene(s);
+    if (stackPatch) scene = { ...scene, stack: stackPatch(scene.stack) };
+    return scene;
+  };
+
+  it('EVERY chain clone of a sheet union joins the impedance boundary', () => {
+    const scene = sheetMeanderScene();
+    const pv = resolveParams(scene.params).values;
+    const code = generateHfssNative(scene, pv, {});
+    const m = code.match(/AssignImpedance\(\s*\["NAME:PEC_sheets",\s*"Objects:=", \[([^\]]*)\]/);
+    expect(m).toBeTruthy();
+    // repeat n=2 → u1_1, u1_2; duplicate_mirror → one clone PER part
+    // (u1_3, u1_1_1, u1_2_1 under HFSS's per-base suffix rule).
+    for (const n of ['u1', 'u1_1', 'u1_2', 'u1_3', 'u1_1_1', 'u1_2_1']) {
+      expect(m[1]).toContain(`"${n}"`);
+    }
+  });
+
+  it("the layer's sheetRs/sheetXs are emitted VERBATIM (Freq allowed); blank → near-PEC", () => {
+    const scene = sheetMeanderScene(stack => stack.map(l => (
+      l.role === 'conductor' ? { ...l, sheetRs: '0.5', sheetXs: '2*pi*Freq*10e-12' } : l
+    )));
+    const pv = resolveParams(scene.params).values;
+    const code = generateHfssNative(scene, pv, {});
+    expect(code).toMatch(/"Resistance:=", "0\.5"/);
+    expect(code).toMatch(/"Reactance:=", "2\*pi\*Freq\*10e-12"/);
+    // wizard override still wins over the layer values
+    const code2 = generateHfssNative(scene, pv, { sheetImpedance: { resistance: '0.9', reactance: '1' } });
+    expect(code2).toMatch(/"Resistance:=", "0\.9"/);
+    expect(code2).not.toMatch(/"Reactance:=", "2\*pi\*Freq\*10e-12"/);
+  });
+
+  it('operand-owned chain clones CONSUMED by the union leave the boundary list', () => {
+    // barA carries its OWN repeat: barA_1/barA_2 are created, join
+    // zeroThicknessSheets at the primitive stage, then the Unite consumes
+    // them (KeepOriginals=False). Leaving them in the AssignImpedance
+    // Objects list made AEDT reject the WHOLE boundary (nonexistent
+    // object) — every sheet in the group exported boundary-less.
+    const s = makeBlankScene();
+    s.params.h_cond = { expr: '0', unit: 'µm', desc: '' };
+    s.components.push(
+      {
+        id: 'barA', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: '10', h: '2', cutouts: [],
+        transforms: [{ id: 't1', kind: 'repeat', enabled: true, n: '2', dx: '0', dy: '8', includeOriginal: true }],
+        consumedBy: 'u1',
+      },
+      { id: 'barB', kind: 'rect', layer: 'electrode', cx: 0, cy: 4, w: '2', h: '10', cutouts: [],
+        transforms: [{ id: 't2', kind: 'repeat', enabled: true, n: '1', dx: '20', dy: '0', includeOriginal: true }],
+        consumedBy: 'u1' },
+      { id: 'u1', kind: 'boolean', op: 'union', operandIds: ['barA', 'barB'], layer: 'electrode',
+        cx: 0, cy: 4, w: '0', h: '0', cutouts: [], transforms: [] },
+    );
+    const scene = normalizeScene(s);
+    const pv = resolveParams(scene.params).values;
+    const code = generateHfssNative(scene, pv, {});
+    const m = code.match(/AssignImpedance\(\s*\["NAME:PEC_sheets",\s*"Objects:=", \[([^\]]*)\]/);
+    expect(m).toBeTruthy();
+    expect(m[1]).toContain('"u1"');
+    // consumed by the Unite — must NOT be referenced by the boundary
+    for (const gone of ['barA_1', 'barA_2', 'barB', 'barB_1']) {
+      expect(m[1]).not.toContain(`"${gone}"`);
+    }
+  });
+
+  it('PARTIAL wizard override falls back PER FIELD to the layer values', () => {
+    const scene = sheetMeanderScene(stack => stack.map(l => (
+      l.role === 'conductor' ? { ...l, sheetXs: '2*pi*Freq*10e-12' } : l
+    )));
+    const pv = resolveParams(scene.params).values;
+    // wizard types ONLY Rs — the layer's kinetic-inductance Xs must survive
+    const code = generateHfssNative(scene, pv, { sheetImpedance: { resistance: '0.05', reactance: '' } });
+    expect(code).toMatch(/"Resistance:=", "0\.05"/);
+    expect(code).toMatch(/"Reactance:=", "2\*pi\*Freq\*10e-12"/);
+  });
+
+  it('renameIdentInScene + delete guard cover sheetRs/sheetXs', async () => {
+    const { renameIdentInScene } = await import('../src/scene/rename-ident.js');
+    const scene = sheetMeanderScene(stack => stack.map(l => (
+      l.role === 'conductor' ? { ...l, sheetXs: '2*pi*Freq*Lk*1e-12' } : l
+    )));
+    const renamed = renameIdentInScene(scene, 'Lk', 'L_kinetic');
+    const cond = renamed.stack.find(l => l.role === 'conductor');
+    expect(cond.sheetXs).toBe('2*pi*Freq*L_kinetic*1e-12');
+  });
+
+  it('two zero-thickness conductor layers with different Rs get SEPARATE boundaries', () => {
+    const scene = (() => {
+      const s = makeBlankScene();
+      s.params.h_cond = { expr: '0', unit: 'µm', desc: '' };
+      s.components.push(
+        { id: 'e1', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: '10', h: '10', cutouts: [], transforms: [], conductorLayerId: 'l_cond' },
+        { id: 'e2', kind: 'rect', layer: 'electrode', cx: 30, cy: 0, w: '10', h: '10', cutouts: [], transforms: [], conductorLayerId: 'l_cond2' },
+      );
+      let sc = normalizeScene(s);
+      sc = {
+        ...sc,
+        stack: [
+          ...sc.stack.map(l => (l.role === 'conductor' ? { ...l, sheetRs: '0.1' } : l)),
+          { id: 'l_cond2', name: 'KI metal', thickness: '0', material: 'gold', color: '#aa0000', role: 'conductor', sheetXs: '2*pi*Freq*5e-12' },
+        ],
+      };
+      return sc;
+    })();
+    const pv = resolveParams(scene.params).values;
+    const code = generateHfssNative(scene, pv, {});
+    expect(code).toContain('NAME:PEC_sheets_l_cond"');
+    expect(code).toContain('NAME:PEC_sheets_l_cond2"');
+    expect(code).toMatch(/PEC_sheets_l_cond"[\s\S]{0,200}"Resistance:=", "0\.1"/);
+    expect(code).toMatch(/PEC_sheets_l_cond2"[\s\S]{0,200}"Reactance:=", "2\*pi\*Freq\*5e-12"/);
+  });
+});

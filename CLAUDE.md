@@ -823,6 +823,39 @@ evalExpr. gdsfactory's `exprToPython` converts `deg` with a NUMERIC
 radian factor (inserting `math.pi` before the bare-pi pass garbled it
 into `math.math.pi`).
 
+**Zero-thickness sheet impedance** is resolved PER FIELD (Rs and Xs
+independently) in priority: (1) `options.sheetImpedance` (2-line wizard)
+— but only for the field(s) actually typed; a BLANK wizard field falls
+through (an object-takes-both rule silently zeroed a layer's kinetic Xs
+when the wizard typed only Rs — real bug, fixed); (2) the sheet's
+conductor LAYER's own `sheetRs`/`sheetXs` fields (LAYERS panel, shown
+only when the layer thickness matches the exporter's sheet gate
+`abs(t) < 1e-9` — keep the panel/TwoLineWizard gates aligned with that
+epsilon; verbatim HFSS exprs, `Freq`/`pi`/design vars allowed); (3)
+near-PEC default (0.001 + j0). `sheetRs`/`sheetXs` are registered in
+`rename-ident.js` STACK_EXPR_FIELDS and the deleteParam guard
+(PhotonicLayout.jsx) so param rename/delete can't silently orphan them —
+but deliberately NOT in `paramsForStack` (schema.js), which would
+auto-create `Freq`/`pi` as bogus µm params. Sheets are GROUPED BY LAYER
+— one `AssignImpedance` per distinct zero-thickness conductor layer
+(single group keeps the historical name `PEC_sheets`; multiple →
+`PEC_sheets_<layerId>`). `registerSheet(name, comp)` is THE way a sheet
+joins the boundary (records the resolved layer in `sheetLayerByName`);
+transform-chain clones and boolean renames inherit the entry. TWO
+list-hygiene bugs fixed here, same failure mode (AssignImpedance
+referencing a nonexistent name → AEDT rejects the WHOLE boundary → every
+sheet in the group exports boundary-less / electromagnetically absent):
+(a) the boolean clone-extend check must match operand[0]'s ORIGINAL name
+too (`base0Id`) — the united survivor's rename into the boolean's id
+happens AFTER the chain emission, so checking only the boolean id
+dropped every repeated/mirrored meander replica from the boundary; (b)
+every part CONSUMED by a boolean must be REMOVED from the tracked lists
+— union/intersect consume everything except operand[0]'s first part,
+subtract/punch consume all tool parts, INCLUDING operand-owned
+transform-chain clones (`barA_1`, …) that joined `zeroThicknessSheets`
+at the primitive stage (removing only tool BASE names left stale names
+in the Objects list).
+
 `options.sheetImpedance = { resistance, reactance }` overrides the zero-thickness
 conductor sheet boundary (`PEC_sheets` `AssignImpedance`): the two strings are
 emitted VERBATIM into the Resistance/Reactance fields (Ω/sq), so they may be HFSS

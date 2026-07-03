@@ -5230,7 +5230,7 @@ export default function App() {
 
   const deleteParam = async (name) => {
     // Don't allow deletion if the parameter is referenced by ANY layer field in the stack
-    const STACK_EXPR_FIELDS = ['thickness', 'core_width', 'slab_height', 'slab_width', 'etch_angle'];
+    const STACK_EXPR_FIELDS = ['thickness', 'core_width', 'slab_height', 'slab_width', 'etch_angle', 'sheetRs', 'sheetXs'];
     const findUsingLayer = () => {
       for (const l of (scene.stack || [])) {
         for (const f of STACK_EXPR_FIELDS) {

@@ -39,7 +39,12 @@ const TRANSFORM_EXPR_FIELDS = ['dx', 'dy', 'angle', 'n', 'offset', 'px', 'py'];
 // through untouched while a snap vertex carrying a taper width still
 // gets its width expression rewritten.
 const VERTEX_EXPR_FIELDS    = ['dx', 'dy', 'cdx', 'cdy', 'angle', 'width'];
-const STACK_EXPR_FIELDS     = ['thickness', 'core_width', 'slab_height', 'slab_width', 'etch_angle'];
+// sheetRs/sheetXs are HFSS surface-impedance expressions on zero-thickness
+// conductor layers — they may reference design params (e.g. Lk), which must
+// track renames. (Intrinsics like Freq/pi are never scene params, so the
+// walker's exact-identifier replace can't touch them. Deliberately NOT in
+// schema.js paramsForStack — that would auto-create Freq/pi as um params.)
+const STACK_EXPR_FIELDS     = ['thickness', 'core_width', 'slab_height', 'slab_width', 'etch_angle', 'sheetRs', 'sheetXs'];
 const SIM_EXPR_FIELDS       = ['fnominal', 'padXNeg', 'padXPos', 'padYNeg', 'padYPos', 'airPad'];
 
 // Rewrite the listed fields on a shallow copy of `obj`. String fields

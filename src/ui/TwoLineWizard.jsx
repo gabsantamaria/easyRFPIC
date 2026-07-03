@@ -122,7 +122,8 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
   // may use the intrinsic Freq (Hz) — e.g. a kinetic inductance Lk pH/sq is
   // Xs = 2*pi*Freq*Lk*1e-12. Only meaningful (and shown) when the conductor layer
   // resolves to zero thickness.
-  const condIsSheet = !(condThkResolved > 0);
+  // Matches the exporter's sheet-vs-solid gate (abs(t) < 1e-9).
+  const condIsSheet = Math.abs(condThkResolved) < 1e-9;
   const [sheetRs, setSheetRs] = useState(() => (prefs && prefs.sheetRs ? prefs.sheetRs : ''));
   const [sheetXs, setSheetXs] = useState(() => (prefs && prefs.sheetXs ? prefs.sheetXs : ''));
   const thkNum = q3dThk.trim() === '' ? null : Number(q3dThk);
@@ -227,7 +228,9 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
       ? { conductorIds: [...q3dPick], ...q3dOpts() }
       : undefined;
     // Custom zero-thickness sheet impedance only when the conductor is a sheet
-    // and the user typed something (else the export keeps its near-PEC default).
+    // and the user typed something. Resolution in the export is PER FIELD:
+    // a blank wizard field falls back to the layer's sheetRs/sheetXs, then
+    // near-PEC — so typing only Rs here can't zero a layer's kinetic Xs.
     const sheetImpedance = (condIsSheet && (sheetRs.trim() || sheetXs.trim()))
       ? { resistance: sheetRs.trim(), reactance: sheetXs.trim() }
       : undefined;
@@ -332,7 +335,8 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
               <p className="text-[10px] uppercase tracking-wider text-slate-500">Sheet impedance (conductor thickness = 0)</p>
               <p className="text-[11px] text-slate-400 leading-relaxed">
                 The conductor layer resolves to <span className="font-mono">0</span> thickness, so each trace is a 2-D sheet with a
-                surface-impedance boundary <span className="font-mono">Rs + j·Xs</span> (Ω/sq). Blank → near-PEC
+                surface-impedance boundary <span className="font-mono">Rs + j·Xs</span> (Ω/sq). A blank field falls back to the
+                LAYER's own sheet Rs/Xs (LAYERS panel), else near-PEC
                 (<span className="font-mono">Rs = 0.001, Xs = 0</span>). Entries are HFSS expressions and may use the intrinsic
                 <span className="font-mono"> Freq</span> (Hz) and <span className="font-mono">pi</span> — e.g. a kinetic inductance
                 <span className="font-mono"> Lk = 10 pH/sq</span> is <span className="font-mono">Xs = 2*pi*Freq*10e-12</span>.

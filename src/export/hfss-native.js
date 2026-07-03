@@ -1645,6 +1645,15 @@ except:
   // entries the same way (Unite collapses operands → result name; punch
   // / subtract removes the tool entries).
   const zeroThicknessSheets = [];
+  // Sheet name → conductor-layer id, so the impedance-boundary block can
+  // group sheets per layer (each zero-thickness conductor layer can carry
+  // its own sheet Rs/Xs). Clones and boolean renames inherit the entry.
+  const sheetLayerByName = new Map();
+  const registerSheet = (name, comp) => {
+    if (!zeroThicknessSheets.includes(name)) zeroThicknessSheets.push(name);
+    const { layer: shLayer } = resolveCondForComp(comp);
+    if (shLayer) sheetLayerByName.set(name, shLayer.id);
+  };
   // Relative coordinate system definitions, one per rib waveguide.
   // Collected during the per-waveguide emit and emitted as a SINGLE
   // block at the very end of the script — AFTER all geometry, all
@@ -1909,7 +1918,7 @@ except Exception as e:
     except:
         pass
 `;
-        zeroThicknessSheets.push(id);
+        registerSheet(id, c);
       } else {
         // Solid strap: closed profile ring — lower Spline, up Line, upper
         // Spline, closing Line (7 points incl. the closing repeat).
@@ -2518,7 +2527,7 @@ except Exception as e:
           if (c.layer === 'electrode') emittedElecNames.push(id);
           else if (c.layer === 'waveguide') emittedWgNames.push(id);
           else if (c.layer === 'port') emittedPortNames.push(id);
-          if (isSheet && c.layer === 'electrode') zeroThicknessSheets.push(id);
+          if (isSheet && c.layer === 'electrode') registerSheet(id, c);
           if (curvedFallback) {
             noteFrozen(c.id, 'tapered polyline arc/spline segments frozen at constant base width (numeric tessellation, v1)');
           }
@@ -2707,7 +2716,7 @@ except Exception as e:
         else if (c.layer === 'port') emittedPortNames.push(id);
         // Zero-thickness sheet polylines need impedance boundary too.
         if (isSheet && c.layer === 'electrode') {
-          zeroThicknessSheets.push(id);
+          registerSheet(id, c);
         }
         if (!polyHasFrozenVertex) {
           notePara(c.id, hasArc
@@ -3223,7 +3232,7 @@ except Exception as e:
       if (c.layer === 'waveguide') emittedWgNames.push(id);
       else if (c.layer === 'port') emittedPortNames.push(id);
       else emittedElecNames.push(id);
-      if (isSheetRR && c.layer === 'electrode') zeroThicknessSheets.push(id);
+      if (isSheetRR && c.layer === 'electrode') registerSheet(id, c);
       notePara(`${c.id}.cornerRadius`, 'corner fillets (parametric tangent points + 90deg AngularArc centers)');
       continue;
     }
@@ -3711,7 +3720,7 @@ except Exception as e:
       // electric conductor with no volumetric mesh — much cheaper for
       // thin metal traces.
       if (Math.abs(elecThickness) < 1e-9) {
-        zeroThicknessSheets.push(id);
+        registerSheet(id, c);
         code += `safe_create_rectangle(
     ["NAME:RectangleParameters",
      "IsCovered:=", True,
@@ -4290,9 +4299,11 @@ except Exception as e:
     // the sheet list with the new names so the boundary block at the end
     // covers the entire cluster.
     if (zeroThicknessSheets.includes(id)) {
+      const inheritLayer = sheetLayerByName.get(id);
       for (const name of finalPartIds) {
         if (name !== id && !zeroThicknessSheets.includes(name)) {
           zeroThicknessSheets.push(name);
+          if (inheritLayer) sheetLayerByName.set(name, inheritLayer);
         }
       }
     }
@@ -4430,10 +4441,20 @@ except Exception as e:
       // produces a sheet), every clone the transform chain creates also
       // needs the impedance boundary. Add the new names so the boundary
       // block at the end covers the entire cluster.
-      if (zeroThicknessSheets.includes(safeBoolId)) {
+      // NOTE the includes() must ALSO match operand[0]'s ORIGINAL name —
+      // at this point the sheet list still holds base0Id (e.g.
+      // meander_rail_L); the rename to the boolean's id happens BELOW.
+      // Checking only safeBoolId silently skipped every chain clone, so
+      // a repeated/mirrored sheet meander had the impedance boundary on
+      // the base cell ONLY (replicas exported as bare, boundary-less
+      // sheets — electromagnetically absent).
+      const base0IdForSheets = ids[0].replace(/[^A-Za-z0-9_]/g, '_');
+      if (zeroThicknessSheets.includes(safeBoolId) || zeroThicknessSheets.includes(base0IdForSheets)) {
+        const inheritLayer = sheetLayerByName.get(safeBoolId) ?? sheetLayerByName.get(base0IdForSheets);
         for (const name of finalBoolIds) {
           if (name !== safeBoolId && !zeroThicknessSheets.includes(name)) {
             zeroThicknessSheets.push(name);
+            if (inheritLayer) sheetLayerByName.set(name, inheritLayer);
           }
         }
       }
@@ -4468,6 +4489,9 @@ except Exception as e:
         // result when the operands are sheets, so the boolean's id
         // inherits the sheet treatment (and the impedance boundary).
         renameInList(zeroThicknessSheets, base0Id, safeBoolId);
+        if (sheetLayerByName.has(base0Id) && !sheetLayerByName.has(safeBoolId)) {
+          sheetLayerByName.set(safeBoolId, sheetLayerByName.get(base0Id));
+        }
       }
       // (Multi-part subtract result: operand[0]'s base name still exists
       // as one of the surviving parts, so we leave the lists alone for
@@ -4476,13 +4500,24 @@ except Exception as e:
       // pre-existing limitation affects cladding subtract for any
       // transformed electrode and is independent of this bug fix.)
 
-      // Non-first operands are consumed by the subtract (and clones in
-      // a punch are consumed too — they're the "Tool Parts" of the
-      // KeepOriginals=False subtract).
-      for (const oldId of toolIds) {
+      // Every part CONSUMED by the boolean must leave the tracked lists.
+      // union/intersect consume EVERYTHING except operand[0]'s FIRST part
+      // (the Unite survivor); subtract/punch consume all tool parts.
+      // Critically this includes operand-owned transform-chain CLONES
+      // (barA_1, …): they're in the Unite/Subtract selection
+      // (KeepOriginals=False) AND in zeroThicknessSheets from the
+      // primitive-stage clone-extend — leaving them in made
+      // AssignImpedance reference destroyed objects, AEDT rejected the
+      // whole boundary, and EVERY sheet in that layer group exported
+      // boundary-less (removing only the tool BASE names was not enough).
+      const consumedParts = (b.op === 'union' || b.op === 'intersect')
+        ? [...baseParts.slice(1), ...toolParts]
+        : [...toolParts];
+      for (const oldId of consumedParts) {
         removeFromList(emittedElecNames, oldId);
         removeFromList(emittedWgNames, oldId);
         removeFromList(zeroThicknessSheets, oldId);
+        sheetLayerByName.delete(oldId);
       }
     }
   }
@@ -4502,52 +4537,75 @@ except Exception as e:
   // Project > Boundaries > "PEC_sheets" > Edit if a more physically-
   // accurate sheet resistance is wanted.
   if (zeroThicknessSheets.length > 0) {
-    const objList = zeroThicknessSheets.map(n => `"${n}"`).join(', ');
-    // Surface impedance Rs + j*Xs (Ohm/sq). Default = near-PEC (R=0.001, X=0).
-    // A caller (e.g. the 2-line wizard, for a zero-thickness superconductor)
-    // may override BOTH with arbitrary HFSS expressions — these are passed
-    // VERBATIM into AssignImpedance's Resistance/Reactance fields, so they can
-    // reference HFSS's intrinsic `Freq` (Hz) and `pi` plus any design variable.
-    // E.g. a kinetic inductance Lk = 10 pH/sq is Xs = "2*pi*Freq*10e-12".
+    // Surface impedance Rs + j*Xs (Ohm/sq), resolved PER FIELD in priority:
+    //   1. options.sheetImpedance (the 2-line wizard) — GLOBAL override,
+    //      but only for the field(s) the user actually typed; a BLANK
+    //      wizard field falls through (a truthy-object-takes-both rule
+    //      silently zeroed the layer's other field — e.g. wizard Rs typed
+    //      → the layer's kinetic-inductance Xs dropped to 0);
+    //   2. the sheet's zero-thickness conductor LAYER's own sheetRs /
+    //      sheetXs fields (LAYERS panel, shown when thickness = 0);
+    //   3. the near-PEC default (R = 0.001, X = 0 — exact 0 is rejected
+    //      as singular by some HFSS releases).
+    // All values are HFSS expressions passed VERBATIM into
+    // AssignImpedance, so they may reference the intrinsic `Freq` (Hz),
+    // `pi`, and any design variable — e.g. a kinetic inductance Lk pH/sq
+    // is Xs = 2*pi*Freq*Lk*1e-12.
+    // Sheets are GROUPED BY LAYER: one AssignImpedance per distinct
+    // zero-thickness conductor layer, so different layers can carry
+    // different surface impedances. A single group keeps the historical
+    // boundary name "PEC_sheets".
     const si = (options && options.sheetImpedance) || null;
     const clean = (v, fallback) => {
-      const s = String(v ?? '').trim();
-      return s ? s.replace(/"/g, "'") : fallback;
+      const str = String(v ?? '').trim();
+      return str ? str.replace(/"/g, "'") : fallback;
     };
-    const rsExpr = si ? clean(si.resistance, '0.001') : '0.001';
-    const xsExpr = si ? clean(si.reactance, '0') : '0';
-    const isCustom = rsExpr !== '0.001' || xsExpr !== '0';
-    const note = isCustom
-      ? `# All conductor sheets (from layers with thickness=0) get a surface
-# impedance Rs + j*Xs (Ohm/sq) from the wizard:
-#   Rs = ${rsExpr}
-#   Xs = ${xsExpr}
-# These are HFSS expressions (may use the intrinsic Freq in Hz, pi, and any
-# design variable) — e.g. a kinetic inductance Lk pH/sq is Xs = 2*pi*Freq*Lk*1e-12.`
-      : `# All conductor sheets (from layers with thickness=0) get a near-PEC
-# surface impedance: 0.001 Ohm/sq (R) + j 0 Ohm/sq (X). Exact
-# R=X=0 is rejected as singular by some HFSS releases, but 1 mOhm/sq
-# is numerically perfect-conductor-equivalent for any practical RF or
-# photonic-RF design. Edit the boundary in HFSS if you need a true
-# physical sheet resistance.`;
+    const stackById = Object.fromEntries((stack || []).map(l => [l.id, l]));
+    const groups = new Map(); // layerId ('' = unresolved) -> names[]
+    for (const n of zeroThicknessSheets) {
+      const lid = sheetLayerByName.get(n) || '';
+      if (!groups.has(lid)) groups.set(lid, []);
+      groups.get(lid).push(n);
+    }
     code += `
 # ===== Zero-thickness conductor sheets: impedance boundary =====
-${note}
+# Sheets from thickness = 0 conductor layers get a surface impedance
+# Rs + j*Xs (Ohm/sq): the wizard's values if provided, else the layer's
+# own sheet Rs/Xs (LAYERS panel), else a near-PEC 0.001 + j0 default.
+# Values are HFSS expressions (may use the intrinsic Freq in Hz, pi, and
+# any design variable) — e.g. kinetic inductance Lk pH/sq: Xs = 2*pi*Freq*Lk*1e-12.
+`;
+    const multi = groups.size > 1;
+    for (const [lid, names] of groups) {
+      const layer = lid ? stackById[lid] : null;
+      const layerRs = clean(layer && layer.sheetRs, '0.001');
+      const layerXs = clean(layer && layer.sheetXs, '0');
+      const rsExpr = si ? clean(si.resistance, layerRs) : layerRs;
+      const xsExpr = si ? clean(si.reactance, layerXs) : layerXs;
+      const wizardTyped = !!(si && (String(si.resistance ?? '').trim() || String(si.reactance ?? '').trim()));
+      const layerTyped = !!(layer && (String(layer.sheetRs || '').trim() || String(layer.sheetXs || '').trim()));
+      const src = wizardTyped
+        ? (layerTyped ? 'wizard override, blanks from layer' : 'wizard override')
+        : (layerTyped ? `layer "${ascii(layer.name || lid)}"` : 'near-PEC default');
+      const bname = multi ? `PEC_sheets_${(lid || 'default').replace(/[^A-Za-z0-9_]/g, '_')}` : 'PEC_sheets';
+      const objList = names.map(n => `"${n}"`).join(', ');
+      code += `# ${bname}: Rs = ${ascii(rsExpr)}, Xs = ${ascii(xsExpr)} (${ascii(src)})
 try:
     oBoundarySetup_imp = oDesign.GetModule("BoundarySetup")
-    _delete_boundary_if_exists("PEC_sheets")
+    _delete_boundary_if_exists("${bname}")
     oBoundarySetup_imp.AssignImpedance(
-        ["NAME:PEC_sheets",
+        ["NAME:${bname}",
          "Objects:=", [${objList}],
          "Resistance:=", "${rsExpr}",
          "Reactance:=", "${xsExpr}",
          "InfGroundPlane:=", False])
 except Exception as e:
     try:
-        oDesktop.AddMessage("", "", 1, "Failed to assign impedance boundary on conductor sheets: " + str(e))
+        oDesktop.AddMessage("", "", 1, "Failed to assign impedance boundary ${bname}: " + str(e))
     except:
         pass
 `;
+    }
   }
 
   // Cladding: created LAST, then subtracts all WGs and electrodes from itself.
