@@ -613,7 +613,16 @@ lines get a single `<id>_L` length param (signed via `-(<id>_L)`).
 Canvas renders it as a dashed rose cut line with per-line letters (A—A′,
 B—B′ by order among section comps), end ticks, and — when selected — an
 ARROWED length dimension (param name shown when vertex 1 is a lone-param
-ref). The render group carries `data-nonmodel="1"`.
+ref). The render group carries `data-nonmodel="1"`. RENDER-PASS GOTCHA:
+Canvas pass1 iterates a HARD-CODED layer list (waveguide/electrode/via/
+bridge/port/**section** — section LAST so cut lines always paint above
+geometry); a layer missing from that list never renders when UNSELECTED
+(pass2 only carries selected/related comps) — that's how section lines
+originally vanished the moment a newly drawn component stole the
+selection. A toolbar "sections" toggle (shown only when the scene has
+section lines) flips the same 'section' visibility family as the LAYERS
+panel eye (canvas-only, scene/exports untouched); deletion is the normal
+Delete-key / context-menu path like any component.
 
 **Non-model contract** (`isNonModelComponent(c)` in schema.js — layer ===
 'section'): every exporter filters it AFTER solving (`solvedAll` →

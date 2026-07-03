@@ -4368,8 +4368,13 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         const pass1 = [];
         // 'via' renders above electrodes (it's a plug THROUGH the metal),
         // 'bridge' above vias (it flies OVER the metal plane), both below
-        // ports (translucent overlays stay on top).
-        for (const layer of ['waveguide', 'electrode', 'via', 'bridge', 'port']) {
+        // ports (translucent overlays stay on top). 'section' is LAST:
+        // cut-line annotations always paint above geometry — and a layer
+        // MISSING from this list never renders at all when unselected
+        // (pass2 only takes selected/related comps), which is exactly how
+        // section lines used to vanish the moment focus moved to a newly
+        // drawn component.
+        for (const layer of ['waveguide', 'electrode', 'via', 'bridge', 'port', 'section']) {
           for (const c of solved) {
             if (c.layer === layer && isInPass1(c) && !isBoolOperand(c) && !isBoolComp(c)) pass1.push(c);
           }

@@ -6423,6 +6423,27 @@ export default function App() {
             >
               <Ruler size={11} /> dimensions
             </button>
+            {/* Section-line visibility: same 'section' family the LAYERS
+                panel eye toggles — one keystroke-free way to declutter the
+                canvas without touching the scene (canvas-only, like every
+                layer eye; the wizards and the SHAPES panel still see them). */}
+            {scene.components.some(c => c.layer === 'section') && (
+              <button
+                onClick={() => toggleLayerVisibility('section')}
+                className={`flex items-center gap-1 px-2 py-1 rounded text-xs ${!hiddenLayerKeys.has('section') ? 'text-white' : 'border border-slate-600 hover:bg-slate-800 opacity-70'}`}
+                style={!hiddenLayerKeys.has('section') ? { background: '#be123c' } : undefined}
+                title={hiddenLayerKeys.has('section')
+                  ? 'Section lines hidden — click to show the A—A′ cut lines again. (Canvas-only: they stay in the scene and the wizards.)'
+                  : 'Section lines visible — click to hide every A—A′ cut line on the canvas. (Canvas-only: they stay in the scene and the wizards.)'}
+              >
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
+                  <line x1="4" y1="20" x2="20" y2="4" strokeDasharray="4 2.5" />
+                  <line x1="2" y1="16" x2="8" y2="22" />
+                  <line x1="16" y1="2" x2="22" y2="8" />
+                </svg>
+                {hiddenLayerKeys.has('section') ? 'sections off' : 'sections'}
+              </button>
+            )}
           </div>
           <div className="flex items-center gap-1.5">
             <button onClick={undo} disabled={history.length === 0} className="flex items-center gap-1 px-2 py-1 rounded text-xs border border-slate-600 hover:bg-slate-800 disabled:opacity-30" title="Undo (Cmd/Ctrl+Z)">
