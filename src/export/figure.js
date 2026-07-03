@@ -38,6 +38,12 @@ function cloneSvgForExport(svgEl, options = {}) {
     throw new Error('cloneSvgForExport: missing SVG element');
   }
   const cloned = svgEl.cloneNode(true);
+  // Non-model annotations (section lines) are canvas-only: the user's
+  // figure export must show GEOMETRY, not slicing marks. Their render
+  // groups carry data-nonmodel="1" precisely so this clone can drop them.
+  try {
+    for (const el of cloned.querySelectorAll('[data-nonmodel]')) el.remove();
+  } catch { /* querySelectorAll unavailable on exotic clones — keep going */ }
   // Strip explicit no-export-marked elements.
   for (const el of Array.from(cloned.querySelectorAll(`[${STRIP_ATTR}]`))) {
     el.parentNode?.removeChild(el);

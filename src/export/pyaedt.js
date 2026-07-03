@@ -9,6 +9,7 @@
 //
 // Extracted from PhotonicLayout.jsx as Stage 2.2 of the planned refactor.
 import { evalExpr, topoSortParams } from '../scene/params.js';
+import { isNonModelComponent } from '../scene/schema.js';
 import { anchorLocal } from '../scene/anchors.js';
 import { solveLayout, applyMirrors } from '../scene/solver.js';
 import { shapeInstanceToRing } from '../geometry/rings.js';
@@ -23,7 +24,13 @@ import { computeNumericLayerZ } from '../scene/layer-z.js';
 // ----------------------------------------------------------------------
 export function generatePyAEDT(scene, paramValues) {
   const { params, components, snaps, mirrors } = scene;
-  const solved = applyMirrors(solveLayout(components, snaps, paramValues), mirrors);
+  const solvedAll = applyMirrors(solveLayout(components, snaps, paramValues), mirrors);
+  // Non-model components (section lines) are solver-visible — a child
+  // snapped to one must land where the canvas puts it — but never emit
+  // geometry. Parametric positions are computed on the FULL solved list
+  // (pure param expressions, no object references), then everything
+  // downstream sees only physical components.
+  const solved = solvedAll.filter(c => !isNonModelComponent(c));
 
   // Numeric per-layer Z map (zBottom / zTop per stack layer) for via
   // emission. Same walk as the native exporter's layerZ, NUMERIC ONLY —
@@ -274,7 +281,7 @@ def build_wg(name, cx, cy, w, h):
       // the same tessellation the canvas and GDS use). For parametric
       // vertex / arc / spline tracking through HFSS sweeps, see the
       // native-COM export.
-      const compById_ps = Object.fromEntries(solved.map(cc => [cc.id, cc]));
+      const compById_ps = Object.fromEntries(solvedAll.map(cc => [cc.id, cc])) /* FULL list: snap-vertices may target section lines */;
       const verts = tessellatePolylinePath(c, compById_ps, paramValues);
       const zOrigin = c.layer === 'waveguide' ? '0' : 'h_wg';
       const ptsStr = verts.map(([x, y]) => `["${x.toFixed(3)}um", "${y.toFixed(3)}um", "${zOrigin}"]`).join(', ');
@@ -286,7 +293,7 @@ def build_wg(name, cx, cy, w, h):
       // (arcs, splines, and per-vertex tapers are captured at export
       // values; the native-COM export is the fully parametric path
       // with AngularArc / Spline segments and parametric taper quads).
-      const compById_pl = Object.fromEntries(solved.map(cc => [cc.id, cc]));
+      const compById_pl = Object.fromEntries(solvedAll.map(cc => [cc.id, cc])) /* FULL list: snap-vertices may target section lines */;
       const zOrigin = c.layer === 'waveguide' ? '0' : 'h_wg';
       if (polylineIsTapered(c)) {
         // Tapered: per-segment quads (butt joins — same band geometry

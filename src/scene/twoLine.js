@@ -369,7 +369,35 @@ function autoEnableFlankedPorts(components, snaps, pv) {
 export function buildTwoLineScene(scene, cfg) {
   const warnings = [];
   const src = normalizeScene(scene);
-  const allIds = (src.components || []).map((c) => c.id);
+  // Section lines are non-model annotations — stamping them twice into
+  // lineA/lineB would put phantom components (and their <prefix>_L params)
+  // in the built scene. Exporters would skip them anyway; drop them here
+  // so the cell def is clean. BUT: a physical component can be snap-
+  // positioned OFF a section line (alt-drag offers section anchors);
+  // dropping the line strips that snap at the cell boundary and the child
+  // would be captured at its RAW scene cx/cy — which is STALE for snap-
+  // bound parts (the solver never writes positions back). Bake the SOLVED
+  // positions into the capture source first, so an un-snapped child lands
+  // exactly where the canvas shows it.
+  {
+    const pvBake = resolveParams(src.params).values;
+    const solvedBake = solveLayout(src.components, src.snaps, pvBake);
+    const posById = Object.fromEntries(solvedBake.map((c) => [c.id, c]));
+    src.components = src.components.map((c) => {
+      const sv = posById[c.id];
+      return sv && Number.isFinite(sv.cx) && Number.isFinite(sv.cy)
+        ? { ...c, cx: sv.cx, cy: sv.cy } : c;
+    });
+    for (const sn of src.snaps || []) {
+      const fromC = src.components.find((c) => c.id === sn.from?.compId);
+      if (fromC && fromC.layer === 'section') {
+        warnings.push(`"${sn.to?.compId}" was snapped to section line "${fromC.id}" — the 2-line build drops that link and bakes the solved position.`);
+      }
+    }
+  }
+  const allIds = (src.components || [])
+    .filter((c) => c.layer !== 'section')
+    .map((c) => c.id);
   if (allIds.length === 0) throw new Error('The design has no components to build a line from.');
 
   const { def, warnings: cellWarnings } = makeCellFromSelection(src, allIds, 'twoline');

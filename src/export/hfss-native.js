@@ -18,7 +18,7 @@ import { parseAnchor, anchorLocal, anchorLocalInstance } from '../scene/anchors.
 import { solveLayout, applyMirrors } from '../scene/solver.js';
 import { expandTransforms } from '../scene/transforms.js';
 import { detectPortIntegrationLine } from '../scene/lumpedPort.js';
-import { migrateStackCoplanarGroups } from '../scene/schema.js';
+import { migrateStackCoplanarGroups, isNonModelComponent } from '../scene/schema.js';
 import { shapeInstanceToRing } from '../geometry/rings.js';
 import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/racetrack.js';
 import { instanceChainOffsetExpr, chainOwnerForInstance } from '../scene/instance-positions.js';
@@ -689,13 +689,24 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   //   want to recreate every export.
   const appendToActive = !!options.appendToActive;
   const { params, components, mirrors, snaps, stack } = scene;
-  const solved = applyMirrors(solveLayout(components, snaps, paramValues), mirrors);
+  const solvedAll = applyMirrors(solveLayout(components, snaps, paramValues), mirrors);
+  // Non-model components (section lines) are solver-visible — a child
+  // snapped to one must land where the canvas puts it — but never emit
+  // geometry. Parametric positions are computed on the FULL solved list
+  // (pure param expressions, no object references), then everything
+  // downstream sees only physical components.
+  const solved = solvedAll.filter(c => !isNonModelComponent(c));
   // Pre-compute the full flat list of transform-expanded instances so
   // polyline emission can resolve `kind: 'snap', instanceIdx > 0`
   // vertices against the specific transform replica the user clicked
   // (e.g. the 7th cell of a 16-way repeated meander).
   const transformInstancesAll = expandTransforms(solved, paramValues);
-  const byIdSolved = Object.fromEntries(solved.map(c => [c.id, c]));
+  // Keyed-lookup map for polyline SNAP-VERTEX resolution — built from the
+  // FULL solved list: a physical trace's vertex may be pinned to a section
+  // line's anchor (draw-mode magnetism offers them), and resolving against
+  // the geometry-filtered list returned [NaN,NaN] — silent origin-spikes /
+  // dropped segments in the output while the canvas looked right.
+  const byIdSolved = Object.fromEntries(solvedAll.map(c => [c.id, c]));
 
   // Parametric position expressions: each component's cx/cy as an expression
   // string referencing snap-chain parameters. Used so that changing parameters
@@ -714,7 +725,7 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   // raw scene-stored cx/cy of "free" operands (which can be inconsistent
   // with the boolean's stored cx/cy), producing geometry that's shifted
   // from what the canvas shows.
-  const parametricPos = computeParametricPositions(solved, snaps, paramValues);
+  const parametricPos = computeParametricPositions(solvedAll, snaps, paramValues);
   // Identify mirror-target ids; those don't get parametric positions.
   const mirrorTargetIds = new Set();
   for (const m of mirrors || []) {
@@ -824,7 +835,7 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   // position. HFSS doesn't know about those synthetics — we expand them to
   // each parent's full parametric chain expression (which IS valid HFSS).
   const ppMeta = {};
-  const parametricPosForExport = computeParametricPositions(solved, snaps, paramValues, ppMeta);
+  const parametricPosForExport = computeParametricPositions(solvedAll, snaps, paramValues, ppMeta);
   // Surface the parametric CAVEATS in the safety report's NOTES section —
   // these are positions that TRACK most sweeps but carry a baked piece.
   for (const it of ppMeta.orientationBaked || []) noteCaveat(it.id, it.detail);

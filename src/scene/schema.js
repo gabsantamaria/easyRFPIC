@@ -16,6 +16,20 @@
 import defaultSceneJson from './default-scene.json' with { type: 'json' };
 
 // ----------------------------------------------------------------------
+// NON-MODEL COMPONENTS
+// ----------------------------------------------------------------------
+// A component on the 'section' layer is an ANNOTATION, not geometry: it
+// exists only on the canvas (the cross-section slicing line feeding the
+// Q2D / Tidy3D wizards). EVERY physical consumer — HFSS native, pyAEDT,
+// GDS, gdsfactory, the 3-D viewer, figure SVG/PDF export, the two-line
+// scene builder — must skip components for which this returns true.
+// Central predicate so a new exporter can't forget the rule by
+// re-deriving it from layer strings.
+export function isNonModelComponent(c) {
+  return !!c && c.layer === 'section';
+}
+
+// ----------------------------------------------------------------------
 // DEFAULT SCENE
 // ----------------------------------------------------------------------
 

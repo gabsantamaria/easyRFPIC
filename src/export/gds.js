@@ -17,6 +17,7 @@
 //
 // Extracted from PhotonicLayout.jsx as Stage 2.1 of the planned refactor.
 import { evalExpr } from '../scene/params.js';
+import { isNonModelComponent } from '../scene/schema.js';
 import { solveLayout, applyMirrors } from '../scene/solver.js';
 import { expandTransforms } from '../scene/transforms.js';
 import { tessellatePolylinePath, taperedBandQuads, polylineIsTapered } from '../geometry/polyline.js';
@@ -46,7 +47,13 @@ export function viaGdsLayerMap(components) {
 
 export function generateGDS(scene, paramValues) {
   const { components, mirrors, snaps, stack } = scene;
-  const solved = applyMirrors(solveLayout(components, snaps, paramValues), mirrors);
+  const solvedAll = applyMirrors(solveLayout(components, snaps, paramValues), mirrors);
+  // Non-model components (section lines) are solver-visible — a child
+  // snapped to one must land where the canvas puts it — but never emit
+  // geometry. Parametric positions are computed on the FULL solved list
+  // (pure param expressions, no object references), then everything
+  // downstream sees only physical components.
+  const solved = solvedAll.filter(c => !isNonModelComponent(c));
 
   // ---- GDS record helpers ------------------------------------------------
   // GDS data types
@@ -208,7 +215,12 @@ export function generateGDS(scene, paramValues) {
   // subtract) are NOT applied here — the operands are emitted as separate
   // polygons on the same layer. A real polygon-clipping pass would require
   // a clipper library; out of scope for now.
-  const byIdSolved = Object.fromEntries(solved.map(c => [c.id, c]));
+  // Keyed-lookup map for polyline SNAP-VERTEX resolution — built from the
+  // FULL solved list: a physical trace's vertex may be pinned to a section
+  // line's anchor (draw-mode magnetism offers them), and resolving against
+  // the geometry-filtered list returned [NaN,NaN] — silent origin-spikes /
+  // dropped segments in the output while the canvas looked right.
+  const byIdSolved = Object.fromEntries(solvedAll.map(c => [c.id, c]));
   for (const c of solved) {
     if (c.kind === 'boolean') continue; // booleans don't have GDS geometry of their own
     const insts = expandTransforms([c], paramValues);

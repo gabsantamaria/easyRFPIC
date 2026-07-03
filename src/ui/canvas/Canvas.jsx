@@ -1658,9 +1658,18 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       const layer = addMode.layer || addMode.kind || 'waveguide';
       const kindLabel = layer === 'waveguide' ? 'waveguide'
         : layer === 'port' ? 'port'
+        : layer === 'section' ? 'section'
         : (addMode.conductorLayerId || 'conductor');
       const shapeLabel = addMode.shape || 'rect';
-      if ((addMode.shape === 'polyline' || addMode.shape === 'polyshape') && polylineDraft) {
+      if (layer === 'section') {
+        // Section tool: exactly two clicks, no arc/finish choreography.
+        status = {
+          kind: 'add',
+          line: polylineDraft
+            ? 'Section line · click the SECOND point to finish (Shift = axis-lock) · Esc cancels'
+            : 'Section line (non-model cut) · click the FIRST point (anchors snap) · Esc cancels',
+        };
+      } else if ((addMode.shape === 'polyline' || addMode.shape === 'polyshape') && polylineDraft) {
         // Polyline / polyshape draw-in-progress: vertex count + the arc-
         // mode hint ('a' toggles a 90° arc for the NEXT segment).
         const n = polylineDraft.vertices.length;
@@ -2146,6 +2155,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           // Click landed on vertex 0 — finish the polygon (the polyshape
           // is implicitly closed; we don't push the duplicate vertex).
           commitPolylineDraft(polylineDraft.vertices);
+          setPolylineDraft(null);
+        } else if (addMode.layer === 'section') {
+          // Section line: EXACTLY two points — the second click commits
+          // immediately (no double-click/Enter finish like free traces).
+          commitPolylineDraft([...polylineDraft.vertices, newVertex]);
           setPolylineDraft(null);
         } else {
           setPolylineDraft({
@@ -3395,6 +3409,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     // Low-alpha amber fill + amber outline; the render branch adds an
     // arch glyph (arc + landing bars) so it reads as "flying metal".
     bridge:    { fill: '#f59e0b', stroke: '#b45309', opacity: 0.45 },
+    // Section line: NON-MODEL cross-section cut (A—A′) feeding the Q2D /
+    // Tidy3D wizards. Rose so it can't be mistaken for geometry; the
+    // width-0 polyline render branch draws it as a dashed centerline and
+    // adds end ticks + labels. Never exported anywhere.
+    section:   { fill: '#fb7185', stroke: '#fb7185', opacity: 0.95 },
   };
 
   // Stack-layer lookup so per-component fills can read the BOUND layer's
@@ -4526,6 +4545,76 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                           strokeLinecap="butt"
                           {...restProps}
                         />
+                      );
+                    } else if (verts.length >= 2 && c.layer === 'section') {
+                      // SECTION LINE (non-model cross-section cut): dashed
+                      // rose centerline + perpendicular end ticks + A/A′
+                      // letters (per-line letter from its order among
+                      // section components), plus — when selected — an
+                      // ARROWED length dimension parallel to the line. The
+                      // whole group carries data-nonmodel so the figure
+                      // exporter strips it from SVG/PDF output.
+                      const [sx0, sy0] = verts[0];
+                      const [sx1, sy1] = verts[verts.length - 1];
+                      let d = `M ${verts[0][0]} ${-verts[0][1]}`;
+                      for (let k = 1; k < verts.length; k++) {
+                        d += ` L ${verts[k][0]} ${-verts[k][1]}`;
+                      }
+                      const secLen = Math.hypot(sx1 - sx0, sy1 - sy0);
+                      const ux = secLen > 1e-9 ? (sx1 - sx0) / secLen : 1;
+                      const uy = secLen > 1e-9 ? (sy1 - sy0) / secLen : 0;
+                      const nx = -uy, ny = ux;
+                      const tick = sw * 7;
+                      const secIdx = scene.components.filter(cc => cc.layer === 'section').findIndex(cc => cc.id === c.id);
+                      const letter = String.fromCharCode(65 + (secIdx >= 0 ? secIdx % 26 : 0));
+                      const fs = sw * 9;
+                      // Length label: prefer the driving param's name when
+                      // vertex 1 is a lone `<id>_L`-style reference (the
+                      // axis-aligned creation path installs exactly that).
+                      const v1 = (c.vertices || [])[1];
+                      const lenRef = v1 && v1.kind !== 'snap'
+                        ? String(v1.dx === '0' ? v1.dy : v1.dx).replace(/^-\(([^)]+)\)$/, '$1')
+                        : '';
+                      const lenIsParam = /^[A-Za-z_][A-Za-z0-9_]*$/.test(lenRef) && lenRef !== '0';
+                      const dimLabel = `${lenIsParam ? lenRef + ' = ' : ''}${secLen.toFixed(2)} µm`;
+                      const dOff = sw * 16;   // dimension line offset (left normal)
+                      const ah = sw * 5;      // arrowhead size
+                      const dx0 = sx0 + nx * dOff, dy0 = sy0 + ny * dOff;
+                      const dx1 = sx1 + nx * dOff, dy1 = sy1 + ny * dOff;
+                      const { fill: _f, ...restProps } = dataCompProps;
+                      shapeElement = (
+                        <g data-nonmodel="1">
+                          {/* wide invisible hit target — a hairline dashed path is
+                              unclickable. The transparent stroke + fat width must come
+                              AFTER the spread: dataCompProps carries the selection
+                              stroke/strokeWidth and later JSX props win. */}
+                          <path d={d} fill="none" {...restProps} stroke="transparent" strokeWidth={sw * 10} />
+                          <path d={d} fill="none" stroke={style.stroke} strokeWidth={sw * 1.4}
+                            strokeDasharray={`${sw * 6},${sw * 4}`} pointerEvents="none" />
+                          <line x1={sx0 - nx * tick} y1={-(sy0 - ny * tick)} x2={sx0 + nx * tick} y2={-(sy0 + ny * tick)}
+                            stroke={style.stroke} strokeWidth={sw * 2.2} pointerEvents="none" />
+                          <line x1={sx1 - nx * tick} y1={-(sy1 - ny * tick)} x2={sx1 + nx * tick} y2={-(sy1 + ny * tick)}
+                            stroke={style.stroke} strokeWidth={sw * 2.2} pointerEvents="none" />
+                          <text x={sx0 - ux * fs * 1.4} y={-(sy0 - uy * fs * 1.4)} fill={style.stroke} fontSize={fs}
+                            textAnchor="middle" dominantBaseline="central" pointerEvents="none"
+                            style={{ userSelect: 'none' }}>{letter}</text>
+                          <text x={sx1 + ux * fs * 1.4} y={-(sy1 + uy * fs * 1.4)} fill={style.stroke} fontSize={fs}
+                            textAnchor="middle" dominantBaseline="central" pointerEvents="none"
+                            style={{ userSelect: 'none' }}>{letter}′</text>
+                          {isSelected && secLen > 1e-9 && (
+                            <g pointerEvents="none">
+                              <line x1={dx0} y1={-dy0} x2={dx1} y2={-dy1} stroke="#a78bfa" strokeWidth={sw} />
+                              {/* extension whiskers from the line ends to the dim line */}
+                              <line x1={sx0} y1={-sy0} x2={dx0} y2={-dy0} stroke="#a78bfa" strokeWidth={sw * 0.5} strokeDasharray={`${sw * 2},${sw * 2}`} />
+                              <line x1={sx1} y1={-sy1} x2={dx1} y2={-dy1} stroke="#a78bfa" strokeWidth={sw * 0.5} strokeDasharray={`${sw * 2},${sw * 2}`} />
+                              {/* arrowheads: inward-pointing triangles at both dim ends */}
+                              <polygon points={`${dx0},${-dy0} ${dx0 + ux * ah + nx * ah * 0.4},${-(dy0 + uy * ah + ny * ah * 0.4)} ${dx0 + ux * ah - nx * ah * 0.4},${-(dy0 + uy * ah - ny * ah * 0.4)}`} fill="#a78bfa" />
+                              <polygon points={`${dx1},${-dy1} ${dx1 - ux * ah + nx * ah * 0.4},${-(dy1 - uy * ah + ny * ah * 0.4)} ${dx1 - ux * ah - nx * ah * 0.4},${-(dy1 - uy * ah - ny * ah * 0.4)}`} fill="#a78bfa" />
+                              <text x={(dx0 + dx1) / 2 + nx * fs * 0.9} y={-((dy0 + dy1) / 2 + ny * fs * 0.9)} fill="#a78bfa" fontSize={fs * 0.9}
+                                textAnchor="middle" dominantBaseline="central" style={{ userSelect: 'none' }}>{dimLabel}</text>
+                            </g>
+                          )}
+                        </g>
                       );
                     } else if (verts.length >= 2) {
                       // Width = 0 (or unresolved): show the centerline as

@@ -615,6 +615,7 @@ export function buildScene3D(rawScene, paramValues) {
   // ── Top-level walk: mirror the canvas's standalone-render filter ───────
   for (const c of solved) {
     if (c.consumedBy) continue; // operands render inside their boolean
+    if (c.layer === 'section') continue; // non-model annotation — never a solid
     emitComponent(c, [], null, c.id, 0);
   }
 

@@ -29,6 +29,7 @@
 // 10+, port=100) so the generated script's output GDS is layer-
 // compatible with the binary GDS export.
 import { evalExpr, tokenizeIdents, RESERVED_IDENTS } from '../scene/params.js';
+import { isNonModelComponent } from '../scene/schema.js';
 import { solveLayout, applyMirrors } from '../scene/solver.js';
 import { expandTransforms } from '../scene/transforms.js';
 import { shapeInstanceToRing } from '../geometry/rings.js';
@@ -117,8 +118,16 @@ function pyFloat(v) {
 // ── Main entry point ─────────────────────────────────────────────────
 export function generateGdsfactory(scene, paramValues, options = {}) {
   const { components, mirrors, snaps, stack, params } = scene;
-  const solved = applyMirrors(solveLayout(components, snaps, paramValues), mirrors);
-  const parametricPos = computeParametricPositions(solved, snaps, paramValues);
+  const solvedAll = applyMirrors(solveLayout(components, snaps, paramValues), mirrors);
+  // Non-model components (section lines) are solver-visible — a child
+  // snapped to one must land where the canvas puts it — but never emit
+  // geometry. Parametric positions are computed on the FULL solved list
+  // (pure param expressions, no object references), then everything
+  // downstream sees only physical components.
+  const solved = solvedAll.filter(c => !isNonModelComponent(c));
+  // pp on the FULL solved list: a component snapped to a (filtered-out)
+  // section line must still resolve its chain — same rule as hfss-native.
+  const parametricPos = computeParametricPositions(solvedAll, snaps, paramValues);
 
   // Layer mapping mirrors generateGDS for cross-export consistency.
   const conductorLayers = (stack || []).filter(l => l.role === 'conductor');
@@ -417,7 +426,7 @@ export function generateGdsfactory(scene, paramValues, options = {}) {
     // per-vertex widths and falls back to the base width along arc /
     // spline segments (tessellated numerically, matching the canvas).
     if (kind === 'polyline') {
-      const compById_pl = Object.fromEntries(solved.map(cc => [cc.id, cc]));
+      const compById_pl = Object.fromEntries(solvedAll.map(cc => [cc.id, cc])) /* FULL list: snap-vertices may target section lines */;
       const { quads } = taperedBandQuads(c, compById_pl, paramValues);
       if (quads.length === 0) {
         return `${indent}# ${c.id}: polyline with no drawable segments — skipping\n`;
@@ -431,7 +440,7 @@ export function generateGdsfactory(scene, paramValues, options = {}) {
       return out;
     }
     if (kind === 'polyshape') {
-      const compById_ps = Object.fromEntries(solved.map(cc => [cc.id, cc]));
+      const compById_ps = Object.fromEntries(solvedAll.map(cc => [cc.id, cc])) /* FULL list: snap-vertices may target section lines */;
       // Tessellated perimeter: arc vertices expand along their circular
       // arcs, spline runs interpolate with Catmull-Rom — a numeric
       // capture of the same geometry the canvas draws and HFSS builds

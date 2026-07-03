@@ -603,6 +603,116 @@ attenuation α **entirely in HFSS** (no MATLAB/external step). Export menu →
 - **Phase-ambiguity caveat (v1)**: β is unwrapped only while βΔl < π over the
   band — pick L2−L1 small enough. α and εeff-from-α are unaffected by the branch.
 
+## Section lines & cross-section wizards (Q2D / Tidy3D)
+
+A **section line** is a NON-MODEL annotation: a 2-point polyline with
+`layer: 'section'`, `width: '0'` (toolbar tool next to the airbridge;
+EXACTLY two clicks — the second commits). It inherits the full polyline
+machinery (snap vertices, expression dx/dy, vertex editing); axis-aligned
+lines get a single `<id>_L` length param (signed via `-(<id>_L)`).
+Canvas renders it as a dashed rose cut line with per-line letters (A—A′,
+B—B′ by order among section comps), end ticks, and — when selected — an
+ARROWED length dimension (param name shown when vertex 1 is a lone-param
+ref). The render group carries `data-nonmodel="1"`.
+
+**Non-model contract** (`isNonModelComponent(c)` in schema.js — layer ===
+'section'): every exporter filters it AFTER solving (`solvedAll` →
+`solved`; hfss-native computes `computeParametricPositions` on
+`solvedAll` so a child snapped to a section still resolves), scene3d
+skips it, figure SVG/PDF export strips `[data-nonmodel]` from the cloned
+DOM, `buildTwoLineScene` drops it before the cell build, `createBoolean`
+rejects it as an operand, `layerVisKey` gives it its own 'section' eye
+(LAYERS panel canvas overlays). Guard: tests/section-line.test.js.
+
+**Cross-section extraction** (`src/scene/cross-section.js`, pure —
+tests/cross-section.test.js): `buildCrossSection(scene, pv, sectionCompId)`
+→ `{ ok, line{p0,p1,lengthUm,axis:'h'|'v'|null}, domain, slabs[],
+conductors[], waveguides[], wgCenter, params, warnings }` — t = µm along
+the line, z = stack µm. Segment∩ring even-odd intervals + boolean
+interval algebra (union/subtract/intersect, cutouts; boolean roots = one
+entry each, replicas via expandTransforms); Z from computeNumericLayerZ +
+effectiveConductorLayerId (+zOffset; zeroThickness at the exporter's
+abs(t)<1e-9 gate); wg rects get the exact scene3d slab+rib etch-angle
+trapezoid. `*Expr` fields (HFSS `"(<unit-free µm>)um"` strings) are
+emitted ONLY for axis-aligned lines × unrotated axis-aligned rect/circle
+leaves on translation-only chains, each validated by the evalExpr
+ROUND-TRIP GUARD (else numeric + warning). Air slab tops the stack;
+warnings are `{code,msg}` (oblique-numeric, via/bridge-crossed,
+wg-uniform, …).
+
+**Adversarial-review hardening** (all probe-confirmed, fixed pre-commit):
+Q2D SKIPS waveguide-role slabs (a coplanar film+cladding stack — the
+default LTOI — drew two full-width rects claiming the same area; the film
+exists only as the wg slabBand+core entries, matching the 3-D build);
+the Q2D E-probe uses report/fields type **"CG Fields"** (plain "Fields"
+is HFSS-only — it threw and killed the whole guarded block) over
+`Setup1 : LastAdaptive` (Interpolating sweeps save no fields); the tidy3d
+RF grid includes SHEET_THICK_UM in its dl heuristic (0.05 µm inflated
+NbN sheets fell between 0.4 µm grid rows — invisible to the eigensolve);
+the VπL eo_mask follows the etched film (slab intervals + core bbox), not
+the full z-band; EO RF permittivities key off the material (LT 43/41 vs
+LN 28/43); `defaultRoles` sizes zero-thickness sheets by crossed WIDTH
+(area is 0 by construction — the ground pour flipped to signal);
+the cross-section expr guard validates INGREDIENTS (evalExpr collapses
+errors to 0 — a collapsed candidate could cross-attach at t=0) and bakes
+COINCIDENT-EDGE ties; every numeric exporter resolves polyline
+snap-vertices against the FULL solved map (a vertex pinned to a section
+line resolved to NaN → GDS origin-spikes); buildTwoLineScene bakes SOLVED
+positions before dropping section lines (raw cx/cy is stale for
+snap-bound parts).
+
+**Q2D exporter** (`src/export/q2d.js`, tests/q2d.test.js):
+`generateQ2DExtractor(cross, opts)` → IronPython for AEDT "2D Extractor"
+(THROWS on ok:false/bad roles; `validateQ2DRoles` is the UI gate). opts:
+`roles {id:'signal'|'ground'}`, freq band/points, `adaptFreqGHz`,
+`cgPerError`/`rlPerError` (default 0.1), `minPasses`/`maxPasses`,
+`condThicknessUm` (zero-thickness conductors draw as thin rects — Q2D
+has NO surface-impedance sheet, kinetic inductance NOT modeled).
+KEY DECISIONS: cross.params are declared DIMENSIONLESS (`set_var("h_wg",
+"0.6")`) because the contract's `(X)um` form carries the unit outside —
+a length-typed var would double-convert (the documented 1e12 bug class);
+sizes strip `um` off both operands and re-type `(A - B)*1um`; setup type
+string is `"2DMatrix"` (pyAEDT SetupKeys[30], Open template) with CG/RL
+data blocks; slabs are Subtract-carved (KeepOriginals=True) around
+conductors/wg; reports: Z0 re/im ("Matrix", first SIGNAL's boundary),
+sqrt(eps_eff) = `im(Gamma(s,s))*299792458/(2*pi*Freq)`, and E at the
+wg-center CreatePoint via FieldsReporter named exprs — BOTH
+`E_along_section` (ScalarX) and `E_vertical` (ScalarY) since the crystal
+cut decides which drives r33.
+
+**Tidy3D notebook** (`src/export/tidy3d-notebook.js`,
+tests/tidy3d-notebook.test.js): `generateTidy3DNotebook(cross, opts)` →
+`{ ipynb, warnings }` (THROWS on unusable cross — wizard catches).
+nbformat-4; every code cell ast.parse-checked in tests. Coordinates:
+tidy3d x = t, y = stack z, z = propagation; local ModeSolver only (no
+cloud). RF: quasi-TEM mode → n_eff = √εeff, Z0 via microwave plugin
+V-path/I-loop integrals (classic class names = 2.11 aliases; pinned
+`tidy3d>=2.7,<3`); SEPARATE `MATERIAL_EPS_RF` table (RF εr ≠ optical n²
+— LN εr≈28/43 vs n≈2.2). Optical: AnisotropicMedium with ne on
+`extraordinaryAxis` ('vertical' = z-cut → yy, 'horizontal' = x-cut → xx).
+VπL: E_RF normalized to 1 V by the mode's own voltage integral, Δn = ½n³r·E
+overlap-averaged over the EO layer with the optical intensity weight
+(Wooten 2000 / Wang 2018 cited), VπL = λ/(2Δn_eff(1V)). Degradation: no
+wg → optical/VπL cells become explanatory markdown (RF kept); <2
+conductors → RF/VπL dropped (optical kept). Zero-thickness conductors
+inflate to 0.05 µm in-notebook.
+
+**Wizards** (`src/ui/Q2DWizard.jsx`, `src/ui/Tidy3DWizard.jsx`,
+`src/ui/CrossSectionPreview.jsx` — mount-on-open like TwoLineWizard;
+opened from the section line's Inspector block or right-click menu; state
+`sectionWizard {kind, sectionCompId}` in PhotonicLayout). Both show the
+shared SVG cross-section preview (piecewise-linear z compression keeps
+the device band ~70% of pixels; S1/S2…/G badges) + a ConductorRoleTable
+(rows keyed/displayed by unique component ID — labels can collide, e.g.
+cond1/cond1_copy both labeled 'cond1'). Default roles
+(`defaultRoles(cross)` in sectionWizardSettings.js): area ≥ 0.8·max →
+ground, rest signal; no-signal-left → smallest flips; single conductor →
+signal + validation error. Prefs persist LAYERED (key
+`photonic_layout_section_wizards`, hydrated in main.jsx — same
+localStorage-hostile rationale as the 2-line wizard). Downloads go
+through `downloadFile` as `<exportFileBase()>_q2d.py` /
+`..._eo_section.ipynb`.
+
 ## Storage durability, multi-tab safety & disk mirrors
 
 - **Layered persistence rule**: any NEW UI preference persists via the layered

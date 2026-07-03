@@ -83,6 +83,8 @@ import { ModalDialog } from './ui/ModalDialog.jsx';
 import { HelpTutorial } from './ui/HelpTutorial.jsx';
 import { AiAssistantDialog } from './ui/AiAssistantDialog.jsx';
 import { TwoLineWizard } from './ui/TwoLineWizard.jsx';
+import { Q2DWizard } from './ui/Q2DWizard.jsx';
+import { Tidy3DWizard } from './ui/Tidy3DWizard.jsx';
 import { SettingsPanel } from './ui/SettingsPanel.jsx';
 import { DEFAULT_SETTINGS, loadSettings, saveSettings, hydrateSettings, buildSettingsExport, parseSettingsImport } from './ui/settings.js';
 import { getUiPref, setUiPrefs, hydrateUiPrefs } from './ui/ui-prefs.js';
@@ -539,6 +541,9 @@ export default function App() {
   // 2-line method wizard (Marks 1991): stamp the line at two lengths and
   // emit a native HFSS script that extracts εeff/α in HFSS.
   const [showTwoLineWizard, setShowTwoLineWizard] = useState(false);
+  // Section-line wizards: { kind: 'q2d' | 'tidy3d', sectionCompId } | null.
+  // Opened from a section line's context menu / Inspector buttons.
+  const [sectionWizard, setSectionWizard] = useState(null);
   // 3-D viewer toggle ("3D" toolbar button). When on, the canvas area is
   // REPLACED by the lazy Viewer3D (the 2-D Canvas unmounts and re-mounts
   // cleanly on return). VIEWER-ONLY: scene model, solver, and exports are
@@ -2388,13 +2393,14 @@ export default function App() {
     };
     const layerPrefix = layerKind === 'waveguide' ? 'wg'
       : layerKind === 'port' ? 'port'
+      : layerKind === 'section' ? 'sec'
       : (conductorLayer ? sanitizeIdPrefix(conductorLayer.id) : 'el');
     // Shape-flavored id prefix so users can tell circles from rects from
     // polygons / polylines at a glance in the SHAPES tree.
     const shapePrefix = shapeKind === 'circle' ? 'circ'
       : shapeKind === 'ellipse' ? 'ell'
       : shapeKind === 'polygon' ? 'poly'
-      : shapeKind === 'polyline' ? 'trace'
+      : shapeKind === 'polyline' ? (layerKind === 'section' ? 'sec' : 'trace')
       : shapeKind === 'polyshape' ? 'pshape'
       : shapeKind === 'via' ? 'via'
       : shapeKind === 'bridge' ? 'bridge'
@@ -2700,12 +2706,43 @@ export default function App() {
         // so the user can sweep individual segments in HFSS) or `snap`
         // (parametrically pinned to the bound component's anchor —
         // HFSS-side sweeps of THAT component move this vertex too).
+        // SECTION LINE (layer 'section'): a NON-MODEL 2-point annotation
+        // line (the cross-section slicing plane for the Q2D / Tidy3D
+        // wizards). No trace width; when the drawn line is axis-aligned
+        // the single `<id>_L` param IS its length (signed via the dx/dy
+        // expression), so the slice width is HFSS-sweepable like any
+        // other dimension. Oblique lines keep the generic per-segment
+        // dx/dy params.
+        const isSection = layerKind === 'section';
         const widthParam = `${id}_w`;
-        const wValForParam = (spec && Number.isFinite(spec.defaultWidth))
-          ? spec.defaultWidth
-          : 3;
-        newParams[widthParam] = { expr: String(wValForParam), unit: 'µm', desc: `${id} trace width` };
+        if (!isSection) {
+          const wValForParam = (spec && Number.isFinite(spec.defaultWidth))
+            ? spec.defaultWidth
+            : 3;
+          newParams[widthParam] = { expr: String(wValForParam), unit: 'µm', desc: `${id} trace width` };
+        }
+        const sectionLenVert = (v, i) => {
+          // Only vertex 1 of a 2-point axis-aligned section line gets the
+          // dedicated length param; anything else falls through to the
+          // generic rel-vertex path (returns null = not handled here).
+          if (!isSection || i !== 1 || v.snap || v.arc) return null;
+          const prev = spec.vertices[0];
+          const dx = v.x - prev.x;
+          const dy = v.y - prev.y;
+          const lenParam = `${id}_L`;
+          if (Math.abs(dy) < 1e-6) {
+            newParams[lenParam] = { expr: Math.abs(dx).toFixed(3), unit: 'µm', desc: `${id} section length` };
+            return { kind: 'rel', dx: dx >= 0 ? lenParam : `-(${lenParam})`, dy: '0' };
+          }
+          if (Math.abs(dx) < 1e-6) {
+            newParams[lenParam] = { expr: Math.abs(dy).toFixed(3), unit: 'µm', desc: `${id} section length` };
+            return { kind: 'rel', dx: '0', dy: dy >= 0 ? lenParam : `-(${lenParam})` };
+          }
+          return null;
+        };
         const polyVerts = (spec.vertices || []).map((v, i) => {
+          const secV = sectionLenVert(v, i);
+          if (secV) return secV;
           if (v.arc && i > 0) {
             // Arc-mode click: the draw UX synthesized a 90° (or −90°)
             // circular arc — center offset (cdx, cdy) from the PREVIOUS
@@ -2758,7 +2795,7 @@ export default function App() {
         newComp = {
           id, kind: 'polyline', layer: layerKind,
           cx: v0.x, cy: v0.y,
-          width: widthParam,
+          width: isSection ? '0' : widthParam,
           // AABB w/h start as '0' literals; refreshPolylineBbox in the
           // solver writes the real numeric bbox post-solve.
           w: '0', h: '0',
@@ -3085,6 +3122,15 @@ export default function App() {
       return null;
     })();
     const items = [
+      // Section line (non-model cut): the two cross-section wizards live
+      // here — right-click IS the primary invocation the user asked for.
+      ...(comp.layer === 'section' ? [
+        { label: 'Q2D cross-section (HFSS)…', icon: Ruler,
+          onClick: () => setSectionWizard({ kind: 'q2d', sectionCompId: compId }) },
+        { label: 'Tidy3D notebook (Z0, εeff, VπL)…', icon: Ruler,
+          onClick: () => setSectionWizard({ kind: 'tidy3d', sectionCompId: compId }) },
+        { divider: true },
+      ] : []),
       { label: 'Bring to front', icon: ArrowUp, onClick: () => bringToFront(compId), disabled: isFront },
       { label: 'Bring forward', onClick: () => bringForward(compId), disabled: isFront, hint: '↑' },
       { label: 'Send backward', onClick: () => sendBackward(compId), disabled: isBack, hint: '↓' },
@@ -5355,6 +5401,13 @@ export default function App() {
       alertDialog(`"${bridgeOperand}" is an airbridge — airbridges cannot participate in boolean operations. Deselect it and retry.`, 'Cannot combine');
       return;
     }
+    // Section lines are non-model annotations — a boolean of one is
+    // meaningless and would drag a phantom operand into the exporters.
+    const sectionOperand = ids.find(id => scene.components.find(cc => cc.id === id)?.layer === 'section');
+    if (sectionOperand) {
+      alertDialog(`"${sectionOperand}" is a section line (non-model) — it cannot participate in boolean operations.`, 'Cannot combine');
+      return;
+    }
     // Compute the centroid of operand bboxes from the SOLVED scene so the
     // new component starts at the cluster's geometric center. After this
     // the boolean's cx/cy is what gets dragged; operand cx/cy stays at
@@ -6133,6 +6186,25 @@ export default function App() {
                       <path d="M3 18 Q 12 4 21 18" />
                       <line x1="3" y1="14" x2="3" y2="21" />
                       <line x1="21" y1="14" x2="21" y2="21" />
+                    </svg>
+                  </button>
+                  <button
+                    key="add-section"
+                    onClick={() => {
+                      const active = addMode && addMode.layer === 'section';
+                      if (active) { setAddMode(null); return; }
+                      setAddMode({ layer: 'section', shape: 'polyline' });
+                      setSnapMode('idle');
+                      setRulerMode(false);
+                    }}
+                    className={baseBtn + ((addMode && addMode.layer === 'section') ? activeRing : '')}
+                    style={{ background: 'var(--app-slate-800)', color: '#fb7185' }}
+                    title="Section line (A—A′) — click two points to define a cross-section cut. NON-MODEL: never exported to HFSS/GDS/figures. Its length is a parameter (axis-aligned lines get a single <id>_L), endpoints snap like polyline vertices. Right-click the line for the Q2D cross-section and Tidy3D (VπL) wizards."
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                      <line x1="4" y1="20" x2="20" y2="4" strokeDasharray="4 2.5" />
+                      <line x1="2" y1="16" x2="8" y2="22" />
+                      <line x1="16" y1="2" x2="22" y2="8" />
                     </svg>
                   </button>
                 </>
@@ -7157,6 +7229,7 @@ export default function App() {
                   {[
                     { key: 'port', label: 'Ports', hint: 'port-layer rects + integration-line arrows' },
                     { key: 'via', label: 'Vias', hint: 'vertical interconnects (plan-view circles)' },
+                    { key: 'section', label: 'Section lines', hint: 'non-model A—A′ cross-section cuts' },
                   ].map(({ key, label, hint }) => {
                     const off = hiddenLayerKeys.has(key);
                     return (
@@ -8324,8 +8397,12 @@ export default function App() {
                 )}
                 {/* Bridges live on their own fixed 'bridge' pseudo-layer
                     (normalizeScene forces it) — hide the free-layer picker
-                    so the user can't detach the strap from its dispatch. */}
-                {selected.kind !== 'bridge' && (
+                    so the user can't detach the strap from its dispatch.
+                    Section lines are pinned too: reassigning one to a real
+                    layer would turn a non-model annotation into geometry
+                    (the select's fallback rendering even LIED — an unknown
+                    value displayed as "waveguide"). */}
+                {selected.kind !== 'bridge' && selected.layer !== 'section' && (
                 <div>
                   <label className="text-[10px] uppercase tracking-wider text-slate-500">Layer</label>
                   <select value={selected.layer} onChange={(e) => updateComp(selected.id, { layer: e.target.value })} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-slate-100 outline-none">
@@ -8333,6 +8410,15 @@ export default function App() {
                     <option value="electrode">electrode</option>
                     <option value="port">port</option>
                   </select>
+                </div>
+                )}
+                {selected.layer === 'section' && (
+                <div>
+                  <label className="text-[10px] uppercase tracking-wider text-slate-500">Layer</label>
+                  <div className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs" style={{ color: '#fb7185' }}
+                    title="Section lines are non-model annotations pinned to the 'section' layer — they never export. Delete and redraw on a real layer if you meant geometry.">
+                    section (non-model)
+                  </div>
                 </div>
                 )}
                 {/* Conductor-layer binding. Visible for both electrode
@@ -8558,6 +8644,25 @@ export default function App() {
                       );
                     }
                     if (shapeKind === 'polyline' || shapeKind === 'polyshape') {
+                      // Section line: surface the two cross-section wizards
+                      // right in the Inspector (in addition to right-click).
+                      const sectionButtons = selected.layer === 'section' ? (
+                        <div className="rounded border border-rose-900/60 px-2 py-2 space-y-1.5" style={{ background: 'rgba(76,29,37,0.25)' }}>
+                          <p className="text-[9px] uppercase tracking-wider" style={{ color: '#fb7185' }}>Cross-section (non-model cut)</p>
+                          <button
+                            className="w-full px-2 py-1 rounded text-xs font-medium text-left"
+                            style={{ background: 'var(--app-slate-700)', color: 'var(--app-slate-100)' }}
+                            onClick={() => setSectionWizard({ kind: 'q2d', sectionCompId: selected.id })}
+                            title="Slice the 3-D stack along this line and generate an Ansys 2D Extractor (Q2D) script: auto-detected conductors (signal/ground), CG+RL setup, sqrt(eps_eff) / Z0 / E-at-waveguide reports."
+                          >Q2D cross-section (HFSS)…</button>
+                          <button
+                            className="w-full px-2 py-1 rounded text-xs font-medium text-left"
+                            style={{ background: 'var(--app-slate-700)', color: 'var(--app-slate-100)' }}
+                            onClick={() => setSectionWizard({ kind: 'tidy3d', sectionCompId: selected.id })}
+                            title="Generate a Tidy3D jupyter notebook for this cross-section: RF mode (Z0, sqrt(eps_eff)), optical anisotropic mode (ne/no), and VπL via the RF-optical overlap integral."
+                          >Tidy3D notebook (Z0, εeff, VπL)…</button>
+                        </div>
+                      ) : null;
                       // Polyline trace (with a width param) OR polyshape
                       // (closed 2-D polygon, no width). Both expose the
                       // per-vertex editor below. Each vertex is either a
@@ -8647,7 +8752,8 @@ export default function App() {
                       ) : null;
                       return (
                         <div className="space-y-2">
-                          {!isPolyshape && (
+                          {sectionButtons}
+                          {!isPolyshape && selected.layer !== 'section' && (
                             <div className="grid grid-cols-2 gap-2 items-end">
                               {fieldRow('width', 'trace width', selected.width ?? '5', (v) => updateComp(selected.id, { width: v }))}
                               {isTapered && (
@@ -9234,6 +9340,30 @@ export default function App() {
         paramValues={paramValues}
         onGenerate={handleExportTwoLine}
         onGenerateQ3D={handleExportQ3DCap}
+      />
+
+      {/* Section-line cross-section wizards (Q2D script / Tidy3D notebook).
+          Mount-on-open like TwoLineWizard; onDownload reuses the standard
+          blob-download helper with the export-file naming convention. */}
+      <Q2DWizard
+        open={!!sectionWizard && sectionWizard.kind === 'q2d'}
+        onClose={() => setSectionWizard(null)}
+        scene={scene}
+        paramValues={paramValues}
+        sectionCompId={sectionWizard ? sectionWizard.sectionCompId : null}
+        simSetup={scene.simSetup || {}}
+        designBaseName={exportFileBase()}
+        onDownload={(text, filename) => downloadFile(filename, text)}
+      />
+      <Tidy3DWizard
+        open={!!sectionWizard && sectionWizard.kind === 'tidy3d'}
+        onClose={() => setSectionWizard(null)}
+        scene={scene}
+        paramValues={paramValues}
+        sectionCompId={sectionWizard ? sectionWizard.sectionCompId : null}
+        simSetup={scene.simSetup || {}}
+        designBaseName={exportFileBase()}
+        onDownload={(text, filename) => downloadFile(filename, text)}
       />
 
       {/* Modal dialog (confirm/prompt/alert) */}

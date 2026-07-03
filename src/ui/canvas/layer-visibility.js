@@ -51,6 +51,7 @@ export function layerVisKey(c, compById, stack, visited = new Set()) {
   const layer = c.layer || 'waveguide';
   if (layer === 'waveguide') return 'wg';
   if (layer === 'port') return 'port';
+  if (layer === 'section') return 'section'; // non-model cut lines get their own eye
   if (layer === 'via' || c.kind === 'via') return 'via';
   if (layer === 'electrode') {
     const conductors = (stack || []).filter(l => l.role === 'conductor');
