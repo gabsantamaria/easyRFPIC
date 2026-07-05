@@ -714,7 +714,15 @@ the period left shape params (cell_h/trace_w) that ALSO move the pivot
 exempt, so a stale-pivot expr emitted PARAMETRIC-BUT-WRONG geometry with no
 warning (a horizontal meander cut mis-placed bars ~µm under a cell_h sweep).
 The round-trip guard + all-param probe make it correct-OR-baked, never
-silently wrong. For the KI meander the t-axis therefore BAKES (fold pivot
+silently wrong. A separate limitation is now closed: a conductor SNAPPED past a rotated
+part (a feed/port past the meander) had a position expr with HFSS-form
+`cos(((180))*1deg)` from computeParametricPositions; `evalExpr` (the
+round-trip guard) can't parse `1deg`, collapsed it to 0, and BAKED the
+conductor. `degToRad` (cross-section.js) converts `*1deg`→`*(pi/180)` and
+`<n>deg`→`(<n>*pi/180)` — valid in BOTH AEDT and evalExpr — applied at
+every point a `pp` position expr enters an interval/edge expression
+(`normPos`). Those conductors (cond22 etc.) now parametrize, sweep-parity
+verified. For the KI meander the fold t-axis still BAKES (fold pivot
 drifts under trace_w/cell_d) + warns — re-export after a cross-section-shape
 sweep; Z + waveguide stay parametric. Guard: tests/cross-section.test.js
 "folded meander union" (incl. a pivot-DRIFT sweep-parity regression).

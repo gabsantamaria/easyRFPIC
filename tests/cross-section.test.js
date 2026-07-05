@@ -11,6 +11,7 @@ import {
   unionIntervals,
   subtractIntervals,
   intersectIntervals,
+  degToRad,
 } from '../src/scene/cross-section.js';
 import { makeBlankScene, normalizeScene } from '../src/scene/schema.js';
 import { resolveParams, evalExpr } from '../src/scene/params.js';
@@ -663,6 +664,75 @@ describe('buildCrossSection — folded meander union (rotate180 + mirror)', () =
     // sweep — the whole point of the fix. (Before it, fold exprs carried a
     // stale pivot and missed by ~skew.) Baked endpoints are exempt.
     for (const iv of a.intervals) {
+      for (const key of ['t0', 't1']) {
+        const expr = iv[`${key}Expr`];
+        if (!expr) continue;
+        const v = evalExpr(expr, pvB);
+        const near = freshEnds.reduce((best, e) => (Math.abs(e - v) < Math.abs(best - v) ? e : best), freshEnds[0]);
+        expect(Math.abs(v - near)).toBeLessThan(1e-3);
+      }
+    }
+  });
+});
+
+// ── deg→rad: HFSS `1deg` rotation trig must round-trip through evalExpr ──
+// A conductor snapped past a ROTATED parent (a port past the meander) gets a
+// position expr with cos(((180))*1deg) from computeParametricPositions; evalExpr
+// can't parse `1deg` and collapsed it to 0, so the round-trip guard BAKED the
+// conductor. degToRad converts it to the pi/180 form (valid in AEDT AND
+// evalExpr) so the guard passes and the conductor parametrizes.
+describe('degToRad: HFSS degrees → numeric radians', () => {
+  it('converts *1deg and bare <n>deg to pi/180 forms', () => {
+    expect(degToRad('cos(((180))*1deg)')).toBe('cos(((180))*(pi/180))');
+    expect(degToRad('a*1deg + b*1deg')).toBe('a*(pi/180) + b*(pi/180)');
+    expect(degToRad('tan(70deg)')).toBe('tan((70*pi/180))');
+    expect(degToRad('x - y')).toBe('x - y'); // no deg → untouched
+  });
+
+  it('the converted trig actually evaluates (cos 180° = −1, sin 180° = 0)', () => {
+    expect(evalExpr(degToRad('cos(((180))*1deg)'), {})).toBeCloseTo(-1, 9);
+    expect(evalExpr(degToRad('sin(((180))*1deg)'), {})).toBeCloseTo(0, 9);
+    // the RAW 1deg form is what evalExpr can't handle (collapses to 0) — the
+    // exact bug this closes.
+    expect(evalExpr('cos(((180))*1deg)', {})).toBe(0);
+  });
+
+  it('a conductor whose position flows through a fold rotate now parametrizes', () => {
+    // Two bars folded 180° about their centroid; a probe conductor snapped to
+    // the fold's E anchor picks up the cos(180°) rotation term. A perpendicular
+    // cut across the probe must carry a round-tripping t-expr (before degToRad
+    // this baked because the 1deg term collapsed to 0).
+    const mk = (probeW) => sceneWith([
+      rect('bA', 'electrode', 0, 0, '2', '10', { consumedBy: 'fold', conductorLayerId: 'l_cond' }),
+      rect('bB', 'electrode', 8, 0, '2', '10', { consumedBy: 'fold', conductorLayerId: 'l_cond' }),
+      {
+        id: 'fold', kind: 'boolean', op: 'union', operandIds: ['bA', 'bB'],
+        layer: 'electrode', cx: 0, cy: 0, w: '0', h: '0', cutouts: [], conductorLayerId: 'l_cond',
+        transforms: [{ id: 'rot', kind: 'rotate', enabled: true, angle: '180', pivot: 'C' }],
+      },
+      rect('probe', 'electrode', 40, 0, 'probe_w', '10', { conductorLayerId: 'l_cond' }),
+      sectionLine('sec1', 10, 0, 40, 0), // horizontal, crosses the snapped probe (~x 12..18)
+    ], {
+      params: { probe_w: { expr: String(probeW), unit: 'µm' }, h_cond: { expr: '0', unit: 'µm' } },
+      snaps: [{ id: 's1', from: { compId: 'fold', anchor: 'E' }, to: { compId: 'probe', anchor: 'W' }, dx: '3', dy: '0' }],
+    });
+    const base = mk(6);
+    const out = build(base);
+    const p = out.conductors.find((c) => c.id === 'probe');
+    expect(p).toBeTruthy();
+    const anyExpr = p.intervals.some((iv) => iv.t0Expr || iv.t1Expr);
+    expect(anyExpr).toBe(true); // parametric now (was baked)
+    // no emitted expr may carry the unevaluable HFSS 1deg form
+    for (const iv of p.intervals) {
+      for (const e of [iv.t0Expr, iv.t1Expr]) {
+        if (e) expect(e).not.toMatch(/1deg/);
+      }
+    }
+    // sweep-parity: the expr tracks a fresh build at a bumped probe width
+    const pvB = pvOf(mk(9));
+    const fresh = build(mk(9)).conductors.find((c) => c.id === 'probe');
+    const freshEnds = fresh.intervals.flatMap((iv) => [iv.t0, iv.t1]);
+    for (const iv of p.intervals) {
       for (const key of ['t0', 't1']) {
         const expr = iv[`${key}Expr`];
         if (!expr) continue;

@@ -202,6 +202,21 @@ export function intersectSegmentRing(p0, p1, ring) {
 // computeParametricPositions ("(-20um) + …", "(3um)") become unit-free µm
 // arithmetic we can re-wrap in the contract's "(<expr>)um" form.
 const stripUm = (s) => String(s ?? '').replace(/(\d|\))\s*um\b/g, '$1');
+// HFSS-form degrees -> numeric radians so the evalExpr ROUND-TRIP GUARD can
+// resolve the rotation-matrix trig that computeParametricPositions bakes into
+// a snap-chain position when the chain passes through a ROTATED parent
+// ("cos(((180))*1deg)"). AEDT understands both `1deg` and `pi/180`, but
+// evalExpr only knows `pi` -- so those positions collapsed to 0 and the guard
+// baked conductors it should have parametrized (a port snapped past a rotated
+// meander). `*1deg` -> `*(pi/180)`; a bare `<n>deg` -> `(<n>*pi/180)`. The
+// emitted expr uses the pi/180 form (valid in AEDT, and what the guard checked).
+export const degToRad = (s) => String(s ?? '')
+  .replace(/\*\s*1deg\b/g, '*(pi/180)')
+  .replace(/(\d+(?:\.\d+)?)\s*deg\b/g, '($1*pi/180)');
+// stripUm + degToRad -- the canonical normalization for a parametric position
+// expr pulled from computeParametricPositions before it enters an interval /
+// edge expression (guarded by the round-trip check either way).
+const normPos = (s) => degToRad(stripUm(s));
 
 // Plain decimal literal (no scientific exponent) for numeric fallbacks.
 const plainDec = (x) => {
@@ -624,7 +639,7 @@ export function buildCrossSection(rawScene, paramValues, sectionCompId, opts = {
   // literal — the ROUND-TRIP GUARD is the single gate either way.
   let p0Expr = plainDec(p0Coord);
   if (pp && pp[sec.id]) {
-    const base = stripUm(axis === 'h' ? pp[sec.id].cxExpr : pp[sec.id].cyExpr);
+    const base = normPos(axis === 'h' ? pp[sec.id].cxExpr : pp[sec.id].cyExpr);
     const v0 = (sec.vertices || [])[0];
     if (!v0 || v0.kind === 'rel' || v0.kind == null) {
       const d = String((axis === 'h' ? v0?.dx : v0?.dy) ?? '0').trim() || '0';
@@ -708,8 +723,10 @@ export function buildCrossSection(rawScene, paramValues, sectionCompId, opts = {
     if (!own.pure) return;
     const base = pp[leaf.id];
     if (!base) return;
-    const cxE = stripUm(base.cxExpr);
-    const cyE = stripUm(base.cyExpr);
+    // normPos: HFSS `1deg` trig -> pi/180 so a leaf snapped through a rotated
+    // parent (a port past the meander) round-trips instead of collapsing to 0.
+    const cxE = normPos(base.cxExpr);
+    const cyE = normPos(base.cyExpr);
     // Half-extent per world axis (circle: same r both ways).
     const hxRaw = kind === 'circle' ? String(leaf.r ?? '0') : String(leaf.w ?? '0');
     const hyRaw = kind === 'circle' ? String(leaf.r ?? '0') : String(leaf.h ?? '0');
@@ -1296,7 +1313,7 @@ export function buildCrossSection(rawScene, paramValues, sectionCompId, opts = {
       const allAxisAligned = insts.every((i) => Math.abs(evalExpr(String(i.rotation || 0), pv) || 0) < 1e-9
         && (i.scaleX ?? 1) === 1 && (i.scaleY ?? 1) === 1);
       if (allAxisAligned) {
-        const cBaseE = stripUm(axis === 'h' ? pp[c.id].cxExpr : pp[c.id].cyExpr);
+        const cBaseE = normPos(axis === 'h' ? pp[c.id].cxExpr : pp[c.id].cyExpr);
         const cBaseV = evalExpr(cBaseE, pv);
         const solvedC = axis === 'h' ? c.cx : c.cy;
         const centerOk = Number.isFinite(cBaseV) && Number.isFinite(solvedC)
