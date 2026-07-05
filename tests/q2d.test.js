@@ -57,8 +57,8 @@ describe('generateQ2DExtractor', () => {
     expect(out).toContain('oEditor = oDesign.SetActiveEditor("3D Modeler")');
     expect(out).toContain('oDesign.SetSolutionType("Open")');
     expect(out).toContain('"Units:=", "um"');
-    // Ends with the completion message, NOT an auto-save.
-    expect(out).toContain('q2d_msg(0, "Q2D cross-section build complete")');
+    // Ends with a completion message, NOT an auto-save.
+    expect(out).toMatch(/q2d_msg\(0, "Q2D cross-section (solved|built)/);
     expect(out).not.toContain('oProject.Save()');
   });
 
@@ -121,12 +121,34 @@ describe('generateQ2DExtractor', () => {
     expect(out).toContain('"AdaptiveFreq:=", "7.071068GHz"');
   });
 
-  it('sweep: LinearCount 1..50 GHz, 200 points, Interpolating, SaveFields True', () => {
+  it('sweep: LinearCount 1..50 GHz, 200 points, Interpolating, SaveFields FALSE', () => {
     expect(out).toContain('oAna.InsertSweep("Setup1"');
     expect(out).toContain('"RangeStart:=", "1GHz"');
     expect(out).toContain('"RangeEnd:=", "50GHz"');
     expect(out).toContain('"RangeCount:=", 200');
-    expect(out).toContain('"Type:=", "Interpolating", "SaveFields:=", True');
+    // AEDT forbids saving fields on an interpolating sweep — must be False,
+    // else InsertSweep fails and every report cascades to "No Solution found".
+    expect(out).toContain('"Type:=", "Interpolating", "SaveFields:=", False');
+    expect(out).not.toContain('"Type:=", "Interpolating", "SaveFields:=", True');
+  });
+
+  it('SOLVES Setup1 before the reports (reports/fields need a solution)', () => {
+    // The Z0/eps_eff reports read the sweep and the E-field named expressions
+    // read LastAdaptive fields — both need a solved Setup1, so autoSolve
+    // (default) analyzes before creating them.
+    expect(out).toContain('oDesign.Analyze("Setup1")');
+    const solveAt = out.indexOf('oDesign.Analyze("Setup1")');
+    const z0At = out.indexOf('CreateReport("Z0 vs Freq"');
+    expect(solveAt).toBeGreaterThan(0);
+    expect(z0At).toBeGreaterThan(solveAt); // solve precedes the reports
+  });
+
+  it('autoSolve:false builds only (no Analyze call)', () => {
+    const buildOnly = generateQ2DExtractor(FIXTURE_CROSS, { roles: ROLES, autoSolve: false });
+    expect(buildOnly).not.toContain('oDesign.Analyze("Setup1")');
+    expect(buildOnly).toContain('Build-only');
+    // sweep is still valid (SaveFields False) even in build-only mode
+    expect(buildOnly).toContain('"Type:=", "Interpolating", "SaveFields:=", False');
   });
 
   it('Z0 and Gamma-based sqrt(eps_eff) report expressions are exact', () => {

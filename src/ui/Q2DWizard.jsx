@@ -283,7 +283,7 @@ function Q2DWizardInner({ onClose, scene, paramValues, sectionCompId, simSetup, 
 
         {/* Footer */}
         <div className="flex items-center gap-2 px-4 py-2.5 border-t border-slate-700">
-          <span className="text-[10px] text-slate-500">AEDT 2D Extractor · run via Tools → Run Script, then Analyze</span>
+          <span className="text-[10px] text-slate-500">AEDT 2D Extractor · run via Tools → Run Script (builds, solves, and plots Z₀ / √εeff / E)</span>
           <div className="ml-auto flex items-center gap-2">
             <button onClick={onClose} className="px-3 py-1 rounded text-xs text-slate-300 hover:bg-slate-800">Cancel</button>
             <button
