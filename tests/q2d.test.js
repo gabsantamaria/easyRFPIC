@@ -190,14 +190,21 @@ describe('generateQ2DExtractor', () => {
     expect(out).toContain('"KeepOriginals:=", True');
   });
 
-  it('field probe: point at wgCenter + both named E components', () => {
-    expect(out).toContain('"PointX:=", "50um", "PointY:=", "0.45um"');
-    expect(out).toContain('"Name:=", "wg_center"');
+  it('field probe: POLYLINE through wgCenter + both named E components', () => {
+    // A Fields report Context must be a polyline (not a point) — the probe is
+    // a short vertical segment centered on the wg center (z 0.45 ± 0.5).
+    expect(out).toContain('"Name:=", "wg_probe"');
+    expect(out).toContain('"X:=", "50um", "Y:=", "-0.05um"');
+    expect(out).toContain('"X:=", "50um", "Y:=", "0.95um"');
     expect(out).toContain('oFld.CalcOp("ScalarX")');
     expect(out).toContain('oFld.CalcOp("ScalarY")');
     expect(out).toContain('oFld.AddNamedExpression("E_along_section", "CG Fields")');
     expect(out).toContain('oFld.AddNamedExpression("E_vertical", "CG Fields")');
-    expect(out).toContain('"Y Component:=", ["mag(E_along_section)", "mag(E_vertical)"]');
+    // Reported vs Distance (a field-over-geometry report's primary sweep),
+    // with the polyline + PointCount context — NOT a bare point context.
+    expect(out).toContain('["Context:=", "wg_probe", "PointCount:=", 1001]');
+    expect(out).toContain('"X Component:=", "Distance", "Y Component:=", ["mag(E_along_section)", "mag(E_vertical)"]');
+    expect(out).not.toContain('CreatePoint');
   });
 
   it('header carries the section id, line geometry, and role table', () => {
@@ -275,6 +282,54 @@ describe('generateQ2DExtractor — variants', () => {
     expect(() => generateQ2DExtractor({ ok: false, error: 'no section line' }, { roles: ROLES }))
       .toThrow(/no section line/);
     expect(() => generateQ2DExtractor(null, { roles: ROLES })).toThrow(/unusable/);
+  });
+
+  it('emits PARAMETRIC waveguide slab/core exprs when the contract provides them', () => {
+    // wg exprs added to the fixture — the slab rect XStart/Width and the core
+    // polyline PLPoint X/Y should carry the verbatim exprs (position fields)
+    // and unit-stripped diffs (size fields), not the baked numerics.
+    const cx = clone(FIXTURE_CROSS);
+    const wg = cx.waveguides[0];
+    wg.slabBand.intervals[0] = { t0: 0, t1: 120, t0Expr: '(0)um', t1Expr: '(120)um' };
+    wg.slabBand.z0Expr = '(0)um';
+    wg.slabBand.z1Expr = '(h_slab)um';
+    cx.params = { ...cx.params, h_slab: 0.3, w_slab: 5 };
+    wg.core.zBotExpr = '(h_slab)um';
+    wg.core.zTopExpr = '(h_wg)um';
+    wg.core.segments[0] = {
+      botT0: 48.9, botT1: 51.1, topT0: 49.25, topT1: 50.75,
+      botT0Expr: '(48.9)um', botT1Expr: '(51.1)um', topT0Expr: '(49.25)um', topT1Expr: '(50.75)um',
+    };
+    const out = generateQ2DExtractor(cx, { roles: ROLES });
+    // slab rect: parametric YStart + Height (compound diff via *1um)
+    const slab = out.slice(out.indexOf('"Name:=", "wg_wg1_slab0"') - 400, out.indexOf('"Name:=", "wg_wg1_slab0"'));
+    expect(slab).toContain('"YStart:=", "(0)um"');
+    expect(slab).toContain('"Height:=", "((h_slab) - (0))*1um"');
+    // core polyline: parametric PLPoint Y = (h_slab)um / (h_wg)um
+    const poly = out.slice(out.indexOf('q2d_poly('), out.indexOf('"Name:=", "wg_wg1_core"') + 40);
+    expect(poly).toContain('"Y:=", "(h_slab)um"');
+    expect(poly).toContain('"Y:=", "(h_wg)um"');
+    // still valid Python
+    mkdirSync('tests/out', { recursive: true });
+    writeFileSync('tests/out/vitest_q2d_wgpar.py', out);
+    expect(() => execSync(
+      `python3 -c "import ast; ast.parse(open('tests/out/vitest_q2d_wgpar.py').read())"`,
+      { stdio: 'pipe' }
+    )).not.toThrow();
+  });
+
+  it('a folded conductor with parametric interval exprs emits a parametric XStart', () => {
+    // A conductor whose interval carries a t0Expr referencing a param — the
+    // rect XStart is the verbatim expr, the Width the unit-stripped diff.
+    const cx = clone(FIXTURE_CROSS);
+    const sig = cx.conductors.find((c) => c.id === 'sig');
+    sig.intervals[0] = { t0: 45, t1: 55, t0Expr: '((cell_w) + 8)um', t1Expr: '((cell_w) + 18)um' };
+    cx.params = { ...cx.params, cell_w: 37 };
+    const out = generateQ2DExtractor(cx, { roles: ROLES });
+    expect(out).toContain('"XStart:=", "((cell_w) + 8)um"');
+    expect(out).toContain('"Width:=", "(((cell_w) + 18) - ((cell_w) + 8))*1um"');
+    // dimensionless design var for the referenced param
+    expect(out).toContain('set_var("cell_w", "37")');
   });
 });
 

@@ -482,6 +482,270 @@ describe('buildCrossSection — parametric t exprs', () => {
   });
 });
 
+// ── Folded (meander-like) union boolean: repeat + rotate180 + mirror ────
+// A zero-thickness conductor built as a UNION of axis-aligned rects with a
+// repeat(Y) + rotate180(pivot C) + duplicate_mirror(axis x) chain — the KI
+// meander's exact fold family. The CROSS AXIS (horizontal, ⟂ the vertical
+// fold motion) must parametrize AND sweep-parity-match a fresh build at
+// perturbed CELL-PERIOD params; the ALONG-FOLD axis (vertical) bakes the
+// pivot-parallel endpoints (the frozen-fold caveat) — never emitting a WRONG
+// expr (numeric stays exact).
+describe('buildCrossSection — folded meander union (rotate180 + mirror)', () => {
+  // Two vertical bars 10 µm apart form one "cell"; repeat 3× along +Y, fold
+  // the cluster 180° about its centroid, then mirror-duplicate across a
+  // vertical plane. Zero-thickness conductor (h_cond=0) — the KI regime.
+  const meanderScene = (cellW, cellS) => sceneWith([
+    rect('mA', 'electrode', 0, 0, 'bar_w', 'cell_w', { consumedBy: 'mnd', conductorLayerId: 'l_cond' }),
+    rect('mB', 'electrode', 12, 0, 'bar_w', 'cell_w', { consumedBy: 'mnd', conductorLayerId: 'l_cond' }),
+    {
+      id: 'mnd', kind: 'boolean', op: 'union', operandIds: ['mA', 'mB'],
+      layer: 'electrode', cx: 0, cy: 0, w: '0', h: '0', cutouts: [], label: 'Meander',
+      conductorLayerId: 'l_cond',
+      transforms: [
+        { id: 'r1', kind: 'repeat', enabled: true, n: '2', dx: '0', dy: '(cell_w) + (cell_s)', includeOriginal: true },
+        { id: 'rot', kind: 'rotate', enabled: true, angle: '180', pivot: 'C' },
+        { id: 'dm', kind: 'duplicate_mirror', enabled: true, axis: 'x', offset: '40', includeOriginal: true },
+      ],
+    },
+    sectionLine('sec1', -80, 0, 200, 0),   // HORIZONTAL cut (crosses the bars)
+  ], {
+    params: {
+      bar_w: { expr: '2', unit: 'µm' },
+      cell_w: { expr: String(cellW), unit: 'µm', desc: 'cell period along the fold' },
+      cell_s: { expr: String(cellS), unit: 'µm', desc: 'cell spacing' },
+      h_cond: { expr: '0', unit: 'µm', desc: 'zero-thickness conductor' },
+    },
+  });
+
+  it('HORIZONTAL cut: the folded union parametrizes (t0Expr/t1Expr present, round-trip)', () => {
+    const scene = meanderScene(37.5, 2);
+    const pv = pvOf(scene);
+    const out = build(scene);
+    const m = out.conductors.find((c) => c.id === 'mnd');
+    expect(m).toBeTruthy();
+    expect(m.zeroThickness).toBe(true);
+    // At least one interval endpoint carries a round-tripping expr — the fold
+    // is parametric across the cross axis (BEFORE this feature it was 0).
+    const par = m.intervals.flatMap((iv) => [iv.t0Expr, iv.t1Expr]).filter(Boolean);
+    expect(par.length).toBeGreaterThan(0);
+    for (const iv of m.intervals) {
+      if (iv.t0Expr) expect(evalExpr(iv.t0Expr, pv)).toBeCloseTo(iv.t0, 6);
+      if (iv.t1Expr) expect(evalExpr(iv.t1Expr, pv)).toBeCloseTo(iv.t1, 6);
+    }
+  });
+
+  it('SWEEP PARITY: horizontal fold exprs re-evaluate to a fresh build at bumped cell period', () => {
+    const base = meanderScene(37.5, 2);
+    const fresh = meanderScene(38.2, 2.3); // cell_w +0.7, cell_s +0.3 (KI acceptance)
+    const outA = build(base);
+    const outB = build(fresh);
+    const pvB = pvOf(fresh);
+    const a = outA.conductors.find((c) => c.id === 'mnd');
+    const b = outB.conductors.find((c) => c.id === 'mnd');
+    const freshEnds = b.intervals.flatMap((iv) => [iv.t0, iv.t1]);
+    let checked = 0;
+    for (const iv of a.intervals) {
+      for (const key of ['t0', 't1']) {
+        const expr = iv[`${key}Expr`];
+        if (!expr) continue; // baked exempt
+        checked += 1;
+        const v = evalExpr(expr, pvB);
+        const near = freshEnds.reduce((best, e) => (Math.abs(e - v) < Math.abs(best - v) ? e : best), freshEnds[0]);
+        expect(Math.abs(v - near)).toBeLessThan(1e-4); // sweep-parity contract
+      }
+    }
+    expect(checked).toBeGreaterThan(0);
+  });
+
+  it('ALONG-FOLD (vertical) cut: pivot-parallel endpoints BAKE (never wrong), caveat warned', () => {
+    // Same cluster, but a VERTICAL section line through a bar column — the
+    // fold pivot Y drifts with cell period, so those endpoints must bake.
+    const scene = meanderScene(37.5, 2);
+    // Replace the section line with a vertical one through the mA column (x≈0).
+    const comps = scene.components.filter((c) => c.id !== 'sec1');
+    comps.push(sectionLine('sec1', 0, -80, 0, 200));
+    const vScene = sceneWith(comps, {
+      params: {
+        bar_w: { expr: '2', unit: 'µm' },
+        cell_w: { expr: '37.5', unit: 'µm' },
+        cell_s: { expr: '2', unit: 'µm' },
+        h_cond: { expr: '0', unit: 'µm' },
+      },
+    });
+    const out = build(vScene);
+    const m = out.conductors.find((c) => c.id === 'mnd');
+    if (m) {
+      // Sweep parity holds for whatever DID parametrize; the frozen ones are
+      // numeric (never wrong). Confirm no emitted expr is WRONG under a sweep.
+      const fresh = build(sceneWith(vScene.components, {
+        params: {
+          bar_w: { expr: '2', unit: 'µm' },
+          cell_w: { expr: '38.2', unit: 'µm' },
+          cell_s: { expr: '2.3', unit: 'µm' },
+          h_cond: { expr: '0', unit: 'µm' },
+        },
+      }));
+      const fm = fresh.conductors.find((c) => c.id === 'mnd');
+      const fEnds = fm ? fm.intervals.flatMap((iv) => [iv.t0, iv.t1]) : [];
+      const pvF = pvOf(sceneWith(vScene.components, {
+        params: {
+          bar_w: { expr: '2', unit: 'µm' }, cell_w: { expr: '38.2', unit: 'µm' },
+          cell_s: { expr: '2.3', unit: 'µm' }, h_cond: { expr: '0', unit: 'µm' },
+        },
+      }));
+      for (const iv of m.intervals) {
+        for (const key of ['t0', 't1']) {
+          const expr = iv[`${key}Expr`];
+          if (!expr) continue;
+          const v = evalExpr(expr, pvF);
+          const near = fEnds.reduce((best, e) => (Math.abs(e - v) < Math.abs(best - v) ? e : best), fEnds[0] ?? v);
+          expect(Math.abs(v - near)).toBeLessThan(1e-4);
+        }
+      }
+      // At least one endpoint baked → the frozen-fold caveat fired.
+      const anyBaked = m.intervals.some((iv) => !iv.t0Expr || !iv.t1Expr);
+      if (anyBaked) {
+        expect(out.warnings.some((w) => w.code === 'frozen-fold')).toBe(true);
+      }
+    }
+  });
+
+  it('never emits a WRONG parametric expr (round-trip guard holds at base)', () => {
+    const scene = meanderScene(37.5, 2);
+    const pv = pvOf(scene);
+    const out = build(scene);
+    for (const c of out.conductors) {
+      for (const iv of c.intervals) {
+        if (iv.t0Expr) expect(evalExpr(iv.t0Expr, pv)).toBeCloseTo(iv.t0, 6);
+        if (iv.t1Expr) expect(evalExpr(iv.t1Expr, pv)).toBeCloseTo(iv.t1, 6);
+      }
+    }
+  });
+
+  // REGRESSION (the parametric-but-WRONG bug): a fold whose PIVOT drifts under
+  // a cross-section-SHAPE param (not just the cell period). The baked pivot is
+  // then stale under that sweep, so EVERY fold expr must BAKE (frozen-fold),
+  // NOT emit a wrong parametric value. The gate probes ALL params, so a
+  // pivot-moving shape param is no longer exempt. Here mB sits at 12 + `skew`,
+  // so the union-bbox centre = 6 + skew/2 DRIFTS with skew.
+  const skewMeander = (skew) => sceneWith([
+    rect('mA', 'electrode', 0, 0, 'bar_w', 'cell_w', { consumedBy: 'mnd', conductorLayerId: 'l_cond' }),
+    rect('mB', 'electrode', 12, 0, 'bar_w', 'cell_w', { consumedBy: 'mnd', conductorLayerId: 'l_cond', cxExpr: '12 + skew' }),
+    {
+      id: 'mnd', kind: 'boolean', op: 'union', operandIds: ['mA', 'mB'],
+      layer: 'electrode', cx: 0, cy: 0, w: '0', h: '0', cutouts: [], label: 'Meander',
+      conductorLayerId: 'l_cond',
+      transforms: [
+        { id: 'r1', kind: 'repeat', enabled: true, n: '2', dx: '0', dy: '(cell_w) + (cell_s)', includeOriginal: true },
+        { id: 'rot', kind: 'rotate', enabled: true, angle: '180', pivot: 'C' },
+        { id: 'dm', kind: 'duplicate_mirror', enabled: true, axis: 'x', offset: '40', includeOriginal: true },
+      ],
+    },
+    sectionLine('sec1', -80, 0, 200, 0),
+  ], {
+    params: {
+      bar_w: { expr: '2', unit: 'µm' },
+      cell_w: { expr: '37.5', unit: 'µm' },
+      cell_s: { expr: '2', unit: 'µm' },
+      skew: { expr: String(skew), unit: 'µm', desc: 'shifts one bar → moves the fold pivot' },
+      h_cond: { expr: '0', unit: 'µm' },
+    },
+  });
+
+  it('a fold pivot that DRIFTS under a shape param → sweep-parity holds (wrong exprs BAKE)', () => {
+    const base = skewMeander(0);
+    const fresh = skewMeander(0.9); // shift a bar → the rotate-180 pivot moves
+    const a = build(base).conductors.find((c) => c.id === 'mnd');
+    const b = build(fresh).conductors.find((c) => c.id === 'mnd');
+    const pvB = pvOf(fresh);
+    const freshEnds = b.intervals.flatMap((iv) => [iv.t0, iv.t1]);
+    // EVERY emitted expr must still land on a fresh endpoint under the skew
+    // sweep — the whole point of the fix. (Before it, fold exprs carried a
+    // stale pivot and missed by ~skew.) Baked endpoints are exempt.
+    for (const iv of a.intervals) {
+      for (const key of ['t0', 't1']) {
+        const expr = iv[`${key}Expr`];
+        if (!expr) continue;
+        const v = evalExpr(expr, pvB);
+        const near = freshEnds.reduce((best, e) => (Math.abs(e - v) < Math.abs(best - v) ? e : best), freshEnds[0]);
+        expect(Math.abs(v - near)).toBeLessThan(1e-3);
+      }
+    }
+  });
+});
+
+// ── Waveguide rib: parametric slab-band + core-trapezoid t/z exprs ──────
+describe('buildCrossSection — parametric waveguide exprs', () => {
+  const wgScene = (wWg, hSlab) => sceneWith([
+    rect('wg1', 'waveguide', 0, 0, 'w_wg', '200'),
+    sectionLine('sec1', -30, 0, 30, 0), // ⟂ the vertical guide
+  ], {
+    params: {
+      w_wg: { expr: String(wWg), unit: 'µm' },
+      h_slab: { expr: String(hSlab), unit: 'µm' },
+    },
+  });
+
+  it('rib slab-band + core carry t and z exprs that round-trip', () => {
+    const scene = wgScene(1.2, 0.1);
+    const pv = pvOf(scene);
+    const out = build(scene);
+    const w = out.waveguides[0];
+    expect(w).toBeTruthy();
+    // slab band t + z
+    expect(w.slabBand).toBeTruthy();
+    const sb = w.slabBand;
+    expect(typeof sb.intervals[0].t0Expr).toBe('string');
+    expect(typeof sb.intervals[0].t1Expr).toBe('string');
+    expect(evalExpr(sb.intervals[0].t0Expr, pv)).toBeCloseTo(sb.intervals[0].t0, 6);
+    expect(evalExpr(sb.intervals[0].t1Expr, pv)).toBeCloseTo(sb.intervals[0].t1, 6);
+    expect(evalExpr(sb.z0Expr, pv)).toBeCloseTo(sb.z0, 6);
+    expect(evalExpr(sb.z1Expr, pv)).toBeCloseTo(sb.z1, 6);
+    // core trapezoid corners + z
+    const sg = w.core.segments[0];
+    for (const f of ['botT0', 'botT1', 'topT0', 'topT1']) {
+      expect(typeof sg[`${f}Expr`]).toBe('string');
+      expect(evalExpr(sg[`${f}Expr`], pv)).toBeCloseTo(sg[f], 6);
+    }
+    expect(evalExpr(w.core.zBotExpr, pv)).toBeCloseTo(w.core.zBot, 6);
+    expect(evalExpr(w.core.zTopExpr, pv)).toBeCloseTo(w.core.zTop, 6);
+  });
+
+  it('SWEEP PARITY: wg exprs track a core-width + slab-height sweep', () => {
+    const base = wgScene(1.2, 0.1);
+    const fresh = wgScene(1.6, 0.16);
+    const outA = build(base);
+    const outB = build(fresh);
+    const pvB = pvOf(fresh);
+    const a = outA.waveguides[0];
+    const b = outB.waveguides[0];
+    // slab band
+    expect(evalExpr(a.slabBand.intervals[0].t0Expr, pvB)).toBeCloseTo(b.slabBand.intervals[0].t0, 4);
+    expect(evalExpr(a.slabBand.intervals[0].t1Expr, pvB)).toBeCloseTo(b.slabBand.intervals[0].t1, 4);
+    expect(evalExpr(a.slabBand.z1Expr, pvB)).toBeCloseTo(b.slabBand.z1, 4);
+    // core corners (bottom widens with h_slab shrink; top = core width)
+    const sa = a.core.segments[0];
+    const sb2 = b.core.segments[0];
+    for (const f of ['botT0', 'botT1', 'topT0', 'topT1']) {
+      expect(evalExpr(sa[`${f}Expr`], pvB)).toBeCloseTo(sb2[f], 4);
+    }
+    expect(evalExpr(a.core.zBotExpr, pvB)).toBeCloseTo(b.core.zBot, 4);
+  });
+
+  it('oblique line omits wg exprs (numeric only)', () => {
+    const scene = sceneWith([
+      rect('wg1', 'waveguide', 0, 0, 'w_wg', '200'),
+      sectionLine('sec1', -30, -30, 30, 30),
+    ]);
+    const out = build(scene);
+    const w = out.waveguides[0];
+    if (w && w.slabBand) {
+      expect(w.slabBand.intervals[0].t0Expr).toBeUndefined();
+      expect(w.core.segments[0].botT0Expr).toBeUndefined();
+    }
+  });
+});
+
 // ── Oblique line ───────────────────────────────────────────────────────
 describe('buildCrossSection — oblique line', () => {
   const scene = sceneWith([

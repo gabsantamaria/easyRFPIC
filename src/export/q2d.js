@@ -351,35 +351,40 @@ ${rectBlock(name, posStr(iv.t0Expr, iv.t0), ys, spanStr(iv.t0Expr, iv.t1Expr, iv
   }
 
   // Waveguides: partially-etched slab band rect(s) + the etch-angle trapezoid
-  // core(s) as covered+closed polylines (numeric — the contract carries no
-  // exprs for wg cross-sections).
+  // core(s) as covered+closed polylines. The contract now carries parametric
+  // t/z exprs for perpendicular axis-aligned cuts (emitted verbatim in the
+  // standalone position fields); a missing expr bakes the numeric.
   for (const w of waveguides) {
     const wid = sane(w.id);
     const mat = w.material || 'vacuum';
     if (w.slabBand && Number.isFinite(w.slabBand.z0) && Number.isFinite(w.slabBand.z1) && w.slabBand.z1 - w.slabBand.z0 > 0) {
-      (w.slabBand.intervals || []).forEach((iv, k) => {
+      const sb = w.slabBand;
+      (sb.intervals || []).forEach((iv, k) => {
         if (!Number.isFinite(iv.t0) || !Number.isFinite(iv.t1) || iv.t1 - iv.t0 <= 0) return;
         const name = `wg_${wid}_slab${k}`;
-        tools.push({ name, zLo: w.slabBand.z0, zHi: w.slabBand.z1, tLo: iv.t0, tHi: iv.t1 });
-        geoBlocks.push(`# waveguide ${ascii(w.id)} slab band ${k}: t ${dec(iv.t0)}..${dec(iv.t1)}, z ${dec(w.slabBand.z0)}..${dec(w.slabBand.z1)} um
-${rectBlock(name, `${dec(iv.t0)}um`, `${dec(w.slabBand.z0)}um`, `${dec(iv.t1 - iv.t0)}um`, `${dec(w.slabBand.z1 - w.slabBand.z0)}um`, rgb(w.color), mat, 0.2, 'True')}`);
+        tools.push({ name, zLo: sb.z0, zHi: sb.z1, tLo: iv.t0, tHi: iv.t1 });
+        geoBlocks.push(`# waveguide ${ascii(w.id)} slab band ${k}: t ${dec(iv.t0)}..${dec(iv.t1)}, z ${dec(sb.z0)}..${dec(sb.z1)} um
+${rectBlock(name, posStr(iv.t0Expr, iv.t0), posStr(sb.z0Expr, sb.z0),
+    spanStr(iv.t0Expr, iv.t1Expr, iv.t0, iv.t1), spanStr(sb.z0Expr, sb.z1Expr, sb.z0, sb.z1),
+    rgb(w.color), mat, 0.2, 'True')}`);
       });
     }
     const core = w.core;
     if (core && Number.isFinite(core.zBot) && Number.isFinite(core.zTop) && core.zTop - core.zBot > 0) {
       (core.segments || []).forEach((sg, j) => {
         const pts = [
-          [sg.botT0, core.zBot], [sg.botT1, core.zBot],
-          [sg.topT1, core.zTop], [sg.topT0, core.zTop],
+          [sg.botT0, core.zBot, sg.botT0Expr, core.zBotExpr], [sg.botT1, core.zBot, sg.botT1Expr, core.zBotExpr],
+          [sg.topT1, core.zTop, sg.topT1Expr, core.zTopExpr], [sg.topT0, core.zTop, sg.topT0Expr, core.zTopExpr],
         ];
         if (pts.some(([a, b]) => !Number.isFinite(a) || !Number.isFinite(b))) return;
         const name = j === 0 ? `wg_${wid}_core` : `wg_${wid}_core_${j}`;
         tools.push({ name, zLo: core.zBot, zHi: core.zTop, tLo: Math.min(sg.botT0, sg.topT0), tHi: Math.max(sg.botT1, sg.topT1) });
         // Covered CLOSED polyline: explicit closure (first point repeated, 4
         // Line segments) — an implicitly-closed covered fill self-intersects
-        // in AEDT (same contract as the hfss-native ring emission).
+        // in AEDT (same contract as the hfss-native ring emission). PLPoint
+        // X/Y are standalone fields, so a parametric expr goes in verbatim.
         const ring = [...pts, pts[0]];
-        const ptStr = ring.map(([x, y]) => `["NAME:PLPoint", "X:=", "${dec(x)}um", "Y:=", "${dec(y)}um", "Z:=", "0um"]`).join(',\n          ');
+        const ptStr = ring.map(([x, y, xE, yE]) => `["NAME:PLPoint", "X:=", "${posStr(xE, x)}", "Y:=", "${posStr(yE, y)}", "Z:=", "0um"]`).join(',\n          ');
         const segs = pts.map((_, s2) => `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", ${s2}, "NoOfPoints:=", 2]`).join(',\n          ');
         geoBlocks.push(`# waveguide ${ascii(w.id)} core trapezoid ${j} (etch-angle sidewalls): z ${dec(core.zBot)}..${dec(core.zTop)} um
 q2d_poly(
@@ -437,25 +442,33 @@ q2d_poly(
   // LN with a horizontal optical axis) and E_vertical = ScalarY(E) (the stack
   // normal — the relevant one for Z-cut). Pick per your crystal cut.
   const wgc = includeFieldPoint && cross.wgCenter && Number.isFinite(cross.wgCenter.t) && Number.isFinite(cross.wgCenter.z) ? cross.wgCenter : null;
-  const fieldBlock = wgc ? `# ===== E-field probe at the waveguide core center (t=${dec(wgc.t)}, z=${dec(wgc.z)} um; comp ${ascii(wgc.compId || '?')}) =====
-# Whole block is release-fragile (FieldsReporter named expressions + point-
-# context reports change across AEDT versions) — one guarded unit.
+  // Short vertical probe LINE through the wg core center (±0.5 µm in z). A
+  // Fields report's Context MUST be a POLYLINE (or a reduced matrix), NEVER a
+  // bare point — pyAEDT's Fields._context builds ["Context:=", <polyline>,
+  // "PointCount:=", N] and a point object is only ever a Fields-Calculator
+  // EVALUATION location, not a report context. The earlier point-context
+  // report silently produced no traces. A short line reported vs Distance
+  // reads E across the core; the midpoint is the wg center.
+  const probeHalf = 0.5;
+  const fieldBlock = wgc ? `# ===== E-field probe THROUGH the waveguide core center (t=${dec(wgc.t)}, z=${dec(wgc.z)} um; comp ${ascii(wgc.compId || '?')}) =====
+# Whole block is release-fragile (FieldsReporter named expressions + field
+# reports change across AEDT versions) — one guarded unit.
 try:
-    oEditor.CreatePoint(
-        ["NAME:PointParameters",
-         "PointX:=", "${dec(wgc.t)}um", "PointY:=", "${dec(wgc.z)}um", "PointZ:=", "0um"],
-        ["NAME:Attributes", "Name:=", "wg_center", "Color:=", "(143 175 143)"])
+    # A Fields report needs a POLYLINE context (not a point). Short vertical
+    # segment through the core center; E is read vs Distance, midpoint = center.
+    oEditor.CreatePolyline(
+        ["NAME:PolylineParameters", "IsPolylineCovered:=", False, "IsPolylineClosed:=", False,
+         ["NAME:PolylinePoints",
+          ["NAME:PLPoint", "X:=", "${dec(wgc.t)}um", "Y:=", "${dec(wgc.z - probeHalf)}um", "Z:=", "0um"],
+          ["NAME:PLPoint", "X:=", "${dec(wgc.t)}um", "Y:=", "${dec(wgc.z + probeHalf)}um", "Z:=", "0um"]],
+         ["NAME:PolylineSegments",
+          ["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", 0, "NoOfPoints:=", 2]]],
+        ["NAME:Attributes", "Name:=", "wg_probe", "Color:=", "(143 175 143)"])
     oFld = oDesign.GetModule("FieldsReporter")
-    # Classic calculator-stack named expressions (recorded-script verbs; current
-    # pyAEDT routes these through LoadNamedExpressions instead — if
-    # AddNamedExpression is missing in your release, build them in the Fields
-    # Calculator GUI: E -> ScalarX -> Add... named "E_along_section", etc.)
-    # 2D Extractor fields live under the CG solution: the design's report/
-    # fields categories are exactly "Matrix", "CG Fields", "RL Fields"
-    # (Ansys Q3D/2DExtractor scripting guide; pyaedt Extractor2dConstants.
-    # report_templates). Plain "Fields" is HFSS-only — using it threw on
-    # AddNamedExpression and killed this whole guarded block on every
-    # release.
+    # Named expressions via the calculator (recorded-script verbs). 2D Extractor
+    # fields live under the CG solution: the fields categories are exactly
+    # "Matrix", "CG Fields", "RL Fields" (pyaedt Extractor2dConstants.
+    # report_templates). Plain "Fields" is HFSS-only and throws here.
     oFld.CalcStack("clear")
     oFld.EnterQty("E")
     oFld.CalcOp("ScalarX")
@@ -467,14 +480,14 @@ try:
     oRpt = oDesign.GetModule("ReportSetup")
     # Fields exist only where the solve SAVED them — the Interpolating sweep
     # carries no field data, so the probe reports over LastAdaptive (the
-    # adaptive frequency). For E vs Freq across the band, change the sweep
-    # to Discrete with "Save Fields" and re-target "Setup1 : Sweep1".
-    oRpt.CreateReport("E at WG center", "CG Fields", "Rectangular Plot",
-        "Setup1 : LastAdaptive", ["Context:=", "wg_center"],
-        ["Freq:=", ["All"], "Phase:=", ["0deg"]],
-        ["X Component:=", "Freq", "Y Component:=", ["mag(E_along_section)", "mag(E_vertical)"]])
+    # adaptive frequency). Context = the polyline + PointCount; the primary
+    # sweep of a field-over-geometry report is Distance (µm along the line).
+    oRpt.CreateReport("E through WG center", "CG Fields", "Rectangular Plot",
+        "Setup1 : LastAdaptive", ["Context:=", "wg_probe", "PointCount:=", 1001],
+        ["Distance:=", ["All"]],
+        ["X Component:=", "Distance", "Y Component:=", ["mag(E_along_section)", "mag(E_vertical)"]])
 except Exception as e:
-    q2d_msg(1, "Field-point block failed (create the point/named expressions in the GUI): " + str(e))` : '# (no waveguide center crossed — E-field probe skipped)';
+    q2d_msg(1, "Field-probe block failed (create the polyline + named expressions in the GUI): " + str(e))` : '# (no waveguide center crossed — E-field probe skipped)';
 
   // ---- Header ----
   const line = cross.line || { p0: { x: 0, y: 0 }, p1: { x: 0, y: 0 }, lengthUm: 0, axis: null };

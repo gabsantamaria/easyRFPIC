@@ -683,11 +683,41 @@ a length-typed var would double-convert (the documented 1e12 bug class);
 sizes strip `um` off both operands and re-type `(A - B)*1um`; setup type
 string is `"2DMatrix"` (pyAEDT SetupKeys[30], Open template) with CG/RL
 data blocks; slabs are Subtract-carved (KeepOriginals=True) around
-conductors/wg; reports: Z0 re/im ("Matrix", first SIGNAL's boundary),
-sqrt(eps_eff) = `im(Gamma(s,s))*299792458/(2*pi*Freq)`, and E at the
-wg-center CreatePoint via FieldsReporter named exprs — BOTH
-`E_along_section` (ScalarX) and `E_vertical` (ScalarY) since the crystal
-cut decides which drives r33.
+conductors/wg. The script SOLVES Setup1 (guarded `oDesign.Analyze`,
+default `autoSolve`) BEFORE the reports — the Z0/eps_eff reports read the
+sweep and the E-probe reads LastAdaptive fields, neither of which exists
+pre-solve. The interpolating sweep is `SaveFields:=False` (AEDT forbids
+saving fields on an interpolating sweep — it aborted InsertSweep and
+cascaded to "No Solution found"). Reports: Z0 re/im ("Matrix", first
+SIGNAL's boundary), sqrt(eps_eff) = `im(Gamma(s,s))*299792458/(2*pi*Freq)`,
+and E THROUGH the wg center via a short vertical PROBE POLYLINE (`wg_probe`,
+z±0.5 µm) reported vs Distance — a Fields report Context MUST be a polyline,
+never a bare point (pyAEDT's `Fields._context`; a point-context report
+silently produced no traces). Named exprs `E_along_section` (ScalarX) +
+`E_vertical` (ScalarY) via the calculator, category "CG Fields" (NOT the
+HFSS-only "Fields").
+
+**Q2D PARAMETRIC GEOMETRY** (cross-section.js *Expr fields → q2d emits them):
+Z of every conductor (layer thicknesses) + the waveguide (slab band + core
+trapezoid, t AND z) + simple translation-chain conductor rects are FULLY
+PARAMETRIC — sweeping the design params in AEDT reshapes the cut and
+re-Analyze works without re-export. A FOLDED boolean (meander:
+`repeat`+`rotate 180`+`duplicate_mirror`) is the exception: its fold
+pivot/plane is a BAKED constant (a min/max centroid over operands — the
+same quantity the HFSS export bakes), so its t-axis edges only track params
+that leave the pivot INVARIANT. `cross-section.js` gates fold exprs with an
+ALL-PARAM probe (`probeCtx`): it re-solves at a perturbed set of EVERY user
+param and BAKES any edge whose base-frozen expr disagrees with the
+probe-frozen expr (a `frozen-fold` warning fires). CRITICAL: the probe must
+perturb ALL params, not just repeat/displace period params — probing only
+the period left shape params (cell_h/trace_w) that ALSO move the pivot
+exempt, so a stale-pivot expr emitted PARAMETRIC-BUT-WRONG geometry with no
+warning (a horizontal meander cut mis-placed bars ~µm under a cell_h sweep).
+The round-trip guard + all-param probe make it correct-OR-baked, never
+silently wrong. For the KI meander the t-axis therefore BAKES (fold pivot
+drifts under trace_w/cell_d) + warns — re-export after a cross-section-shape
+sweep; Z + waveguide stay parametric. Guard: tests/cross-section.test.js
+"folded meander union" (incl. a pivot-DRIFT sweep-parity regression).
 
 **Tidy3D notebook** (`src/export/tidy3d-notebook.js`,
 tests/tidy3d-notebook.test.js): `generateTidy3DNotebook(cross, opts)` →
