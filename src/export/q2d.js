@@ -638,26 +638,57 @@ except Exception as e:
 # they will report "No Solution found" until the solve completes.`}
 # ===== Reports =====
 oRpt = oDesign.GetModule("ReportSetup")
+${autoSolve ? `# oDesign.Analyze can RETURN BEFORE a distributed solve finishes (it does on
+# some setups — the reports then race the solve and hit "Unable to find list
+# of variables for this context", the exact error this fixes). So each report
+# is RETRIED while the solution populates — up to ~3 min — then it gives up
+# softly (view the matrix from Results -> Solution Data -> Matrix instead).
 try:
+    import System
+    _have_sleep = True
+except:
+    _have_sleep = False
+def _mk_report(fn, label):
+    last = ""
+    for _attempt in range(36):
+        try:
+            fn()
+            q2d_msg(0, label + " created.")
+            return True
+        except Exception as e:
+            last = str(e)
+            if not _have_sleep:
+                break
+            try:
+                System.Threading.Thread.Sleep(5000)  # wait for the solve to populate
+            except:
+                break
+    q2d_msg(1, label + " not created (solution not ready yet). Once Setup1 finishes solving, re-run this report block, or read Z0/C from Results -> Solution Data -> Matrix: " + last)
+    return False
+` : `def _mk_report(fn, label):
+    # autoSolve off: Analyze Setup1 from the GUI first, then re-run this block.
+    try:
+        fn(); q2d_msg(0, label + " created."); return True
+    except Exception as e:
+        q2d_msg(1, label + " failed (is Setup1 solved?): " + str(e)); return False
+`}def _rep_z0():
     oRpt.CreateReport("Z0 vs Freq", "Matrix", "Rectangular Plot",
         "Setup1 : Sweep1", ["Context:=", "Original"], ["Freq:=", ["All"]],
         ["X Component:=", "Freq",
          "Y Component:=", ["re(Z0(${sig},${sig}))", "im(Z0(${sig},${sig}))"]])
-except Exception as e:
-    q2d_msg(1, "Z0 report failed: " + str(e))
+_mk_report(_rep_z0, "Z0 report")
 # UNITS (critical — see the tl_DeltaL_m 1e12 lesson in CLAUDE.md): in a report
 # expression Gamma(${sig},${sig}) resolves in SI — im(Gamma) = beta in rad/m —
 # and the reserved Freq resolves in Hz. sqrt(eps_eff) = beta*c/omega =
 # im(Gamma)*299792458/(2*pi*Freq), a clean DIMENSIONLESS number. If a future
 # AEDT changes either SI resolution, this trace scales by a power of ten —
 # check this expression first when sqrt(eps_eff) looks absurd.
-try:
+def _rep_eps():
     oRpt.CreateReport("sqrt(eps_eff) vs Freq", "Matrix", "Rectangular Plot",
         "Setup1 : Sweep1", ["Context:=", "Original"], ["Freq:=", ["All"]],
         ["X Component:=", "Freq",
          "Y Component:=", ["im(Gamma(${sig},${sig}))*299792458/(2*pi*Freq)"]])
-except Exception as e:
-    q2d_msg(1, "sqrt(eps_eff) report failed: " + str(e))
+_mk_report(_rep_eps, "sqrt(eps_eff) report")
 
 ${fieldBlock}
 

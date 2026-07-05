@@ -149,6 +149,21 @@ describe('generateQ2DExtractor', () => {
     expect(buildOnly).toContain('Build-only');
     // sweep is still valid (SaveFields False) even in build-only mode
     expect(buildOnly).toContain('"Type:=", "Interpolating", "SaveFields:=", False');
+    // build-only path uses the simple (non-retry) report helper
+    expect(buildOnly).not.toContain('System.Threading.Thread.Sleep');
+  });
+
+  it('reports RETRY while a distributed solve populates (Analyze can return early)', () => {
+    // oDesign.Analyze returned before the distributed solve finished on the
+    // user's setup -> the reports raced it and hit "Unable to find list of
+    // variables for this context". Each report is retried while the matrix
+    // fills in, then falls back to a soft message pointing at Results.
+    expect(out).toContain('def _mk_report(fn, label)');
+    expect(out).toContain('System.Threading.Thread.Sleep(5000)');
+    expect(out).toContain('_mk_report(_rep_z0, "Z0 report")');
+    expect(out).toContain('_mk_report(_rep_eps, "sqrt(eps_eff) report")');
+    // the report bodies still carry the exact matrix expressions
+    expect(out).toContain('CreateReport("Z0 vs Freq", "Matrix"');
   });
 
   it('Z0 and Gamma-based sqrt(eps_eff) report expressions are exact', () => {
