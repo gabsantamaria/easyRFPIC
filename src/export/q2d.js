@@ -51,6 +51,8 @@
 // difference re-typed with *1um; mismatched/unstrippable expr pairs fall back
 // to the always-present numerics.
 
+import { simplifyExpr } from '../scene/expr-simplify.js';
+
 // ASCII sanitizer for the emitted script. Common typographic chars map to
 // readable ASCII first (the emitted comments use em-dashes/arrows) so the
 // generated Python stays legible; anything else non-ASCII becomes '?'.
@@ -91,10 +93,18 @@ const innerOf = (expr) => {
 };
 
 // Position field: contract expr VERBATIM when present (standalone fields accept
-// the "(X)um" quirk form), else the numeric baked in µm.
+// the "(X)um" quirk form), else the numeric baked in µm. The contract emits
+// ENORMOUS composed exprs (snap-chain + transform-matrix + boolean-bbox
+// fallbacks) full of `+ (0)`, `* (1)`, `cos(180deg)`, and float noise — so the
+// INNER (unit-free) part is run through simplifyExpr, which is numeric-identity
+// self-guarded (any risk -> it returns the inner unchanged). Non-quirk exprs
+// (rare here) pass through verbatim.
 const posStr = (expr, numeric) => {
   const s = String(expr ?? '').trim();
-  return s ? s : `${dec(numeric)}um`;
+  if (!s) return `${dec(numeric)}um`;
+  const inner = innerOf(s); // "(X)" if the standalone quirk form, else null
+  if (inner) return `(${simplifyExpr(inner)})um`;
+  return s;
 };
 
 // Size field: (end - start). Compound context, so "(X)um" operands must be
@@ -102,12 +112,18 @@ const posStr = (expr, numeric) => {
 // dimensionless — see the units note in the module header). Two exprs that
 // BOTH lack the quirk form are assumed hfss-native compound-safe ("(0um) +
 // (h_wg)") and differenced directly. Anything mixed/absent -> numeric.
+//
+// The difference is simplifyExpr'd BEFORE re-typing so structurally-cancelling
+// spans collapse — e.g. a real conductor width `(BIG + w/2) - (BIG - w/2)`
+// becomes the single width param `w`. KEEP the `*1um` suffix: AEDT rejects the
+// standalone "(X)um" form inside a compound field value, so a simplified span
+// that reduces to a lone variable still needs the multiply to carry the unit.
 const spanStr = (e0, e1, n0, n1) => {
   const s0 = String(e0 ?? '').trim(), s1 = String(e1 ?? '').trim();
   if (s0 && s1) {
     const i0 = innerOf(s0), i1 = innerOf(s1);
-    if (i0 && i1) return `(${i1} - ${i0})*1um`;
-    if (!i0 && !i1) return `(${s1}) - (${s0})`;
+    if (i0 && i1) return `(${simplifyExpr(`${i1} - ${i0}`)})*1um`;
+    if (!i0 && !i1) return `(${simplifyExpr(`(${s1}) - (${s0})`)})`;
   }
   return `${dec(n1 - n0)}um`;
 };
@@ -330,7 +346,10 @@ ${rectBlock(name, `${dec(tMin)}um`, posStr(s.z0Expr, z0), `${dec(tMax - tMin)}um
     let ys, hs;
     if (isSheet) {
       const i0 = innerOf(c.z0Expr);
-      ys = i0 ? `(${i0} - ${dec(zeroThk / 2)})*1um` : `${dec(zLo)}um`;
+      // Thin-sheet YStart = (conductor bottom) - half the drawn thickness.
+      // Simplify the compound so a parametric z0 like "(h_wg)" collapses the
+      // redundant parens; self-guarded, so numerically identical.
+      ys = i0 ? `(${simplifyExpr(`${i0} - ${dec(zeroThk / 2)}`)})*1um` : `${dec(zLo)}um`;
       hs = `${dec(zeroThk)}um`;
     } else {
       ys = posStr(c.z0Expr, z0);

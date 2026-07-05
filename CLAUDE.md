@@ -670,6 +670,24 @@ line resolved to NaN → GDS origin-spikes); buildTwoLineScene bakes SOLVED
 positions before dropping section lines (raw cx/cy is stale for
 snap-bound parts).
 
+**Expression simplifier** (`src/scene/expr-simplify.js`,
+tests/expr-simplify.test.js): `simplifyExpr(s)` compacts the ENORMOUS
+composed position/size exprs the parametric cross-section emits (snap
+chain × transform-matrix × boolean-bbox fallbacks — full of `+ (0)`,
+`* (1)`, `cos(180*pi/180)`, float noise, and un-cancelled common
+sub-expressions). Parses arithmetic → constant-folds (incl. trig of
+constant args, pi) → normalizes to a canonical LINEAR form (constant +
+{atom→coeff}; atoms are design vars or OPAQUE preserved-exactly
+subexprs) → collects like terms (this cancels a width's
+`(BIG + w/2) − (BIG − w/2)` → `w`) → re-emits compact. A seeded
+≥8-probe evalExpr SELF-GUARD returns the ORIGINAL string on any numeric
+mismatch / parse failure / non-finite probe — a bug can only fail to
+simplify, never corrupt geometry. q2d.js runs it on the inner of every
+`(X)um` position and every `(A − B)*1um` size (keeping `*1um` — AEDT
+rejects `(X)um` in a compound). Real KI cond22 Width: 2747 chars →
+`feezZ0_W` (8 chars); XStart 1370 → 73. Value-preservation fuzz-verified
+across ~500 random exprs + the real design.
+
 **Q2D exporter** (`src/export/q2d.js`, tests/q2d.test.js):
 `generateQ2DExtractor(cross, opts)` → IronPython for AEDT "2D Extractor"
 (THROWS on ok:false/bad roles; `validateQ2DRoles` is the UI gate). opts:

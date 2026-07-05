@@ -82,17 +82,26 @@ describe('generateQ2DExtractor', () => {
     expect(out).not.toContain('"Name:=", "slab_l_wg"');
   });
 
-  it('uses contract exprs VERBATIM for positions and unit-stripped diffs for sizes', () => {
-    // gnd_top YStart is the parametric conductor bottom, verbatim.
+  it('uses contract exprs for positions and SIMPLIFIED unit-stripped diffs for sizes', () => {
+    // gnd_top YStart is the parametric conductor bottom; simplifyExpr leaves a
+    // lone-var inner untouched, so the standalone quirk form is unchanged.
     expect(out).toContain('"YStart:=", "(h_wg)um"');
     // Interval XStart verbatim.
     expect(out).toContain('"XStart:=", "(0)um"');
     // Sizes are (end - start) compounds: the "(X)um" quirk form is standalone-
-    // only in AEDT, so the unit is stripped and re-typed with *1um.
-    expect(out).toContain('"Height:=", "((h_wg + h_cond) - (h_wg))*1um"');
-    expect(out).toContain('"Width:=", "((40) - (0))*1um"');
+    // only in AEDT, so the unit is stripped and re-typed with *1um. simplifyExpr
+    // collapses the difference: (h_wg + h_cond) - (h_wg) -> h_cond; (40)-(0) -> 40.
+    expect(out).toContain('"Height:=", "(h_cond)*1um"');
+    expect(out).toContain('"Width:=", "(40)*1um"');
     // Non-parametric sig conductor bakes numerics.
     expect(out).toContain('"XStart:=", "45um"');
+  });
+
+  it('emits NO redundant arithmetic (no "+ (0)" / "* (1)") after simplification', () => {
+    // The whole point of the simplifier: the contract's composed exprs are full
+    // of identity cruft; none may survive into the emitted script.
+    expect(out).not.toContain('+ (0)');
+    expect(out).not.toContain('* (1)');
   });
 
   it('assigns ONE boundary per conductor with the pyAEDT prop list', () => {
@@ -261,7 +270,8 @@ describe('generateQ2DExtractor — variants', () => {
     g.zeroThickness = true;
     g.z1 = g.z0;
     const out = generateQ2DExtractor(cx, { roles: ROLES, condThicknessUm: 0.4 });
-    expect(out).toContain('"YStart:=", "((h_wg) - 0.2)*1um"');
+    // Simplified: (h_wg) - 0.2 -> h_wg - 0.2 (redundant parens dropped).
+    expect(out).toContain('"YStart:=", "(h_wg - 0.2)*1um"');
     expect(out).toContain('"Height:=", "0.4um"');
   });
 
@@ -316,10 +326,11 @@ describe('generateQ2DExtractor — variants', () => {
       botT0Expr: '(48.9)um', botT1Expr: '(51.1)um', topT0Expr: '(49.25)um', topT1Expr: '(50.75)um',
     };
     const out = generateQ2DExtractor(cx, { roles: ROLES });
-    // slab rect: parametric YStart + Height (compound diff via *1um)
+    // slab rect: parametric YStart + Height (compound diff via *1um).
+    // simplifyExpr collapses (h_slab) - (0) -> h_slab.
     const slab = out.slice(out.indexOf('"Name:=", "wg_wg1_slab0"') - 400, out.indexOf('"Name:=", "wg_wg1_slab0"'));
     expect(slab).toContain('"YStart:=", "(0)um"');
-    expect(slab).toContain('"Height:=", "((h_slab) - (0))*1um"');
+    expect(slab).toContain('"Height:=", "(h_slab)*1um"');
     // core polyline: parametric PLPoint Y = (h_slab)um / (h_wg)um
     const poly = out.slice(out.indexOf('q2d_poly('), out.indexOf('"Name:=", "wg_wg1_core"') + 40);
     expect(poly).toContain('"Y:=", "(h_slab)um"');
@@ -341,8 +352,10 @@ describe('generateQ2DExtractor — variants', () => {
     sig.intervals[0] = { t0: 45, t1: 55, t0Expr: '((cell_w) + 8)um', t1Expr: '((cell_w) + 18)um' };
     cx.params = { ...cx.params, cell_w: 37 };
     const out = generateQ2DExtractor(cx, { roles: ROLES });
-    expect(out).toContain('"XStart:=", "((cell_w) + 8)um"');
-    expect(out).toContain('"Width:=", "(((cell_w) + 18) - ((cell_w) + 8))*1um"');
+    // XStart position expr keeps the (verbatim standalone) form, with the inner
+    // simplified: ((cell_w) + 8) -> cell_w + 8. Width collapses to the literal 10.
+    expect(out).toContain('"XStart:=", "(cell_w + 8)um"');
+    expect(out).toContain('"Width:=", "(10)*1um"');
     // dimensionless design var for the referenced param
     expect(out).toContain('set_var("cell_w", "37")');
   });
