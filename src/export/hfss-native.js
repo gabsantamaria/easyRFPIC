@@ -682,12 +682,28 @@ export function computeParametricPositions(components, snaps, paramValues = {}, 
 // Python 2.7 compatible (no f-strings, ASCII only).
 // =========================================================================
 export function generateHfssNative(scene, paramValues, options = {}) {
-  // options.appendToActive — if true, generate a script that adds the
-  //   geometry to whatever HFSS project/design is currently active
-  //   instead of creating a fresh one. Used when the user already has
-  //   a design wired up with setups / sweeps / boundaries they don't
-  //   want to recreate every export.
-  const appendToActive = !!options.appendToActive;
+  // options.appendMode — WHERE the script builds:
+  //   'new'     (default): create a fresh PROJECT (named options.projectName)
+  //             + a fresh DESIGN (named options.designName) with setup/sweep.
+  //   'project': attach to the currently ACTIVE project (no new project) but
+  //             create a fresh DESIGN in it, with setup/sweep. For collecting
+  //             many design versions in one project.
+  //   'design':  attach to the active project AND active design — add ONLY
+  //             geometry, no project/design/setup/sweep (the design already
+  //             has its own). This is the legacy `appendToActive: true`.
+  // Legacy: options.appendToActive === true maps to 'design'.
+  const appendMode = options.appendMode
+    || (options.appendToActive ? 'design' : 'new');
+  // Geometry-only attach: skip project/design creation AND setup/sweep, and
+  // arm the delete-if-exists guards (only 'design' reuses a live design).
+  const appendToActive = appendMode === 'design';
+  // AEDT design/project names must be identifier-safe (no spaces / ':' / etc.).
+  const sanName = (s, fallback) => {
+    const t = String(s ?? '').replace(/[^A-Za-z0-9_.\-]+/g, '_').replace(/^_+|_+$/g, '');
+    return t || fallback;
+  };
+  const projectName = sanName(options.projectName, 'PhotonicLayout');
+  const designName = sanName(options.designName, 'Layout');
   const { params, components, mirrors, snaps, stack } = scene;
   const solvedAll = applyMirrors(solveLayout(components, snaps, paramValues), mirrors);
   // Non-model components (section lines) are solver-visible — a child
@@ -1266,18 +1282,36 @@ ScriptEnv.Initialize("Ansoft.ElectronicsDesktop")
 oDesktop.RestoreWindow()
 
 # --- Project / design setup ---
-${appendToActive ? `# Append mode: attach to the currently active project/design instead of
-# making a new one. Useful when the design already has its own setups,
-# sweeps, and boundary assignments that we don't want to overwrite.
+${appendMode === 'design' ? `# Append-to-DESIGN: attach to the currently active project AND design; add
+# only geometry (the active design keeps its own setups/sweeps/excitations).
 oProject = oDesktop.GetActiveProject()
 if oProject is None:
     raise Exception("No active HFSS project. Open a project before running this script.")
 oDesign = oProject.GetActiveDesign()
 if oDesign is None:
     raise Exception("No active HFSS design. Open a design before running this script.")
-oEditor = oDesign.SetActiveEditor("3D Modeler")` : `oProject = oDesktop.NewProject()
-oProject.InsertDesign("HFSS", "Layout", "DrivenModal", "")
-oDesign = oProject.SetActiveDesign("Layout")
+oEditor = oDesign.SetActiveEditor("3D Modeler")` : appendMode === 'project' ? `# Append-to-PROJECT: attach to the currently active project (no new project)
+# and add a NEW design to it, with its own setup/sweep.
+oProject = oDesktop.GetActiveProject()
+if oProject is None:
+    raise Exception("No active HFSS project. Open a project before running this script.")
+oProject.InsertDesign("HFSS", "${designName}", "DrivenModal", "")
+oDesign = oProject.SetActiveDesign("${designName}")
+oEditor = oDesign.SetActiveEditor("3D Modeler")` : `# New PROJECT (named <workspace>_<design>) + new DESIGN (named for the version
+# + export timestamp), with its own setup/sweep.
+oProject = oDesktop.NewProject()
+# Name the project. Rename needs a file path, so target the default projects
+# directory (the project stays UNSAVED until the user saves). Guarded — a
+# name clash / read-only dir just leaves the default "ProjectN" name.
+try:
+    import os
+    _proj_dir = oDesktop.GetProjectDirectory()
+    oProject.Rename(os.path.join(_proj_dir, "${projectName}.aedt"), True)
+except Exception as _e:
+    try: oDesktop.AddMessage("", "", 1, "Project rename skipped: " + str(_e))
+    except: pass
+oProject.InsertDesign("HFSS", "${designName}", "DrivenModal", "")
+oDesign = oProject.SetActiveDesign("${designName}")
 oEditor = oDesign.SetActiveEditor("3D Modeler")`}
 
 # Force the model length unit to micron. EVERYTHING this script emits is in
@@ -5164,7 +5198,11 @@ except Exception as e:
             minPass: tlQ3D.minPass,
             maxPass: tlQ3D.maxPass,
             designName: 'q3d_cap',
-            hfssDesignName: 'Layout',
+            // Must MATCH the name the HFSS design was actually created with
+            // (InsertDesign uses `designName`, not the old literal "Layout") —
+            // else the post-Q3D SetActiveDesign switches back to a nonexistent
+            // design and the tl_C_F_per_m set_var + Z0 report silently no-op.
+            hfssDesignName: designName,
             cVarName: 'tl_C_F_per_m',
           });
         } catch (e) {
@@ -5321,12 +5359,21 @@ except Exception as e:
     // append mode (no project/setup/sweep created) and port-layer rects
     // whose Lumped-port flag is off (no excitation emitted). Both cost a
     // solve-with-no-excitations round trip in HFSS when missed.
-    if (appendToActive) {
-      lines.push('# ===== APPEND MODE =====');
+    if (appendMode === 'design') {
+      lines.push('# ===== APPEND-TO-DESIGN MODE =====');
       lines.push('# This script only ADDS GEOMETRY to the currently active HFSS design.');
       lines.push('# NO project, analysis setup, or frequency sweep is created (the active');
-      lines.push('# design is assumed to have its own). For a self-contained script, turn');
-      lines.push('# OFF "Append to active design" in the SETUP panel and re-export.');
+      lines.push('# design is assumed to have its own). For a self-contained script, pick');
+      lines.push('# "New project" (or "Append to project") in the SETUP panel and re-export.');
+      lines.push('#');
+    } else if (appendMode === 'project') {
+      lines.push('# ===== APPEND-TO-PROJECT MODE =====');
+      lines.push(`# Adds a NEW design "${ascii(designName)}" (with its own setup + sweep) to the`);
+      lines.push('# currently ACTIVE HFSS project. No new project is created. Open the target');
+      lines.push('# project in HFSS before running this script.');
+      lines.push('#');
+    } else {
+      lines.push(`# Creates project "${ascii(projectName)}" + design "${ascii(designName)}" (with setup + sweep).`);
       lines.push('#');
     }
     const portRectsAll = (solved || []).filter(c => c.layer === 'port' && c.kind === 'rect');

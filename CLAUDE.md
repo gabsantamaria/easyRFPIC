@@ -982,6 +982,46 @@ Transform chain emission uses the same logic as pyAEDT (separate helper `emitTra
 output-variable + report block before `oProject.Save()` (see "2-line method
 wizard"). Absent the option, output is byte-identical to before.
 
+**Export target mode** (`options.appendMode`, shared by `generateHfssNative`
+AND `generateQ2DExtractor`) — WHERE the generated script builds. Three values:
+- `'new'` (default): `oDesktop.NewProject()`, then a guarded `oProject.Rename`
+  to `<options.projectName>.aedt` inside `oDesktop.GetProjectDirectory()`
+  (`import os` + `os.path.join`; the project stays UNSAVED, a clash/read-only
+  dir just leaves the default `ProjectN` name), then
+  `InsertDesign("HFSS", <options.designName>, "DrivenModal", "")` +
+  `SetActiveDesign`, then Setup1 + sweep.
+- `'project'`: `oDesktop.GetActiveProject()` (raises if None — open a project
+  first), `InsertDesign(...)` a NEW named design into it (NO new project),
+  then Setup1 + sweep.
+- `'design'`: `GetActiveProject()` + `GetActiveDesign()` (both raise if None),
+  GEOMETRY ONLY — no `InsertDesign`, no setup/sweep. This is the legacy
+  `options.appendToActive: true` path (which still maps here for
+  back-compat: `appendMode = options.appendMode || (options.appendToActive ?
+  'design' : 'new')`). The internal `appendToActive` flag is exactly
+  `appendMode === 'design'`, so it still gates the `if (!appendToActive)`
+  setup/sweep block AND the `APPEND_MODE = <bool>` python var used by the
+  delete-if-exists guards — unchanged semantics, just a superset of modes.
+  A leading ASCII banner names the active mode (`APPEND-TO-DESIGN MODE` /
+  `APPEND-TO-PROJECT MODE` / a one-line "Creates project … + design …").
+  `options.projectName`/`designName` are `sanName`-sanitized
+  (`[^A-Za-z0-9_.\-]` → `_`, trim `_`), falling back to
+  `'PhotonicLayout'`/`'Layout'`. Q2D uses the same three-way block +
+  `InsertDesign("2D Extractor", <designName>, "", "")` and gates its whole
+  analysis/setup/sweep/solve/reports tail on `appendMode !== 'design'`. No
+  option → `'new'`, byte-identical to before.
+
+The UI (SETUP panel) writes `scene.simSetup.appendMode` (a 3-radio group;
+also mirrors the legacy `appendToActive` boolean so old readers stay
+consistent). `PhotonicLayout.jsx` derives the names: `projectNameForExport()
+= aedtName("<workspace>_<design>")`; `designNameForExport()` =
+`v<N><c>_<description>_<yyyymmdd>_<hhmm>` where N is the CURRENT snapshot's
+`versionNumber` (0 if never snapshotted), `c` is present iff
+`currentIsModified` (working state differs from its snapshot), and
+`<description>` is that version's optional description (sanitized, dropped
+when blank). `nativeNameOpts()` bundles `{ appendMode, projectName,
+designName }` into `generateHfssNative` (main + two-line export) and the
+Q2DWizard props (forwarded verbatim into `generateQ2DExtractor`).
+
 **Parametric union-boolean chains** (`computeParametricPositions`): the
 snap DAG walker keeps EVERYTHING around a union cluster live in HFSS:
 `boolBBoxParametric(c)` (memoized) derives the union's bbox DIMS **and

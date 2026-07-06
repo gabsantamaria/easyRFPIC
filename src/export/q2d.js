@@ -226,6 +226,14 @@ export function generateQ2DExtractor(cross, opts = {}) {
   if (!rv.ok) throw new Error(rv.error);
 
   const design = sane(opts.designName || 'q2d_section');
+  // WHERE the script builds (same 3-way as generateHfssNative):
+  //   'new' (default): fresh PROJECT (opts.projectName) + fresh DESIGN.
+  //   'project': attach to the ACTIVE project, add a fresh DESIGN + solve.
+  //   'design':  attach to the active project AND design — geometry only, no
+  //             design insert / setup / sweep / solve / reports.
+  const appendMode = opts.appendMode === 'project' || opts.appendMode === 'design'
+    ? opts.appendMode : 'new';
+  const projectName = sane(opts.projectName || 'PhotonicLayout');
   const fStart = Number.isFinite(opts.freqStartGHz) && opts.freqStartGHz > 0 ? opts.freqStartGHz : 1;
   const fStop = Number.isFinite(opts.freqStopGHz) && opts.freqStopGHz > fStart ? opts.freqStopGHz : Math.max(fStart * 2, 50);
   const fPoints = Number.isFinite(opts.freqPoints) && opts.freqPoints >= 2 ? Math.round(opts.freqPoints) : 200;
@@ -530,10 +538,36 @@ ${warnLines || '# (no cross-section warnings)'}
 import ScriptEnv
 ScriptEnv.Initialize("Ansoft.ElectronicsDesktop")
 oDesktop.RestoreWindow()
-oProject = oDesktop.NewProject()
+${appendMode === 'design' ? `# Append-to-DESIGN: attach to the active project AND design (geometry only;
+# the active design keeps its own setup/sweep). This slice just adds sheets.
+oProject = oDesktop.GetActiveProject()
+if oProject is None:
+    raise Exception("No active AEDT project. Open one before running this script.")
+oDesign = oProject.GetActiveDesign()
+if oDesign is None:
+    raise Exception("No active design. Open a 2D Extractor design before running this script.")
+oEditor = oDesign.SetActiveEditor("3D Modeler")` : appendMode === 'project' ? `# Append-to-PROJECT: attach to the active project (no new project), add a NEW
+# 2D Extractor design "${design}" to it with its own setup + sweep.
+oProject = oDesktop.GetActiveProject()
+if oProject is None:
+    raise Exception("No active AEDT project. Open one before running this script.")
 oProject.InsertDesign("2D Extractor", "${design}", "", "")
 oDesign = oProject.SetActiveDesign("${design}")
-oEditor = oDesign.SetActiveEditor("3D Modeler")
+oEditor = oDesign.SetActiveEditor("3D Modeler")` : `# New PROJECT "${projectName}" + new 2D Extractor DESIGN "${design}".
+oProject = oDesktop.NewProject()
+# Name the project (Rename needs a path -> the default projects dir; the
+# project stays UNSAVED until the user saves). Guarded: a clash / read-only
+# dir just leaves the default "ProjectN".
+try:
+    import os
+    _proj_dir = oDesktop.GetProjectDirectory()
+    oProject.Rename(os.path.join(_proj_dir, "${projectName}.aedt"), True)
+except Exception as _e:
+    try: oDesktop.AddMessage("", "", 1, "Project rename skipped: " + str(_e))
+    except: pass
+oProject.InsertDesign("2D Extractor", "${design}", "", "")
+oDesign = oProject.SetActiveDesign("${design}")
+oEditor = oDesign.SetActiveEditor("3D Modeler")`}
 ${Q2D_MSG_DEF}
 # Q2D solution types are "Open"/"Close" (pyaedt setup_templates index 30/31);
 # Open = fields may extend beyond the drawn region. Some releases preset this
@@ -596,7 +630,10 @@ def q2d_ground(name, objs, thk):
     except Exception as e:
         q2d_msg(2, "AssignSingleReferenceGround " + name + " failed: " + str(e))
 ${bndCalls}
-
+${appendMode === 'design' ? `
+# (Append-to-design: geometry + conductor roles added to the active design,
+#  which keeps its OWN setup / sweep / solve / reports. Nothing else emitted.)
+q2d_msg(0, "Q2D cross-section geometry added to the active design.")` : `
 # ===== Analysis setup (setup type "2DMatrix" = pyaedt Q2D "Open" template) =====
 # CG PerError ${cgPerError}% / RL PerError ${rlPerError}%, passes ${minPasses}..${maxPasses}.
 # (pyaedt's template ships DataType "CG" in BOTH blocks; GUI recordings use "RL"
@@ -711,7 +748,7 @@ _mk_report(_rep_eps, "sqrt(eps_eff) report")
 
 ${fieldBlock}
 
-q2d_msg(0, ${autoSolve ? '"Q2D cross-section solved — see the Z0 / sqrt(eps_eff) reports (and the E-field report if a waveguide was crossed)."' : '"Q2D cross-section built — Analyze Setup1, then re-run the report block."'})
+q2d_msg(0, ${autoSolve ? '"Q2D cross-section solved — see the Z0 / sqrt(eps_eff) reports (and the E-field report if a waveguide was crossed)."' : '"Q2D cross-section built — Analyze Setup1, then re-run the report block."'})`}
 `;
   return ascii(code);
 }

@@ -33,7 +33,7 @@ function coerceValidation(v) {
   return { ok: !!v, errors: v ? [] : ['Role assignment failed validation.'] };
 }
 
-function Q2DWizardInner({ onClose, scene, paramValues, sectionCompId, simSetup, designBaseName, onDownload }) {
+function Q2DWizardInner({ onClose, scene, paramValues, sectionCompId, simSetup, designBaseName, projectName, designName, appendMode, onDownload }) {
   // Live slice — the SAME call Generate consumes. buildCrossSection reports
   // unusable input as { ok:false, error }, but a parallel-authored throw must
   // not white-screen the app, so belt-and-braces try/catch.
@@ -125,7 +125,12 @@ function Q2DWizardInner({ onClose, scene, paramValues, sectionCompId, simSetup, 
         minPasses: numOr(minPass, 1),
         maxPasses: numOr(maxPass, 16),
         condThicknessUm: anyZeroThk && Number.isFinite(zeroThkNum) && zeroThkNum > 0 ? zeroThkNum : undefined,
-        designName: designBaseName,
+        // AEDT project/design names + append mode (shared with the native HFSS
+        // export). designName = version-tagged name; projectName = <ws>_<design>
+        // for a fresh project; appendMode = new | project | design.
+        designName: designName || designBaseName,
+        projectName,
+        appendMode,
       });
       onDownload(script, `${designBaseName || 'layout'}_q2d.py`);
       onClose();

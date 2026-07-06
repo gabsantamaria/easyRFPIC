@@ -5701,12 +5701,45 @@ export default function App() {
     const ts = `${d.getFullYear()}_${pad2(d.getMonth() + 1)}_${pad2(d.getDate())}_${pad2(d.getHours())}_${pad2(d.getMinutes())}`;
     return `${ws}_${designFileBase()}_${designVersionTag()}_${ts}`;
   };
+  // AEDT identifier sanitizer (design/project names: no spaces / ':' / etc.).
+  const aedtName = (s) => String(s ?? '').replace(/[^A-Za-z0-9_\-]+/g, '_').replace(/^_+|_+$/g, '');
+  // AEDT DESIGN name for a native export: vN(c)_<description>_<yyyymmdd>_<hhmm>.
+  // vN = the snapshot the working state sits on; the 'c' suffix marks the
+  // CURRENT (modified-since-snapshot) working state; v0 = never snapshotted.
+  // <description> = that version's optional description (sanitized, dropped
+  // when blank). Datetime = the export moment (local).
+  const designNameForExport = () => {
+    const pad2 = (n) => String(n).padStart(2, '0');
+    const d = new Date();
+    const dt = `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}_${pad2(d.getHours())}${pad2(d.getMinutes())}`;
+    const v = currentVersionId ? versions.find(vv => vv && vv.id === currentVersionId) : null;
+    const vtag = v ? `v${v.versionNumber}${currentIsModified ? 'c' : ''}` : 'v0';
+    const desc = v && v.description ? aedtName(v.description) : '';
+    return [vtag, desc, dt].filter(Boolean).join('_') || 'v0';
+  };
+  // AEDT PROJECT name for a NEW project: <workspace>_<design>.
+  const projectNameForExport = () => aedtName(`${workspace || 'default'}_${designFileBase()}`) || 'PhotonicLayout';
+  // Native export mode: 'new' | 'project' | 'design'. Migrates the legacy
+  // boolean simSetup.appendToActive (true -> 'design').
+  const nativeAppendMode = () => {
+    const m = scene.simSetup && scene.simSetup.appendMode;
+    if (m === 'project' || m === 'design') return m;
+    if (scene.simSetup && scene.simSetup.appendToActive) return 'design';
+    return 'new';
+  };
+  // The naming + append-mode options threaded into every native (HFSS/Q2D)
+  // generator, so a fresh project is named <workspace>_<design> and each
+  // design carries its version+timestamp name.
+  const nativeNameOpts = () => ({
+    appendMode: nativeAppendMode(),
+    projectName: projectNameForExport(),
+    designName: designNameForExport(),
+  });
   const handleExportPyAEDT = () => handleExport(`${exportFileBase()}.py`, generatePyAEDT);
   const handleExportHfssNative = () => {
-    const appendToActive = !!(scene.simSetup && scene.simSetup.appendToActive);
-    // Filename is always "_hfss" regardless of append mode (appendToActive
-    // still drives the generated script's behavior, just not the name).
-    return handleExport(`${exportFileBase()}_hfss.py`, generateHfssNative, { appendToActive });
+    // Filename is always "_hfss"; append mode + project/design names drive the
+    // generated script's behavior, not the download name.
+    return handleExport(`${exportFileBase()}_hfss.py`, generateHfssNative, nativeNameOpts());
   };
   // 2-line method: the wizard hands us the BUILT two-line scene (line stamped
   // at L1 and L2, 4 lumped ports) + the verified S-index map. Generate the
@@ -5725,7 +5758,7 @@ export default function App() {
       // HFSS expressions that may use Freq) when the wizard supplies one.
       const si = (sheetImpedance && (String(sheetImpedance.resistance ?? '').trim() || String(sheetImpedance.reactance ?? '').trim()))
         ? sheetImpedance : undefined;
-      content = generateHfssNative(normalized, pv, { twoLine: { portIndices, dLMeters, cFperM, q3d }, sheetImpedance: si });
+      content = generateHfssNative(normalized, pv, { twoLine: { portIndices, dLMeters, cFperM, q3d }, sheetImpedance: si, ...nativeNameOpts() });
     } catch (e) {
       console.error('Two-line generator error:', e);
       await alertDialog('Error generating 2-line script: ' + e.message, 'Export error');
@@ -7858,7 +7891,14 @@ export default function App() {
               const airPadEffective = Number.isFinite(airPadNum) && airPadNum > 0
                 ? airPadNum : radPadUm;
               const airPadIsOverride = Number.isFinite(airPadNum) && airPadNum > 0;
-              const appendActive = !!(scene.simSetup && scene.simSetup.appendToActive);
+              // Export target mode: 'new' | 'project' | 'design'. Migrates the
+              // legacy boolean appendToActive (true -> 'design').
+              const appendModeVal = (() => {
+                const m = scene.simSetup && scene.simSetup.appendMode;
+                if (m === 'project' || m === 'design') return m;
+                if (scene.simSetup && scene.simSetup.appendToActive) return 'design';
+                return 'new';
+              })();
               // Analysis / sweep knobs (see normalizeScene for the contract
               // defaults — these ?? fallbacks only matter for scenes that
               // bypassed normalize, e.g. mid-session legacy blobs).
@@ -8023,22 +8063,35 @@ export default function App() {
                     </p>
                   </div>
                   <div className="border-t border-slate-800 pt-2">
-                    <div className="text-[10px] uppercase tracking-wider text-slate-400 mb-1">HFSS export mode</div>
-                    <label className="flex items-center gap-2 text-[11px] text-slate-200 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={appendActive}
-                        onChange={(e) => updateSim({ appendToActive: e.target.checked })}
-                      />
-                      Append to active HFSS design
-                    </label>
+                    <div className="text-[10px] uppercase tracking-wider text-slate-400 mb-1">HFSS / Q2D export target</div>
+                    {[
+                      { v: 'new', label: 'New project',
+                        hint: `A fresh project named "${projectNameForExport()}" with a new design + Setup1 and the sweep above.` },
+                      { v: 'project', label: 'Append to active project',
+                        hint: 'Add a new design (with its own Setup1 + sweep) to the project currently open in HFSS. No new project is created.' },
+                      { v: 'design', label: 'Append to active design',
+                        hint: 'Attach only the geometry to whatever design is open in HFSS — existing setups, sweeps, and excitations are kept untouched.' },
+                    ].map((o) => (
+                      <label key={o.v} className="flex items-start gap-2 text-[11px] text-slate-200 cursor-pointer mb-1">
+                        <input
+                          type="radio"
+                          name="hfss-export-mode"
+                          className="mt-0.5"
+                          checked={appendModeVal === o.v}
+                          onChange={() => updateSim({ appendMode: o.v, appendToActive: o.v === 'design' })}
+                        />
+                        <span>
+                          <span className="text-slate-200">{o.label}</span>
+                          <span className="block text-[10px] text-slate-500 leading-snug">{o.hint}</span>
+                        </span>
+                      </label>
+                    ))}
                     <p className="text-[10px] text-slate-500 mt-2 leading-snug">
-                      When checked, "Export HFSS (native)" emits a
-                      script that attaches the geometry to whatever
-                      project/design is currently open in HFSS — your
-                      existing setups, sweeps, and excitations are kept
-                      untouched. Uncheck to create a fresh project with
-                      a default Setup1 (the original behavior).
+                      Each generated design is named
+                      <span className="text-slate-300"> {designNameForExport()}</span> —
+                      <code className="text-slate-400">v&lt;N&gt;&lt;c&gt;_&lt;description&gt;_&lt;yyyymmdd&gt;_&lt;hhmm&gt;</code>
+                      (N = version, c = current/modified). Applies to the native
+                      HFSS export and the Q2D cross-section script.
                     </p>
                   </div>
                 </div>
@@ -9374,6 +9427,9 @@ export default function App() {
         sectionCompId={sectionWizard ? sectionWizard.sectionCompId : null}
         simSetup={scene.simSetup || {}}
         designBaseName={exportFileBase()}
+        projectName={projectNameForExport()}
+        designName={designNameForExport()}
+        appendMode={nativeAppendMode()}
         onDownload={(text, filename) => downloadFile(filename, text)}
       />
       <Tidy3DWizard

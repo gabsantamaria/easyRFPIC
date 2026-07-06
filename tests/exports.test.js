@@ -1609,13 +1609,41 @@ describe('HFSS export-mode banners (silent-skip failures made loud)', () => {
     );
     return normalizeScene(s);
   };
-  it('append mode: APPEND banner at top; no setup; flagged ports STILL emitted', () => {
+  it('append-to-DESIGN mode: banner at top; no setup; flagged ports STILL emitted', () => {
     const scene = mkScene(true);
     const pv = resolveParams(scene.params).values;
     const code = generateHfssNative(scene, pv, { appendToActive: true });
-    expect(code).toContain('===== APPEND MODE =====');
+    expect(code).toContain('===== APPEND-TO-DESIGN MODE =====');
+    expect(code).toContain('oProject.GetActiveDesign()');
+    expect(code).not.toContain('oProject.InsertDesign(');
     expect(code).not.toContain('InsertSetup');
     expect(code).toContain('AssignLumpedPort'); // ports are geometry-bound, not setup-bound
+  });
+  it('appendMode "design" == legacy appendToActive:true', () => {
+    const scene = mkScene(true);
+    const pv = resolveParams(scene.params).values;
+    const a = generateHfssNative(scene, pv, { appendToActive: true });
+    const b = generateHfssNative(scene, pv, { appendMode: 'design' });
+    expect(b).toBe(a);
+  });
+  it('append-to-PROJECT mode: existing project + NEW named design + full setup', () => {
+    const scene = mkScene(true);
+    const pv = resolveParams(scene.params).values;
+    const code = generateHfssNative(scene, pv, { appendMode: 'project', projectName: 'WS_D', designName: 'v2c_run_20260706_0900' });
+    expect(code).toContain('===== APPEND-TO-PROJECT MODE =====');
+    expect(code).toContain('oDesktop.GetActiveProject()');
+    expect(code).not.toContain('oDesktop.NewProject()');
+    expect(code).toContain('oProject.InsertDesign("HFSS", "v2c_run_20260706_0900", "DrivenModal", "")');
+    expect(code).toContain('InsertSetup'); // a fresh design gets its own setup + sweep
+  });
+  it('new mode: named fresh project + named design + setup', () => {
+    const scene = mkScene(true);
+    const pv = resolveParams(scene.params).values;
+    const code = generateHfssNative(scene, pv, { appendMode: 'new', projectName: 'WS_D', designName: 'v2c_run_20260706_0900' });
+    expect(code).toContain('oDesktop.NewProject()');
+    expect(code).toContain('WS_D.aedt'); // renamed to <workspace>_<design>
+    expect(code).toContain('oProject.InsertDesign("HFSS", "v2c_run_20260706_0900", "DrivenModal", "")');
+    expect(code).toContain('InsertSetup');
   });
   it('port rect with the Lumped-port flag OFF gets a loud WARNING banner', () => {
     const scene = mkScene(false);
@@ -1631,7 +1659,8 @@ describe('HFSS export-mode banners (silent-skip failures made loud)', () => {
     const code = generateHfssNative(scene, pv, {});
     expect(code).toContain('InsertSetup');
     expect(code).toContain('AssignLumpedPort');
-    expect(code).not.toContain('===== APPEND MODE =====');
+    expect(code).not.toContain('===== APPEND-TO-DESIGN MODE =====');
+    expect(code).not.toContain('===== APPEND-TO-PROJECT MODE =====');
     expect(code).not.toContain('PORT RECT(S) WITHOUT AN EXCITATION');
   });
 });

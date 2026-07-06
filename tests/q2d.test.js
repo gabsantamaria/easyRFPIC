@@ -309,6 +309,35 @@ describe('generateQ2DExtractor — variants', () => {
     expect(() => generateQ2DExtractor(null, { roles: ROLES })).toThrow(/unusable/);
   });
 
+  it('appendMode "new": named fresh project + named design + analysis setup', () => {
+    const out = generateQ2DExtractor(FIXTURE_CROSS, {
+      roles: ROLES, appendMode: 'new', projectName: 'WS_D', designName: 'v2c_run_20260706_0900',
+    });
+    expect(out).toContain('oDesktop.NewProject()');
+    expect(out).toContain('WS_D.aedt');
+    expect(out).toContain('oProject.InsertDesign("2D Extractor", "v2c_run_20260706_0900", "", "")');
+    expect(out).toContain('InsertSetup');
+  });
+
+  it('appendMode "project": active project + NEW named design + analysis setup', () => {
+    const out = generateQ2DExtractor(FIXTURE_CROSS, {
+      roles: ROLES, appendMode: 'project', projectName: 'WS_D', designName: 'v2c_run_20260706_0900',
+    });
+    expect(out).toContain('oDesktop.GetActiveProject()');
+    expect(out).not.toContain('oDesktop.NewProject()');
+    expect(out).toContain('oProject.InsertDesign("2D Extractor", "v2c_run_20260706_0900", "", "")');
+    expect(out).toContain('InsertSetup');
+  });
+
+  it('appendMode "design": active project + active design, geometry only (no setup)', () => {
+    const out = generateQ2DExtractor(FIXTURE_CROSS, {
+      roles: ROLES, appendMode: 'design', projectName: 'WS_D', designName: 'v2c_run_20260706_0900',
+    });
+    expect(out).toContain('oProject.GetActiveDesign()');
+    expect(out).not.toContain('oProject.InsertDesign(');
+    expect(out).not.toContain('InsertSetup');
+  });
+
   it('emits PARAMETRIC waveguide slab/core exprs when the contract provides them', () => {
     // wg exprs added to the fixture — the slab rect XStart/Width and the core
     // polyline PLPoint X/Y should carry the verbatim exprs (position fields)

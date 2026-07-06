@@ -582,6 +582,29 @@ describe('generateHfssNative options.twoLine — script emits the εeff/α math'
     writeFileSync('tests/out/two_line_q3d.py', py);
     execSync('python3 -c "import ast; ast.parse(open(\'tests/out/two_line_q3d.py\').read())"');
   });
+
+  it('bundled Q3D auto-transfer restores the ACTUAL version-tagged HFSS design name', () => {
+    // Regression: the HFSS design is created with options.designName, but the
+    // bundled Q3D auto-transfer used to switch back to a hardcoded "Layout" —
+    // SetActiveDesign(nonexistent) → the tl_C_F_per_m set + Z0 report no-op.
+    const single = makeLineScene(500);
+    const { scene, portIndices, dLMeters } = buildTwoLineScene(single, {
+      lengthParam: 'Lc', l1: 300, l2: 900,
+    });
+    const pv = resolveParams(scene.params).values;
+    const designName = 'v3c_kinetic_20260706_1430';
+    const py = generateHfssNative(scene, pv, {
+      appendMode: 'new', projectName: 'WS_TL', designName,
+      twoLine: { portIndices, dLMeters, q3d: { scene: single, conductorIds: ['line', 'padL'], thicknessUm: 0.2, freqStartGHz: 1, freqStopGHz: 40, freqPoints: 101 } },
+    });
+    expect(py).toContain(`InsertDesign("HFSS", "${designName}"`);   // created under this name
+    // The auto-transfer must switch BACK to the SAME name, never the old "Layout".
+    expect(py).toContain(`SetActiveDesign("${designName}")`);
+    expect(py).not.toMatch(/SetActiveDesign\("Layout"\)/);
+    mkdirSync('tests/out', { recursive: true });
+    writeFileSync('tests/out/two_line_q3d_named.py', py);
+    execSync('python3 -c "import ast; ast.parse(open(\'tests/out/two_line_q3d_named.py\').read())"');
+  });
 });
 
 // ---------------------------------------------------------------------------
