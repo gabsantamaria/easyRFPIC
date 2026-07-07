@@ -16,8 +16,12 @@ import {
   buildAltDragTargetIndex, findAltDragSnapCandidate,
   buildBoolOverridesForInstance,
 } from '../src/ui/canvas/Canvas.jsx';
-import { ANCHORS, anchorLocalRotated, compRotationDeg } from '../src/scene/anchors.js';
+import { ANCHORS, anchorLocalRotated, compRotationDeg, PATH_KINDS } from '../src/scene/anchors.js';
+import { instanceFrameCenter } from '../src/scene/instance-positions.js';
 import { evalExpr } from '../src/scene/params.js';
+import { solveLayout } from '../src/scene/solver.js';
+import { expandTransforms } from '../src/scene/transforms.js';
+import { normalizeScene } from '../src/scene/schema.js';
 
 // Deterministic PRNG for fuzz cases.
 const mulberry32 = (seed) => () => {
@@ -45,7 +49,11 @@ function oracleFindAnchorSnap(transformInstances, solved, wp, worldThresh, exclu
     if (excludeCompId && inst.compId === excludeCompId) continue;
     const w = inst.w, h = inst.h;
     if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) continue;
-    const cx = inst.cx, cy = inst.cy;
+    // FRAME rule (matches buildAnchorSnapIndex): path kinds anchor on the
+    // instance frame center (transformed displayBbox center — inst.cx/cy
+    // is the transformed vertex 0), identity for every other kind.
+    const fcO = instanceFrameCenter(solved.find(sc => sc.id === inst.compId), inst);
+    const cx = fcO.cx, cy = fcO.cy;
     const rot = inst.rotation || 0;
     const rad = rot * Math.PI / 180;
     const ca = Math.cos(rad), sa = Math.sin(rad);
@@ -99,8 +107,10 @@ function oracleFindAnchorSnap(transformInstances, solved, wp, worldThresh, exclu
       if (!baseInst) return;
       const opW = baseInst.w, opH = baseInst.h;
       if (!Number.isFinite(opW) || !Number.isFinite(opH) || opW <= 0 || opH <= 0) return;
-      let tx = baseInst.cx + dx;
-      let ty = baseInst.cy + dy;
+      // FRAME rule for path-kind operands (matches buildAnchorSnapIndex).
+      const opFc = instanceFrameCenter(op, baseInst);
+      let tx = opFc.cx + dx;
+      let ty = opFc.cy + dy;
       if (bSx === -1) tx = 2 * inst.cx - tx;
       if (bSy === -1) ty = 2 * inst.cy - ty;
       const rxC = tx - inst.cx;
@@ -169,15 +179,20 @@ function oracleAltDrag(solved, paramValues, {
   for (const oc of solved) {
     if (clusterSet && clusterSet.has(oc.id)) continue;
     if (oc.consumedBy) continue;
-    const ow = typeof oc.w === 'string' ? evalExpr(oc.w, paramValues) : oc.w;
-    const oh = typeof oc.h === 'string' ? evalExpr(oc.h, paramValues) : oc.h;
+    // FRAME rule (matches buildAltDragTargetIndex): path kinds candidate
+    // on the displayBbox frame; every other kind on cx/cy ± w/2.
+    const ocFr = PATH_KINDS.has(oc.kind) && oc.displayBbox ? oc.displayBbox : null;
+    const ow = ocFr ? ocFr.w : (typeof oc.w === 'string' ? evalExpr(oc.w, paramValues) : oc.w);
+    const oh = ocFr ? ocFr.h : (typeof oc.h === 'string' ? evalExpr(oc.h, paramValues) : oc.h);
     if (!Number.isFinite(ow) || !Number.isFinite(oh) || ow <= 0 || oh <= 0) continue;
+    const ocx = ocFr ? ocFr.cx : oc.cx;
+    const ocy = ocFr ? ocFr.cy : oc.cy;
     const ocRot = compRotationDeg(oc, paramValues);
     const dRot = dragRotationDeg || 0;
     for (const ta of ANCHORS) {
       const tlp = anchorLocalRotated(ta, ow, oh, ocRot);
-      const tx = oc.cx + tlp.x;
-      const ty = oc.cy + tlp.y;
+      const tx = ocx + tlp.x;
+      const ty = ocy + tlp.y;
       for (const da of ANCHORS) {
         const dlp = anchorLocalRotated(da, dw, dh, dRot);
         const dax = proposedCx + dlp.x;
@@ -198,8 +213,8 @@ function oracleAltDrag(solved, paramValues, {
         }
       }
     }
-    const oxMin = oc.cx - ow / 2, oxMax = oc.cx + ow / 2;
-    const oyMin = oc.cy - oh / 2, oyMax = oc.cy + oh / 2;
+    const oxMin = ocx - ow / 2, oxMax = ocx + ow / 2;
+    const oyMin = ocy - oh / 2, oyMax = ocy + oh / 2;
     const xOverlap = Math.min(oxMax, dxMax) - Math.max(oxMin, dxMin);
     const yOverlap = Math.min(oyMax, dyMax) - Math.max(oyMin, dyMin);
     const EDGE_RANK_PENALTY = worldThresh * 0.4;
@@ -223,7 +238,7 @@ function oracleAltDrag(solved, paramValues, {
     if (xOverlap > 0) {
       const midX = (Math.max(oxMin, dxMin) + Math.min(oxMax, dxMax)) / 2;
       const dSidesY = [['top', dyMax], ['bottom', dyMin], ['centerY', proposedCy]];
-      const tSidesY = [['top', oyMax], ['bottom', oyMin], ['centerY', oc.cy]];
+      const tSidesY = [['top', oyMax], ['bottom', oyMin], ['centerY', ocy]];
       for (const [dSide, dY] of dSidesY) {
         for (const [tSide, tY] of tSidesY) {
           tryEdge('h', dSide, dY, tSide, tY, midX, tY);
@@ -233,7 +248,7 @@ function oracleAltDrag(solved, paramValues, {
     if (yOverlap > 0) {
       const midY = (Math.max(oyMin, dyMin) + Math.min(oyMax, dyMax)) / 2;
       const dSidesX = [['right', dxMax], ['left', dxMin], ['centerX', proposedCx]];
-      const tSidesX = [['right', oxMax], ['left', oxMin], ['centerX', oc.cx]];
+      const tSidesX = [['right', oxMax], ['left', oxMin], ['centerX', ocx]];
       for (const [dSide, dX] of dSidesX) {
         for (const [tSide, tX] of tSidesX) {
           tryEdge('v', dSide, dX, tSide, tX, tX, midY);
@@ -682,5 +697,106 @@ describe('buildBoolOverridesForInstance', () => {
     expect(ov.b1).toBeUndefined();
     expect(ov.r3.cx).toBeCloseTo(-7, 12);
     expect(ov.r3.cy).toBeCloseTo(6, 12);
+  });
+});
+
+// =========================================================================
+// PATH-KIND FRAME — polyline/polyshape candidates sit on the displayBbox
+// frame (cx/cy is vertex 0, NOT the bbox center). Oracle ↔ index
+// equivalence over solved scenes with real displayBboxes, plus absolute-
+// position pins so the frame rule itself is value-guarded (an equivalence
+// test alone would pass if BOTH sides were wrong the same way).
+// =========================================================================
+describe('path-kind frame: polyline candidates on the displayBbox', () => {
+  const mkPolyScene = () => normalizeScene({
+    params: {},
+    components: [
+      { id: 'tl', kind: 'polyline', layer: 'electrode', cx: 10, cy: 5, w: '0', h: '0', width: '4',
+        vertices: [ { kind: 'rel', dx: '0', dy: '0' }, { kind: 'rel', dx: '100', dy: '0' } ],
+        closed: false, cutouts: [], transforms: [] },
+      { id: 'r1', kind: 'rect', layer: 'electrode', cx: 200, cy: 5, w: '20', h: '20', cutouts: [], transforms: [] },
+    ],
+    snaps: [], mirrors: [], groups: [], booleans: [],
+  });
+  const scene = mkPolyScene();
+  const pv = {};
+  const solved = solveLayout(scene.components, scene.snaps, pv);
+  const instances = expandTransforms(solved, pv);
+
+  it('solver stashes the true displayBbox (verts [10,110] + width pad)', () => {
+    const tl = solved.find(c => c.id === 'tl');
+    expect(tl.displayBbox.cx).toBeCloseTo(60, 9);
+    expect(tl.displayBbox.cy).toBeCloseTo(5, 9);
+    expect(tl.displayBbox.w).toBeCloseTo(104, 9);
+    expect(tl.displayBbox.h).toBeCloseTo(4, 9);
+  });
+
+  it('anchor-snap index: polyline E anchor at the TRUE bbox E (112, 5), not v0-frame (62, 5)', () => {
+    const index = buildAnchorSnapIndex(instances, solved);
+    const hit = queryAnchorSnapIndex(index, { x: 112, y: 5 }, 2);
+    expect(hit).not.toBeNull();
+    expect(hit.compId).toBe('tl');
+    expect(hit.anchor).toBe('E');
+    expect(hit.x).toBeCloseTo(112, 9);
+    // the OLD v0-centered frame would have put E at 10 + 104/2 = 62:
+    const stale = queryAnchorSnapIndex(index, { x: 62, y: 5 }, 1.5);
+    expect(stale?.anchor === 'E' ? stale.x : null).not.toBe(62);
+  });
+
+  it('alt-drag index: polyline anchors + edges on the displayBbox frame', () => {
+    const dims = Object.fromEntries(solved.map(c => [c.id, {
+      w: typeof c.w === 'number' ? c.w : evalExpr(c.w, pv),
+      h: typeof c.h === 'number' ? c.h : evalExpr(c.h, pv),
+    }]));
+    const index = buildAltDragTargetIndex(solved, pv, dims);
+    const { best } = findAltDragSnapCandidate(index, {
+      proposedCx: 118, proposedCy: 5, dw: 10, dh: 10, worldThresh: 3,
+    });
+    // dragged W anchor at 113 should catch the polyline's TRUE E anchor at 112
+    expect(best).not.toBeNull();
+    expect(best.kind).toBe('anchor');
+    expect(best.target.compId).toBe('tl');
+    expect(best.target.anchor).toBe('E');
+    expect(best.target.x).toBeCloseTo(112, 9);
+  });
+
+  it('oracle ↔ index equivalence: probe sweep across the polyline scene', () => {
+    const index = buildAnchorSnapIndex(instances, solved);
+    for (let x = -20; x <= 220; x += 7) {
+      for (let y = -10; y <= 20; y += 5) {
+        const wp = { x, y };
+        const want = oracleFindAnchorSnap(instances, solved, wp, 4);
+        const got = indexFindAnchorSnap(index, wp, 4);
+        expectSameSnap(got, want);
+      }
+    }
+  });
+
+  it('oracle ↔ index equivalence: alt-drag sweep across the polyline scene', () => {
+    const dims = Object.fromEntries(solved.map(c => [c.id, {
+      w: typeof c.w === 'number' ? c.w : evalExpr(c.w, pv),
+      h: typeof c.h === 'number' ? c.h : evalExpr(c.h, pv),
+    }]));
+    const index = buildAltDragTargetIndex(solved, pv, dims);
+    for (let x = -20; x <= 230; x += 11) {
+      for (let y = -12; y <= 22; y += 6) {
+        const args = { proposedCx: x, proposedCy: y, dw: 8, dh: 8, worldThresh: 3.5 };
+        const want = oracleAltDrag(solved, pv, args);
+        const got = findAltDragSnapCandidate(index, args);
+        if (want.best === null) { expect(got.best).toBeNull(); continue; }
+        expect(got.best).not.toBeNull();
+        expect(got.best.kind).toBe(want.best.kind);
+        if (want.best.kind === 'anchor') {
+          expect(got.best.target.compId).toBe(want.best.target.compId);
+          expect(got.best.target.anchor).toBe(want.best.target.anchor);
+          expect(got.best.target.x).toBeCloseTo(want.best.target.x, 9);
+          expect(got.best.target.y).toBeCloseTo(want.best.target.y, 9);
+        } else {
+          expect(got.best.targetCompId).toBe(want.best.targetCompId);
+          expect(got.best.targetSide).toBe(want.best.targetSide);
+          expect(got.best.edgeVal).toBeCloseTo(want.best.edgeVal, 9);
+        }
+      }
+    }
   });
 });

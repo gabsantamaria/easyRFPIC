@@ -162,6 +162,54 @@ scene = {
 
 The AABB `w`/`h` being stored as expressions (`'2*r'` etc.) keeps every snap, anchor, dimension, and boolean-bbox code path working uniformly. Booleans have `w='0'`, `h='0'` literally; their actual bbox is refreshed numerically by `resolveBooleanBboxes` after the solver runs.
 
+**PATH-KIND FRAME CONTRACT (polyline/polyshape — CRITICAL).** A path
+component's `cx/cy` is the VERTEX-CHAIN ROOT (vertex 0's world position —
+the drag handle and the rel-vertex chain origin), NOT the bbox center; the
+true AABB lives in the solver-refreshed `displayBbox` (+ the solver keeps
+`_resolvedVerts` in sync — cluster shifts and mirrors TRANSLATE both
+stashes with any raw cx/cy rewrite). One canonical rule, three roles:
+- **Snap PARENT side + every frame consumer**: the `displayBbox` frame.
+  `anchorWorld`/`anchorWorldNumeric` prefer `displayBbox`;
+  `compFrame(comp, pv)` (anchors.js) is THE canonical box; per-instance,
+  `instanceFrameCenter(comp, inst)` (instance-positions.js) maps the base
+  bbox center through the instance transform (remapPointsToInstance about
+  the base cx/cy — same math as the rendered path). Consumers: canvas
+  selection frame/hit-pad/marquee/labels/snap dots/edge strips/alt-guides/
+  ghost guides/alignAxis/drag cluster bbox (all via the `frameByCompId`
+  memo + `instanceFrameCenter`), the spatial indexes (+ their perf-oracle
+  twins in tests/canvas-perf-helpers.test.js — update BOTH), lumped-port
+  flanker extents, boolean-bbox operand contributions (solver
+  `operandBbox` refreshes the operand's displayBbox inline if missing),
+  fitToView/zoomToSelection, and the HFSS chip extent. Drawing a frame as
+  `cx ± w/2` for a path kind is THE bug class this contract kills (the
+  "selection frame doesn't update after a vertex-dx edit" bug: every
+  overlay sat off by `bboxCenter − v0`).
+- **Snap CHILD side: anchors COLLAPSE to v0** — `toLocal = (0,0)` for path
+  kinds, EXPLICITLY, in solveLayout AND both HFSS resolvers. A snap
+  positions the trace's ROOT; endpoint pinning is what snap-VERTICES are
+  for. Templates depend on it (gsg tapers pin vertex 0 to the pad edge);
+  it is iteration-stable (the numeric bbox only exists after the first
+  refresh); canvas overlays that show the child side of a snap
+  (EditableSnapDims, showDimensions snap dims, snap-link lines, snap
+  arrows, onAnchorClick/alt-drag offset capture) measure to `(cx, cy)`.
+- **HFSS export**: `pathFrameExprs(c, pv)` (hfss-native.js, exported)
+  emits the frame center-offset + dims. PARAMETRIC for pure-rel vertex
+  chains — cumulative dx/dy sum expressions with WHICH vertex is extremal
+  frozen at export values (the union-boolean extremal-operand precedent),
+  so a snapped child tracks an HFSS-side sweep of a segment-length param
+  exactly like the canvas (gold test: tests/polyline-frame.test.js sweep
+  parity). Guarded by a numeric ROUND-TRIP check (untagged twin vs the
+  solved displayBbox) that falls back to exact FROZEN numerics + a
+  safety-report caveat (`pathFrameBaked`) for snap/arc/spline/tapered
+  chains. Consumers inside computeParametricPositions: dimExprForComp,
+  resolveNoCluster, the main resolve() parent term, boolBBoxParametric
+  operand edges, resolveSynthetics `_comp_<id>_w/h` (was '(0)' — a live
+  canvas/HFSS disagreement), snap-vertex targets, and the frozen
+  instanceIdx branch.
+Path kinds get NO resize handles (a dashed displayBbox outline instead —
+the old handles both misled and corrupted the '0' w/h placeholders on
+drag); reshape via vertex editing / EditablePolyDims.
+
 **Rotation in HFSS export**: the angle is degree-typed — `"(<expr>)*1deg"` (or `"<n>deg"` for pure numerics). Rotation params auto-created from the inspector are therefore UNITLESS (a deg-typed variable times 1deg would be deg²). Snap chains through a rotated parent wrap the anchor offsets in the HFSS-trig rotation matrix (`cos((rot)*1deg)` etc.) inside `computeParametricPositions`, so a child tracks both the parent's position params AND its rotation param. The part itself is created axis-aligned, then a parametric translate-rotate-translate about its own center is emitted before its transform chain. `zOffset` appends `+ (<expr>)um` to every component Z-placement expression (electrode box/sheet, wg slab+rib, port sheet + IntLine numeric Z, polyline pathZ, polyshape/native-shape zBottom).
 
 ### Parameters

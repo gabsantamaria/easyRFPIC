@@ -17,6 +17,7 @@
 
 import { evalExpr } from './params.js';
 import { expandTransforms } from './transforms.js';
+import { instanceFrameCenter } from './instance-positions.js';
 
 // Coincidence tolerance for "edges touch" (µm). Layouts in this app are
 // in µm and snap to grid, so 0.05 is plenty.
@@ -63,7 +64,13 @@ export function detectPortIntegrationLine(port, solved, paramValues) {
     .map(inst => {
       const src = byId.get(inst.compId);
       if (!src || src.layer !== 'electrode' || src.id === port.id) return null;
-      return instExtent({ ...inst, id: src.id }, paramValues);
+      // Path-kind electrodes (polyline/polyshape traces): the instance's
+      // cx/cy is vertex 0, not the bbox center — flanker edges computed
+      // from it sat off the visible band by (bboxCenter − v0), silently
+      // failing the TOL=0.05 edge-coincidence test (port not detected).
+      // Use the instance FRAME center (transformed displayBbox center).
+      const fc = instanceFrameCenter(src, inst);
+      return instExtent({ ...inst, cx: fc.cx, cy: fc.cy, id: src.id }, paramValues);
     })
     .filter(Boolean);
 

@@ -140,6 +140,10 @@ describe('components snapped TO a section line still export correctly', () => {
     // the snap places el2 at sec1's bbox center + (0, 15) — NOT at its
     // stale scene cx/cy (999, 999)
     expect(el2.cy).toBeCloseTo(15, 6);
+    // PIN the from-side displayBbox frame: sec1's bbox center x is
+    // v0 (−30) + sec1_L/2 (40) = 10 — NOT v0 itself. A v0-framed parent
+    // anchor would put el2.cx at −30 (the path-frame bug class).
+    expect(el2.cx).toBeCloseTo(10, 6);
     const gf = generateGdsfactory(scene, pv);
     // the emitted geometry must reference the SOLVED center, and the stale
     // pre-solve (999, 999) must not leak in anywhere

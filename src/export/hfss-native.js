@@ -14,14 +14,14 @@
 // Extracted from PhotonicLayout.jsx as Stage 2.3 of the planned refactor.
 import { evalExpr, topoSortParams } from '../scene/params.js';
 import { effectiveConductorLayerId } from '../scene/conductor-binding.js';
-import { parseAnchor, anchorLocal, anchorLocalInstance } from '../scene/anchors.js';
+import { parseAnchor, anchorLocal, anchorLocalInstance, PATH_KINDS } from '../scene/anchors.js';
 import { solveLayout, applyMirrors } from '../scene/solver.js';
 import { expandTransforms } from '../scene/transforms.js';
 import { detectPortIntegrationLine } from '../scene/lumpedPort.js';
 import { migrateStackCoplanarGroups, isNonModelComponent } from '../scene/schema.js';
 import { shapeInstanceToRing } from '../geometry/rings.js';
 import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/racetrack.js';
-import { instanceChainOffsetExpr, chainOwnerForInstance } from '../scene/instance-positions.js';
+import { instanceChainOffsetExpr, chainOwnerForInstance, instanceFrameCenter } from '../scene/instance-positions.js';
 import { twoLineOutputVariables } from '../scene/twoLine.js';
 import { generateQ3DCombinedBlock } from './q3d.js';
 import {
@@ -125,6 +125,107 @@ function rotateOffsetExprs(off, rotExpr) {
   };
 }
 
+// ── Path-kind (polyline / polyshape) FRAME expressions ──────────────────
+// A path component's cx/cy is the vertex-chain ROOT (vertex 0), NOT the
+// bbox center — the true frame is the solver's displayBbox. Snap anchors
+// on a path PARENT resolve on that frame (anchorWorld / the canvas dots),
+// so the export must emit matching terms:
+//   frame center = chain(cx) + offX/offY,   frame dims = wExpr × hExpr
+// PARAMETRIC when the vertex chain is pure-rel (no snap-pinned / arc /
+// spline vertices, no per-vertex taper widths, non-negative base width):
+// the bbox edges are cumulative sums of the vertex dx/dy expressions with
+// WHICH vertex is extremal frozen at export values — the same accepted
+// contract as the union-boolean extremal-operand freeze — so an HFSS
+// sweep of a segment-length param moves a snapped child exactly like the
+// canvas (until the sweep flips the extremal vertex; re-export).
+// Otherwise (and on ANY round-trip mismatch): exact FROZEN numerics from
+// the solved displayBbox — a bug here can only fail to parametrize,
+// never corrupt geometry. Returns
+//   { offXExpr, offYExpr, wExpr, hExpr, frozen } (all um-typed HFSS exprs).
+export function pathFrameExprs(c, paramValues = {}) {
+  const bb = c && c.displayBbox;
+  const cx = Number.isFinite(c?.cx) ? c.cx : 0;
+  const cy = Number.isFinite(c?.cy) ? c.cy : 0;
+  const numW = bb ? bb.w : (typeof c?.w === 'number' ? c.w : 0);
+  const numH = bb ? bb.h : (typeof c?.h === 'number' ? c.h : 0);
+  const frozen = () => ({
+    offXExpr: `${(bb ? bb.cx - cx : 0).toFixed(6)}um`,
+    offYExpr: `${(bb ? bb.cy - cy : 0).toFixed(6)}um`,
+    wExpr: `${(Number.isFinite(numW) ? numW : 0).toFixed(6)}um`,
+    hExpr: `${(Number.isFinite(numH) ? numH : 0).toFixed(6)}um`,
+    frozen: true,
+  });
+  if (!c || !bb) return frozen();
+  const verts = c.vertices || [];
+  const eligible = verts.length >= 1 && verts.every(v =>
+    v && (v.kind === 'rel' || v.kind == null)
+    && !v.spline
+    && (v.width == null || String(v.width).trim() === ''));
+  if (!eligible) return frozen();
+  // Base width: polylines pad the bbox by width/2 per side (clamped ≥ 0
+  // by polylineBbox — a negative width would need the clamp in-expr).
+  const widthRaw = c.kind === 'polyline' ? String(c.width ?? '0').trim() || '0' : null;
+  const widthNum = widthRaw != null ? evalExpr(widthRaw, paramValues) : 0;
+  if (widthRaw != null && (!Number.isFinite(widthNum) || widthNum < 0)) return frozen();
+  // Cumulative sums of the vertex dx/dy expressions, in BOTH the HFSS
+  // form (bare numerics um-tagged) and an untagged GUARD twin evalExpr
+  // can score. cum[0] includes vertex 0's own dx (v0 = cx + dx0).
+  const tag = (e) => {
+    const s = String(e ?? '0').trim() || '0';
+    if (/^-?\d+(?:\.\d+)?$/.test(s)) return `${s}um`;
+    // Identifier-free arithmetic ('2*2', '1/2', '(4)', '4e-3'): bare
+    // numbers inside a compound resolve in the design BASE unit (meters)
+    // — um-TYPE the whole term with the `(X)*1um` form (handles division
+    // correctly, unlike appending 'um' to a factor). Identifier-bearing
+    // exprs pass through raw: params are µm-length-typed HFSS variables
+    // (same convention as snap dx/dy).
+    if (/^[\d\s+\-*/.()eE]+$/.test(s)) return `(${s})*1um`;
+    return s;
+  };
+  const bare = (e) => String(e ?? '0').trim() || '0';
+  const cums = { x: [], y: [] }; // { hfss, guard, num }
+  let hx = null, gx = null, hy = null, gy = null;
+  for (const v of verts) {
+    hx = hx == null ? `(${tag(v.dx)})` : `${hx} + (${tag(v.dx)})`;
+    gx = gx == null ? `(${bare(v.dx)})` : `${gx} + (${bare(v.dx)})`;
+    hy = hy == null ? `(${tag(v.dy)})` : `${hy} + (${tag(v.dy)})`;
+    gy = gy == null ? `(${bare(v.dy)})` : `${gy} + (${bare(v.dy)})`;
+    const nx = evalExpr(gx, paramValues);
+    const ny = evalExpr(gy, paramValues);
+    if (!Number.isFinite(nx) || !Number.isFinite(ny)) return frozen();
+    cums.x.push({ hfss: hx, guard: gx, num: nx });
+    cums.y.push({ hfss: hy, guard: gy, num: ny });
+  }
+  const pick = (arr) => {
+    let lo = arr[0], hi = arr[0];
+    for (const e of arr) { if (e.num < lo.num) lo = e; if (e.num > hi.num) hi = e; }
+    return { lo, hi };
+  };
+  const px = pick(cums.x), py = pick(cums.y);
+  const widthHfss = widthRaw != null && widthRaw !== '0' ? ` + (${tag(widthRaw)})` : '';
+  const widthGuard = widthRaw != null && widthRaw !== '0' ? ` + (${bare(widthRaw)})` : '';
+  const out = {
+    offXExpr: `((${px.lo.hfss}) + (${px.hi.hfss}))/2`,
+    offYExpr: `((${py.lo.hfss}) + (${py.hi.hfss}))/2`,
+    wExpr: `((${px.hi.hfss}) - (${px.lo.hfss}))${widthHfss}`,
+    hExpr: `((${py.hi.hfss}) - (${py.lo.hfss}))${widthHfss}`,
+    frozen: false,
+  };
+  // ROUND-TRIP GUARD: the untagged twins must reproduce the solved frame
+  // (displayBbox is the tessellated-path truth incl. anything the simple
+  // cum-sum model would miss). Any mismatch → exact frozen numerics.
+  const gOffX = evalExpr(`((${px.lo.guard}) + (${px.hi.guard}))/2`, paramValues);
+  const gOffY = evalExpr(`((${py.lo.guard}) + (${py.hi.guard}))/2`, paramValues);
+  const gW = evalExpr(`((${px.hi.guard}) - (${px.lo.guard}))${widthGuard}`, paramValues);
+  const gH = evalExpr(`((${py.hi.guard}) - (${py.lo.guard}))${widthGuard}`, paramValues);
+  const TOLG = 1e-6;
+  if (!Number.isFinite(gOffX) || Math.abs(gOffX - (bb.cx - cx)) > TOLG) return frozen();
+  if (!Number.isFinite(gOffY) || Math.abs(gOffY - (bb.cy - cy)) > TOLG) return frozen();
+  if (!Number.isFinite(gW) || Math.abs(gW - bb.w) > TOLG) return frozen();
+  if (!Number.isFinite(gH) || Math.abs(gH - bb.h) > TOLG) return frozen();
+  return out;
+}
+
 export function computeParametricPositions(components, snaps, paramValues = {}, outMeta = null) {
   // outMeta (optional): caller-owned collector for parametric CAVEATS —
   //   outMeta.orientationBaked: [{ id, detail }] — instance-anchor from-
@@ -219,9 +320,25 @@ export function computeParametricPositions(components, snaps, paramValues = {}, 
   // a boolean would freeze the boolean's width at export-time numeric
   // value — and any HFSS-side parameter sweep that moves the operands
   // would leave snapped-to-boolean children stranded.
+  // Memoized path-kind frame exprs (see pathFrameExprs above): center
+  // offset from the chain root (vertex 0) + true bbox dims, parametric
+  // for pure-rel vertex chains, frozen numerics otherwise.
+  const pathFrameCache = new Map();
+  const pathFrame = (c) => {
+    if (!pathFrameCache.has(c.id)) pathFrameCache.set(c.id, pathFrameExprs(c, paramValues));
+    return pathFrameCache.get(c.id);
+  };
+
   const dimExprForComp = (c) => {
     if (!c) return { wExpr: '0', hExpr: '0' };
     if (c.kind !== 'boolean') {
+      // Path kinds: the scene w/h are '0' placeholders and the SOLVED
+      // w/h are frozen numerics — emit the frame dims (parametric
+      // cum-sum spread + width for pure-rel chains, frozen otherwise).
+      if (PATH_KINDS.has(c.kind)) {
+        const pf = pathFrame(c);
+        return { wExpr: pf.wExpr, hExpr: pf.hExpr };
+      }
       return { wExpr: String(c.w ?? '0'), hExpr: String(c.h ?? '0') };
     }
     // Boolean: derive bbox parametrically through the operand tree.
@@ -294,10 +411,13 @@ export function computeParametricPositions(components, snaps, paramValues = {}, 
     let minXOp = ops[0], maxXOp = ops[0], minYOp = ops[0], maxYOp = ops[0];
     let minX = +Infinity, maxX = -Infinity, minY = +Infinity, maxY = -Infinity;
     for (const op of ops) {
-      const ocx = Number.isFinite(op.cx) ? op.cx : 0;
-      const ocy = Number.isFinite(op.cy) ? op.cy : 0;
-      const ow  = typeof op.w === 'number' ? op.w : (Number.isFinite(evalExpr(op.w, paramValues)) ? evalExpr(op.w, paramValues) : 0);
-      const oh  = typeof op.h === 'number' ? op.h : (Number.isFinite(evalExpr(op.h, paramValues)) ? evalExpr(op.h, paramValues) : 0);
+      // Path-kind operands: the numeric frame is the displayBbox (cx/cy
+      // is vertex 0, not the bbox center — see pathFrameExprs).
+      const opFr = PATH_KINDS.has(op.kind) && op.displayBbox ? op.displayBbox : null;
+      const ocx = opFr ? opFr.cx : (Number.isFinite(op.cx) ? op.cx : 0);
+      const ocy = opFr ? opFr.cy : (Number.isFinite(op.cy) ? op.cy : 0);
+      const ow  = opFr ? opFr.w : (typeof op.w === 'number' ? op.w : (Number.isFinite(evalExpr(op.w, paramValues)) ? evalExpr(op.w, paramValues) : 0));
+      const oh  = opFr ? opFr.h : (typeof op.h === 'number' ? op.h : (Number.isFinite(evalExpr(op.h, paramValues)) ? evalExpr(op.h, paramValues) : 0));
       if (ocx - ow/2 < minX) { minX = ocx - ow/2; minXOp = op; }
       if (ocx + ow/2 > maxX) { maxX = ocx + ow/2; maxXOp = op; }
       if (ocy - oh/2 < minY) { minY = ocy - oh/2; minYOp = op; }
@@ -315,19 +435,29 @@ export function computeParametricPositions(components, snaps, paramValues = {}, 
     // (nested-union bboxes are rare and not worth the complexity).
     const opDims = (op) => {
       if (op.kind === 'boolean') return null;
+      // Path-kind operands: frame dims via pathFrame (parametric when
+      // possible), NOT the scene '0' placeholder / solved numeric text.
+      if (PATH_KINDS.has(op.kind)) {
+        const pf = pathFrame(op);
+        return { wExpr: pf.wExpr, hExpr: pf.hExpr };
+      }
       // Run through dimExprStr so bare-numeric strings (e.g. '3') pick
       // up a "um" suffix — otherwise the resulting edge expression
       // mixes meters and µm and HFSS evaluates the bbox out by a
       // factor of 10^6.
       return { wExpr: dimExprStr(op.w), hExpr: dimExprStr(op.h) };
     };
+    // Path-kind operands: the chain position is vertex 0 — shift each
+    // edge expression by the operand's frame-center offset.
+    const opOffX = (op) => PATH_KINDS.has(op.kind) ? ` + (${pathFrame(op).offXExpr})` : '';
+    const opOffY = (op) => PATH_KINDS.has(op.kind) ? ` + (${pathFrame(op).offYExpr})` : '';
     const dMinX = opDims(minXOp), dMaxX = opDims(maxXOp);
     const dMinY = opDims(minYOp), dMaxY = opDims(maxYOp);
     if (!dMinX || !dMaxX || !dMinY || !dMaxY) return null;
-    const xMinE = `((${minXPos.cxExpr}) - (${dMinX.wExpr})/2)`;
-    const xMaxE = `((${maxXPos.cxExpr}) + (${dMaxX.wExpr})/2)`;
-    const yMinE = `((${minYPos.cyExpr}) - (${dMinY.hExpr})/2)`;
-    const yMaxE = `((${maxYPos.cyExpr}) + (${dMaxY.hExpr})/2)`;
+    const xMinE = `((${minXPos.cxExpr})${opOffX(minXOp)} - (${dMinX.wExpr})/2)`;
+    const xMaxE = `((${maxXPos.cxExpr})${opOffX(maxXOp)} + (${dMaxX.wExpr})/2)`;
+    const yMinE = `((${minYPos.cyExpr})${opOffY(minYOp)} - (${dMinY.hExpr})/2)`;
+    const yMaxE = `((${maxYPos.cyExpr})${opOffY(maxYOp)} + (${dMaxY.hExpr})/2)`;
     const out = {
       wExpr: `(${xMaxE}) - (${xMinE})`,
       hExpr: `(${yMaxE}) - (${yMinE})`,
@@ -375,12 +505,14 @@ export function computeParametricPositions(components, snaps, paramValues = {}, 
     // Parent / child dims: prefer parametric scene expressions; for
     // boolean parents fall back to the numeric AABB (which doesn't
     // recurse here — keeps this lookup linear).
+    const pIsPath = PATH_KINDS.has(parent.kind);
+    const cIsPath = PATH_KINDS.has(cc.kind);
     const pwExpr = parent.kind === 'boolean'
       ? `${typeof parent.w === 'number' ? parent.w : 0}um`
-      : String(parent.w ?? '0');
+      : pIsPath ? pathFrame(parent).wExpr : String(parent.w ?? '0');
     const phExpr = parent.kind === 'boolean'
       ? `${typeof parent.h === 'number' ? parent.h : 0}um`
-      : String(parent.h ?? '0');
+      : pIsPath ? pathFrame(parent).hExpr : String(parent.h ?? '0');
     const cwExpr = cc.kind === 'boolean'
       ? `${typeof cc.w === 'number' ? cc.w : 0}um`
       : String(cc.w ?? '0');
@@ -388,10 +520,18 @@ export function computeParametricPositions(components, snaps, paramValues = {}, 
       ? `${typeof cc.h === 'number' ? cc.h : 0}um`
       : String(cc.h ?? '0');
     const fromOff = anchorOffsetExpr(sn.from.anchor, pwExpr, phExpr, componentRotationExpr(parent));
-    const toOff   = anchorOffsetExpr(sn.to.anchor,   cwExpr, chExpr, componentRotationExpr(cc));
+    // PATH-KIND CHILD: anchors collapse to the vertex-chain root (see
+    // the solver's matching rule) — zero child offset.
+    const toOff = cIsPath
+      ? { xOff: '0', yOff: '0' }
+      : anchorOffsetExpr(sn.to.anchor, cwExpr, chExpr, componentRotationExpr(cc));
+    // PATH-KIND PARENT: the chain position is vertex 0 — anchors sit on
+    // the displayBbox frame, so shift by the frame-center offset.
+    const pOffX = pIsPath ? ` + (${pathFrame(parent).offXExpr})` : '';
+    const pOffY = pIsPath ? ` + (${pathFrame(parent).offYExpr})` : '';
     return {
-      cxExpr: `(${parentPos.cxExpr}) + (${fromOff.xOff}) + (${sn.dx}) - (${toOff.xOff})`,
-      cyExpr: `(${parentPos.cyExpr}) + (${fromOff.yOff}) + (${sn.dy}) - (${toOff.yOff})`,
+      cxExpr: `(${parentPos.cxExpr})${pOffX} + (${fromOff.xOff}) + (${sn.dx}) - (${toOff.xOff})`,
+      cyExpr: `(${parentPos.cyExpr})${pOffY} + (${fromOff.yOff}) + (${sn.dy}) - (${toOff.yOff})`,
     };
   };
 
@@ -429,6 +569,24 @@ export function computeParametricPositions(components, snaps, paramValues = {}, 
       if (op === 'subtract' || op === 'intersect' || op === 'punch') {
         const baseId = c.operandIds[0];
         const basePos = resolve(baseId);
+        // PATH-KIND BASE OPERAND: the base's chain resolves to its vertex-
+        // chain root (v0), but the solver anchors this boolean at the
+        // base's displayBbox CENTER (operandBbox's path branch). Shift the
+        // pass-through by the base's frame-center offset or every snap
+        // targeting the boolean exports off by (bbCtr − v0) — probe-
+        // confirmed 50 µm on a 100 µm trace.
+        const baseComp = byId[baseId];
+        if (baseComp && PATH_KINDS.has(baseComp.kind)) {
+          const bpf = pathFrame(baseComp);
+          const shifted = {
+            ...basePos,
+            cxExpr: `(${basePos.cxExpr}) + (${bpf.offXExpr})`,
+            cyExpr: `(${basePos.cyExpr}) + (${bpf.offYExpr})`,
+          };
+          positions[compId] = shifted;
+          visiting.delete(compId);
+          return shifted;
+        }
         positions[compId] = basePos;
         visiting.delete(compId);
         return basePos;
@@ -550,7 +708,27 @@ export function computeParametricPositions(components, snaps, paramValues = {}, 
     // the HFSS-trig rotation matrix, so the chain tracks the rotation
     // parameter as well as the position parameters.
     const fromOff = anchorOffsetExpr(snap.from.anchor, parentPos.wExpr, parentPos.hExpr, componentRotationExpr(parent));
-    const toOff   = anchorOffsetExpr(snap.to.anchor,   cDims.wExpr,     cDims.hExpr,     componentRotationExpr(c));
+    // PATH-KIND CHILD: anchors collapse to the vertex-chain root
+    // (matches the solver's explicit rule) — zero child offset. Without
+    // this the export subtracted ±bboxDim/2 while the solver placed the
+    // root, silently desyncing HFSS from the canvas for non-'C' anchors.
+    const cIsPathChild = PATH_KINDS.has(c.kind);
+    const toOff = cIsPathChild
+      ? { xOff: '0', yOff: '0' }
+      : anchorOffsetExpr(snap.to.anchor, cDims.wExpr, cDims.hExpr, componentRotationExpr(c));
+    // PATH-KIND PARENT: the resolved chain position is vertex 0, but
+    // snap anchors live on the displayBbox frame (anchorWorld) — add the
+    // frame-center offset (parametric for pure-rel chains) to the
+    // parent term everywhere it is composed below.
+    const pIsPathParent = PATH_KINDS.has(parent.kind);
+    const pFrameOffX = pIsPathParent ? ` + (${pathFrame(parent).offXExpr})` : '';
+    const pFrameOffY = pIsPathParent ? ` + (${pathFrame(parent).offYExpr})` : '';
+    if (pIsPathParent && pathFrame(parent).frozen && outMeta) {
+      (outMeta.pathFrameBaked = outMeta.pathFrameBaked || []).push({
+        id: compId,
+        detail: `snapped to ${parent.id} (${parent.kind}): the parent's bbox-center offset is baked numerically (vertex chain has snap/arc/spline/taper vertices) - sweeping a vertex param moves the child only after re-export`,
+      });
+    }
     // Snap-to-replica: when the snap targets a specific instance of the
     // parent's `repeat`/`displace` chain (from.instanceIdx > 0), add the
     // parent's base→instance-k chain offset to the reference term. This is
@@ -629,7 +807,13 @@ export function computeParametricPositions(components, snaps, paramValues = {}, 
           baseWExpr: parentPos.wExpr, baseHExpr: parentPos.hExpr,
           components, parametricPos: positions, angleMode: 'hfss',
         });
-        if (inst && off && Number.isFinite(inst.cx) && Number.isFinite(inst.cy)) {
+        // PATH-KIND PARENT: the frame-center offset (bbCtr − v0) must be
+        // mapped THROUGH the instance rotation/mirror — the solver's
+        // instanceFrameCenter does R·S·(bbCtr − v0), while the parametric
+        // composition below would add it UNROTATED (off by (I − R·S)·off,
+        // up to the full trace length — probe-confirmed). Take the exact
+        // frozen branch instead (instanceFrameCenter — matches the solver).
+        if (!pIsPathParent && inst && off && Number.isFinite(inst.cx) && Number.isFinite(inst.cy)) {
           const rad = ((inst.rotation || 0) * Math.PI) / 180;
           const ca = Math.cos(rad);
           const sa = Math.sin(rad);
@@ -639,8 +823,8 @@ export function computeParametricPositions(components, snaps, paramValues = {}, 
           const base = anchorOffsetExpr(snap.from.anchor, parentPos.wExpr, parentPos.hExpr);
           const cS = ca.toFixed(12);
           const sS = sa.toFixed(12);
-          fromTermX = `(${parentPos.cxExpr}) + (${off.dxExpr}) + ((${cS}) * (${isx}) * (${base.xOff}) - (${sS}) * (${isy}) * (${base.yOff}))`;
-          fromTermY = `(${parentPos.cyExpr}) + (${off.dyExpr}) + ((${sS}) * (${isx}) * (${base.xOff}) + (${cS}) * (${isy}) * (${base.yOff}))`;
+          fromTermX = `(${parentPos.cxExpr})${pFrameOffX} + (${off.dxExpr}) + ((${cS}) * (${isx}) * (${base.xOff}) - (${sS}) * (${isy}) * (${base.yOff}))`;
+          fromTermY = `(${parentPos.cyExpr})${pFrameOffY} + (${off.dyExpr}) + ((${sS}) * (${isx}) * (${base.xOff}) + (${cS}) * (${isy}) * (${base.yOff}))`;
           if (outMeta && ((inst.rotation || 0) !== 0 || isx !== 1 || isy !== 1)) {
             (outMeta.orientationBaked = outMeta.orientationBaked || []).push({
               id: compId,
@@ -653,19 +837,29 @@ export function computeParametricPositions(components, snaps, paramValues = {}, 
             snap.from.anchor, inst.w, inst.h,
             inst.rotation || 0, inst.scaleX ?? 1, inst.scaleY ?? 1,
           );
-          fromTermX = `${(inst.cx + lp.x).toFixed(6)}um`;
-          fromTermY = `${(inst.cy + lp.y).toFixed(6)}um`;
+          // Path-kind parent: anchor about the instance's transformed
+          // FRAME center, not the transformed vertex 0 (matches the
+          // solver's instanceIdx branch).
+          const ifc = instanceFrameCenter(parent, inst);
+          fromTermX = `${(ifc.cx + lp.x).toFixed(6)}um`;
+          fromTermY = `${(ifc.cy + lp.y).toFixed(6)}um`;
+          if (outMeta && pIsPathParent) {
+            (outMeta.pathFrameBaked = outMeta.pathFrameBaked || []).push({
+              id: compId,
+              detail: `snapped to instance #${fromIdxRaw} of path parent ${parent.id}: the instance anchor is baked numerically (rotate/mirror chain x path frame) - sweeps that move the parent need a re-export`,
+            });
+          }
         }
       }
     }
     // Solver: toComp.cx = fromAnchorWorld.x + dx - toAnchor.local.x
-    //                  = (parent.cx + instOff.x + fromOff.x) + dx - toOff.x
+    //                  = (parent.cx [+ pathFrameOff] + instOff.x + fromOff.x) + dx - toOff.x
     const cxExpr = fromTermX
       ? `(${fromTermX}) + (${snap.dx}) - (${toOff.xOff})`
-      : `(${parentPos.cxExpr})${instDx ? ` + (${instDx})` : ''} + (${fromOff.xOff}) + (${snap.dx}) - (${toOff.xOff})`;
+      : `(${parentPos.cxExpr})${pFrameOffX}${instDx ? ` + (${instDx})` : ''} + (${fromOff.xOff}) + (${snap.dx}) - (${toOff.xOff})`;
     const cyExpr = fromTermY
       ? `(${fromTermY}) + (${snap.dy}) - (${toOff.yOff})`
-      : `(${parentPos.cyExpr})${instDy ? ` + (${instDy})` : ''} + (${fromOff.yOff}) + (${snap.dy}) - (${toOff.yOff})`;
+      : `(${parentPos.cyExpr})${pFrameOffY}${instDy ? ` + (${instDy})` : ''} + (${fromOff.yOff}) + (${snap.dy}) - (${toOff.yOff})`;
     const result = { cxExpr, cyExpr, wExpr: cDims.wExpr, hExpr: cDims.hExpr };
     positions[compId] = result;
     visiting.delete(compId);
@@ -855,6 +1049,7 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   // Surface the parametric CAVEATS in the safety report's NOTES section —
   // these are positions that TRACK most sweeps but carry a baked piece.
   for (const it of ppMeta.orientationBaked || []) noteCaveat(it.id, it.detail);
+  for (const it of ppMeta.pathFrameBaked || []) noteCaveat(it.id, it.detail);
   for (const id of ppMeta.extremalBBox || []) {
     noteCaveat(id, 'position rides a union-bbox expression whose EXTREMAL-OPERAND identity is frozen at export values - very large sweeps that change which operand is outermost need a re-export');
   }
@@ -873,6 +1068,19 @@ export function generateHfssNative(scene, paramValues, options = {}) {
       // case the parent's expression itself references synthetics.
       const c = compsById[compId];
       if (!c) return '0';
+      // Path kinds: the SCENE w/h is the '0' placeholder while the
+      // solver's synthetic is the numeric bbox dim — expand to the
+      // parametric frame dims (cum-sum spread + width for pure-rel
+      // chains, frozen numeric otherwise) so span expressions
+      // referencing a trace's w/h match the canvas instead of
+      // collapsing to 0.
+      if (c.kind === 'polyline' || c.kind === 'polyshape') {
+        const pp = parametricPosForExport[compId];
+        // Recursively resolve — a vertex dx referencing another comp's
+        // synthetic would otherwise emit the raw _comp_* token (an
+        // undeclared HFSS variable), mirroring the non-path branch below.
+        if (pp) return `(${resolveSynthetics(String(axis === 'w' ? pp.wExpr : pp.hExpr))})`;
+      }
       const inner = axis === 'w' ? c.w : c.h;
       return `(${resolveSynthetics(String(inner ?? '0'))})`;
     });
@@ -1222,14 +1430,20 @@ export function generateHfssNative(scene, paramValues, options = {}) {
     // doubles the device width but the substrate only sizes to the
     // base instance, putting the chip off-center.
     const instances = expandTransforms(solved, paramValues);
+    const solvedByIdExt = Object.fromEntries(solved.map(sc => [sc.id, sc]));
     let lx = Infinity, ly = Infinity, hx = -Infinity, hy = -Infinity;
     for (const inst of instances) {
       const w = Number.isFinite(inst.w) ? inst.w : (evalExpr(inst.w, paramValues) || 10);
       const h = Number.isFinite(inst.h) ? inst.h : (evalExpr(inst.h, paramValues) || 10);
-      lx = Math.min(lx, inst.cx - w / 2);
-      hx = Math.max(hx, inst.cx + w / 2);
-      ly = Math.min(ly, inst.cy - h / 2);
-      hy = Math.max(hy, inst.cy + h / 2);
+      // Path kinds: inst.cx/cy is vertex 0 — center the extent box on the
+      // instance FRAME center (transformed displayBbox center) so the
+      // substrate/radiation box covers the actual trace, not a box
+      // centered on its start point (which could CLIP the geometry).
+      const fc = instanceFrameCenter(solvedByIdExt[inst.compId], inst);
+      lx = Math.min(lx, fc.cx - w / 2);
+      hx = Math.max(hx, fc.cx + w / 2);
+      ly = Math.min(ly, fc.cy - h / 2);
+      hy = Math.max(hy, fc.cy + h / 2);
     }
     minX = lx - padXNeg;
     maxX = hx + padXPos;
@@ -2192,7 +2406,13 @@ except Exception as e:
             // visually correct, but the vertex won't track HFSS-side
             // sweeps for that particular instance.
             const tgtPp = parametricPos[v.compId];
-            const tgtComp = solved.find(sc => sc.id === v.compId);
+            // Look the target up in the UNFILTERED solved map: `solved`
+            // has non-model comps (section lines) stripped, but a vertex
+            // may legitimately pin to a section line's anchor — missing
+            // it here skipped the path-frame offset while the numeric
+            // resolvers (byIdSolved) applied it (probe-confirmed 30 µm
+            // HFSS-vs-GDS desync on a section-pinned vertex).
+            const tgtComp = byIdSolved[v.compId];
             const instanceIdx = v.instanceIdx || 0;
             // Resolve chain owner: comp itself if it has transforms,
             // else its parent boolean (if applicable). Pass owner's
@@ -2220,11 +2440,24 @@ except Exception as e:
                 parametricPos,
               });
             }
+            // Path-kind targets: the chain position is vertex 0 while the
+            // anchor lives on the displayBbox frame — shift by the frame-
+            // center offset (parametric for pure-rel chains; matches the
+            // canvas-side anchorWorldNumeric displayBbox preference).
+            // The frame exprs run through the SAME sanitizer chain every
+            // other vertex-text expression uses (resolveSynthetics +
+            // ascii + spaceHyphens) — a raw synthetic/unicode token here
+            // would parse as a single unknown identifier = 0 in HFSS.
+            const tgtIsPath = tgtComp && PATH_KINDS.has(tgtComp.kind);
+            const tgtFrame = tgtIsPath ? pathFrameExprs(tgtComp, paramValues) : null;
+            const sanE = (e) => spaceHyphens(ascii(resolveSynthetics(String(e))));
+            const tgtOffX = tgtFrame ? ` + (${sanE(tgtFrame.offXExpr)})` : '';
+            const tgtOffY = tgtFrame ? ` + (${sanE(tgtFrame.offYExpr)})` : '';
             if (tgtPp && tgtPp.cxExpr && tgtPp.cyExpr) {
               const off = anchorOffsetParam(v.anchor, tgtPp.wExpr || '0', tgtPp.hExpr || '0', componentRotationExpr(tgtComp));
               if (chainOffset) {
-                curXExpr = `(${tgtPp.cxExpr}) + (${off.xOff}) + (${chainOffset.dxExpr})`;
-                curYExpr = `(${tgtPp.cyExpr}) + (${off.yOff}) + (${chainOffset.dyExpr})`;
+                curXExpr = `(${tgtPp.cxExpr})${tgtOffX} + (${off.xOff}) + (${chainOffset.dxExpr})`;
+                curYExpr = `(${tgtPp.cyExpr})${tgtOffY} + (${off.yOff}) + (${chainOffset.dyExpr})`;
               } else if (ownerInstanceIdx > 0) {
                 // Chain owner exists but transforms aren't all
                 // parametric-supported (mirror / rotate / duplicate_mirror).
@@ -2238,15 +2471,15 @@ except Exception as e:
                 if (inst && opBase) {
                   const ddx = inst.cx - (transformInstancesAll.find(ii => ii.compId === owner.id && ii.idx === 0)?.cx ?? 0);
                   const ddy = inst.cy - (transformInstancesAll.find(ii => ii.compId === owner.id && ii.idx === 0)?.cy ?? 0);
-                  curXExpr = `(${tgtPp.cxExpr}) + (${off.xOff}) + (${ddx.toFixed(4)}um)`;
-                  curYExpr = `(${tgtPp.cyExpr}) + (${off.yOff}) + (${ddy.toFixed(4)}um)`;
+                  curXExpr = `(${tgtPp.cxExpr})${tgtOffX} + (${off.xOff}) + (${ddx.toFixed(4)}um)`;
+                  curYExpr = `(${tgtPp.cyExpr})${tgtOffY} + (${off.yOff}) + (${ddy.toFixed(4)}um)`;
                 } else {
-                  curXExpr = `(${tgtPp.cxExpr}) + (${off.xOff})`;
-                  curYExpr = `(${tgtPp.cyExpr}) + (${off.yOff})`;
+                  curXExpr = `(${tgtPp.cxExpr})${tgtOffX} + (${off.xOff})`;
+                  curYExpr = `(${tgtPp.cyExpr})${tgtOffY} + (${off.yOff})`;
                 }
               } else {
-                curXExpr = `(${tgtPp.cxExpr}) + (${off.xOff})`;
-                curYExpr = `(${tgtPp.cyExpr}) + (${off.yOff})`;
+                curXExpr = `(${tgtPp.cxExpr})${tgtOffX} + (${off.xOff})`;
+                curYExpr = `(${tgtPp.cyExpr})${tgtOffY} + (${off.yOff})`;
               }
             } else if (tgtComp) {
               polyHasFrozenVertex = true;
@@ -2255,11 +2488,11 @@ except Exception as e:
               const th = typeof tgtComp.h === 'number' ? tgtComp.h : (evalExpr(tgtComp.h, paramValues) || 0);
               const off = anchorOffsetParam(v.anchor, `${tw}um`, `${th}um`, componentRotationExpr(tgtComp));
               if (chainOffset) {
-                curXExpr = `(${tgtComp.cx.toFixed(4)}um) + (${off.xOff}) + (${chainOffset.dxExpr})`;
-                curYExpr = `(${tgtComp.cy.toFixed(4)}um) + (${off.yOff}) + (${chainOffset.dyExpr})`;
+                curXExpr = `(${tgtComp.cx.toFixed(4)}um)${tgtOffX} + (${off.xOff}) + (${chainOffset.dxExpr})`;
+                curYExpr = `(${tgtComp.cy.toFixed(4)}um)${tgtOffY} + (${off.yOff}) + (${chainOffset.dyExpr})`;
               } else {
-                curXExpr = `(${tgtComp.cx.toFixed(4)}um) + (${off.xOff})`;
-                curYExpr = `(${tgtComp.cy.toFixed(4)}um) + (${off.yOff})`;
+                curXExpr = `(${tgtComp.cx.toFixed(4)}um)${tgtOffX} + (${off.xOff})`;
+                curYExpr = `(${tgtComp.cy.toFixed(4)}um)${tgtOffY} + (${off.yOff})`;
               }
             }
             vertExprs.push({ xExpr: curXExpr, yExpr: curYExpr });

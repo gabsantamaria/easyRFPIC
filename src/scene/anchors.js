@@ -94,6 +94,34 @@ export function compRotationDeg(comp, paramValues) {
   return Number.isFinite(v) ? v : 0;
 }
 
+// Path-kind components (polyline / polyshape): their cx/cy is the
+// VERTEX-CHAIN ROOT (vertex 0's world position — the drag handle), NOT
+// the bbox center; the true AABB lives in the solver-refreshed
+// `displayBbox`. Every consumer that treats (cx, cy) as the center of a
+// w × h box must special-case these kinds through compFrame below.
+export const PATH_KINDS = new Set(['polyline', 'polyshape']);
+
+// Canonical world FRAME of a solved component: the solver-stashed
+// displayBbox when present (path kinds + transformed booleans — kinds
+// whose cx/cy is NOT the bbox center), else the (cx, cy) ± w/2 box.
+// This is the frame selection halos, hit-pads, snap anchors, marquee
+// tests, and dimension overlays should draw/test against — the SAME
+// frame anchorWorld resolves snap anchors on, so what the user sees is
+// where a snap actually lands.
+export function compFrame(comp, paramValues) {
+  if (comp.displayBbox) {
+    const { cx, cy, w, h } = comp.displayBbox;
+    return { cx, cy, w, h };
+  }
+  const w = typeof comp.w === 'number' ? comp.w : evalExpr(comp.w, paramValues || {});
+  const h = typeof comp.h === 'number' ? comp.h : evalExpr(comp.h, paramValues || {});
+  return {
+    cx: comp.cx, cy: comp.cy,
+    w: Number.isFinite(w) ? w : 0,
+    h: Number.isFinite(h) ? h : 0,
+  };
+}
+
 export function anchorWorld(comp, anchorName, paramValues) {
   // For booleans with a transform chain, `displayBbox` carries the post-
   // transform AABB (the visible footprint of the rotated/replicated

@@ -23,7 +23,7 @@
 import { evalExpr } from './params.js';
 import { anchorLocalRotated, anchorLocalInstance, anchorWorld, compRotationDeg } from './anchors.js';
 import { expandTransforms } from './transforms.js';
-import { chainOwnerForInstance } from './instance-positions.js';
+import { chainOwnerForInstance, instanceFrameCenter } from './instance-positions.js';
 import { tessellatePolylinePath, polylineBbox, polyshapeBbox } from '../geometry/polyline.js';
 import { buildRacetrackCenterline } from '../geometry/racetrack.js';
 
@@ -171,6 +171,24 @@ export function solveLayout(components, snaps, paramValues) {
             : obb;
         }
         return bb;
+      }
+      // Path kinds (polyline/polyshape): cx/cy is the vertex-chain ROOT
+      // (vertex 0), NOT the bbox center — the true AABB lives in
+      // displayBbox (written by refreshPolylineBbox). Refresh inline when
+      // the operand hasn't been recordPlaced'd yet this solve, so a
+      // boolean whose bbox is read before its polyline operand was placed
+      // still contributes the REAL footprint (not a v0-centered box).
+      if (c.kind === 'polyline' || c.kind === 'polyshape') {
+        if (!c.displayBbox) {
+          if (c.kind === 'polyline') refreshPolylineBbox(c);
+          else refreshPolyshapeBbox(c);
+        }
+        const bb = c.displayBbox;
+        if (!bb || !Number.isFinite(bb.cx) || !Number.isFinite(bb.w)) return null;
+        return {
+          minX: bb.cx - bb.w / 2, maxX: bb.cx + bb.w / 2,
+          minY: bb.cy - bb.h / 2, maxY: bb.cy + bb.h / 2,
+        };
       }
       const w = evalExpr(c.w, workingPV);
       const h = evalExpr(c.h, workingPV);
@@ -437,7 +455,11 @@ export function solveLayout(components, snaps, paramValues) {
             s.from.anchor, inst.w, inst.h,
             inst.rotation || 0, inst.scaleX ?? 1, inst.scaleY ?? 1,
           );
-          fromAnchor = { x: inst.cx + lp.x, y: inst.cy + lp.y };
+          // Path-kind parents: the instance's cx/cy is the transformed
+          // VERTEX 0 — anchor about the transformed displayBbox center
+          // instead (same frame the canvas dots and anchorWorld use).
+          const fc = instanceFrameCenter(fromComp, inst);
+          fromAnchor = { x: fc.cx + lp.x, y: fc.cy + lp.y };
         } else {
           diag.issues.push({ kind: 'dangling-instance', message: `Snap ${s.id ?? `${s.from.compId}→${s.to.compId}`}: from.instanceIdx ${fromIdxRaw} out of range for ${s.from.compId} — treated as base` });
         }
@@ -452,7 +474,21 @@ export function solveLayout(components, snaps, paramValues) {
       // The child's own anchor offset rotates with its first-class
       // rotation (matches anchorWorld on the parent side), so a rotated
       // child snaps by its ROTATED corner/edge, not the unrotated bbox.
-      const toLocal = anchorLocalRotated(s.to.anchor, tw, th, compRotationDeg(toComp, workingPV));
+      //
+      // PATH-KIND CHILD (polyline/polyshape): component-level snap anchors
+      // COLLAPSE to the vertex-chain ROOT (cx/cy = vertex 0) — the snap
+      // positions the trace's root; pinning an endpoint/edge is what
+      // snap-VERTICES are for. This is an EXPLICIT rule, not an accident:
+      // (a) templates depend on it (gsg tapers pin vertex 0 to the pad
+      // edge with an anchor-'C' snap), (b) it is iteration-stable (the
+      // numeric bbox w/h only exist after the first refresh, so a non-'C'
+      // anchor offset would flip between solves), and (c) the HFSS export
+      // emits the matching ZERO child offset for path kinds — keeping
+      // canvas and HFSS placement byte-consistent.
+      const isPathChild = toComp.kind === 'polyline' || toComp.kind === 'polyshape';
+      const toLocal = isPathChild
+        ? { x: 0, y: 0 }
+        : anchorLocalRotated(s.to.anchor, tw, th, compRotationDeg(toComp, workingPV));
       // Non-finite snap offsets (e.g. a dx expression that divides by a
       // zero-valued param) are zeroed so the child still lands somewhere
       // sane; the anomaly is surfaced via solve diagnostics.
@@ -490,6 +526,25 @@ export function solveLayout(components, snaps, paramValues) {
             } else {
               c.cx += dxShift;
               c.cy += dyShift;
+              // Keep the solver-stashed derived geometry in sync with the
+              // raw shift: displayBbox and _resolvedVerts translate
+              // rigidly. Leaving them stale made (a) refreshBooleanBbox's
+              // displayBbox-based operand read (path kinds) use the
+              // pre-shift box, and (b) rings.js remap GDS/mask rings of a
+              // shifted polyline operand against the WRONG base pose.
+              if (c.displayBbox) {
+                // Clone rather than mutate — the object can be shared with
+                // an upstream shallow copy ({...c} spreads keep the nested
+                // reference).
+                c.displayBbox = {
+                  ...c.displayBbox,
+                  cx: c.displayBbox.cx + dxShift,
+                  cy: c.displayBbox.cy + dyShift,
+                };
+              }
+              if (Array.isArray(c._resolvedVerts)) {
+                c._resolvedVerts = c._resolvedVerts.map(([px, py]) => [px + dxShift, py + dyShift]);
+              }
               if (placed.has(c.id)) {
                 if (Number.isFinite(c.cx)) workingPV[`_comp_${c.id}_cx`] = c.cx;
                 if (Number.isFinite(c.cy)) workingPV[`_comp_${c.id}_cy`] = c.cy;
@@ -562,6 +617,7 @@ export function applyMirrors(components, mirrors) {
       const src = byId[mem.srcId];
       const tgt = byId[mem.mirrorId];
       if (!src || !tgt) continue;
+      const prevCx = tgt.cx, prevCy = tgt.cy;
       if (m.axis === 'horizontal') {
         tgt.cy = 2 * m.axisCoord - src.cy;
         tgt.cx = src.cx;
@@ -573,6 +629,26 @@ export function applyMirrors(components, mirrors) {
       tgt.h = src.h;
       tgt.layer = src.layer;
       tgt.cutouts = src.cutouts;
+      // Keep the solver-stashed derived geometry (path-kind displayBbox +
+      // _resolvedVerts) consistent with the position rewrite. Mirrors only
+      // TRANSLATE the target (vertices are not reflected — pre-existing
+      // mirror semantics for path kinds), so translate the stash by the
+      // same delta rather than leaving it at the pre-mirror pose.
+      const dMx = tgt.cx - prevCx, dMy = tgt.cy - prevCy;
+      if ((dMx !== 0 || dMy !== 0) && Number.isFinite(dMx) && Number.isFinite(dMy)) {
+        if (tgt.displayBbox) {
+          // Clone rather than mutate — the {...c} clone above shares the
+          // nested object with the input solved array.
+          tgt.displayBbox = {
+            ...tgt.displayBbox,
+            cx: tgt.displayBbox.cx + dMx,
+            cy: tgt.displayBbox.cy + dMy,
+          };
+        }
+        if (Array.isArray(tgt._resolvedVerts)) {
+          tgt._resolvedVerts = tgt._resolvedVerts.map(([px, py]) => [px + dMx, py + dMy]);
+        }
+      }
     }
   }
   return Object.values(byId);
@@ -621,6 +697,11 @@ export function resolveBooleanBboxes(solved, paramValues) {
     // Primitive: union AABB across all transform instances.
     const insts = expandTransforms([c], paramValues);
     if (insts.length === 0) return null;
+    // Path kinds: inst.cx/cy is the chain-transformed VERTEX 0, not the
+    // bbox center — take the instance frame center (the displayBbox
+    // center mapped through the instance transform) so a boolean holding
+    // a polyline operand gets the operand's REAL footprint.
+    const isPath = c.kind === 'polyline' || c.kind === 'polyshape';
     for (const inst of insts) {
       if (!Number.isFinite(inst.w) || !Number.isFinite(inst.h)) continue;
       // Account for rotation by computing the rotated rect's corner ring
@@ -636,8 +717,9 @@ export function resolveBooleanBboxes(solved, paramValues) {
         const ca = Math.cos(rad), sa = Math.sin(rad);
         corners = corners.map(([lx, ly]) => [lx * ca - ly * sa, lx * sa + ly * ca]);
       }
+      const fc = isPath ? instanceFrameCenter(c, inst) : { cx: inst.cx, cy: inst.cy };
       for (const [lx, ly] of corners) {
-        const x = inst.cx + lx, y = inst.cy + ly;
+        const x = fc.cx + lx, y = fc.cy + ly;
         if (x < out.minX) out.minX = x;
         if (x > out.maxX) out.maxX = x;
         if (y < out.minY) out.minY = y;

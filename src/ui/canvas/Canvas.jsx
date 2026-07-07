@@ -15,7 +15,8 @@ import { createPortal } from 'react-dom';
 import { DeferredTextInput } from '../DeferredTextInput.jsx';
 import { DEFAULT_CANVAS_THEME } from '../theme.js';
 import { resolveInstanceAnchorNumeric } from '../../scene/instance-positions.js';
-import { ANCHORS, parseAnchor, anchorLocal, anchorLocalRotated, anchorLocalInstance, anchorWorld, compRotationDeg, rotateLocal } from '../../scene/anchors.js';
+import { ANCHORS, parseAnchor, anchorLocal, anchorLocalRotated, anchorLocalInstance, anchorWorld, compRotationDeg, rotateLocal, compFrame, PATH_KINDS } from '../../scene/anchors.js';
+import { instanceFrameCenter } from '../../scene/instance-positions.js';
 import { effectiveConductorLayerId } from '../../scene/conductor-binding.js';
 import { evalExpr } from '../../scene/params.js';
 import { solveLayout, applyMirrors, resolveBooleanBboxes } from '../../scene/solver.js';
@@ -344,13 +345,20 @@ export function pickGridCellSize(sizes, fallback = 10) {
 // nearest-wins / first-wins-on-tie selection EXACTLY.
 export function buildAnchorSnapIndex(transformInstances, solved) {
   const sources = [];
-  // (1) transform-expanded instances.
+  const solvedById = new Map(solved.map(c => [c.id, c]));
+  // (1) transform-expanded instances. Path kinds (polyline/polyshape):
+  // inst.cx/cy is the chain-transformed VERTEX 0 — anchor the source on
+  // the instance FRAME center (transformed displayBbox center) so the
+  // dots/edges sit on the visible band, matching anchorWorld exactly.
+  // Non-path instances pass through unchanged (instanceFrameCenter is
+  // the identity for them).
   for (const inst of transformInstances) {
     const w = inst.w, h = inst.h;
     if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) continue;
     const rot = inst.rotation || 0;
+    const fc = instanceFrameCenter(solvedById.get(inst.compId), inst);
     sources.push({
-      cx: inst.cx, cy: inst.cy, w, h,
+      cx: fc.cx, cy: fc.cy, w, h,
       anchorRot: rot, projRot: rot,
       compId: inst.compId, instanceIdx: inst.idx,
       // excludeKey: the id findAnchorSnap's excludeCompId filter tests.
@@ -360,7 +368,6 @@ export function buildAnchorSnapIndex(transformInstances, solved) {
   // (2) boolean operand cells at idx > 0 — same translate → mirror → rotate
   // composition the boolean cluster renderer uses (see
   // buildBoolOverridesForInstance).
-  const solvedById = new Map(solved.map(c => [c.id, c]));
   const baseInstByCompId = new Map();
   for (const ii of transformInstances) {
     if (ii.idx === 0 && !baseInstByCompId.has(ii.compId)) baseInstByCompId.set(ii.compId, ii);
@@ -388,8 +395,11 @@ export function buildAnchorSnapIndex(transformInstances, solved) {
       if (!baseInst) return;
       const opW = baseInst.w, opH = baseInst.h;
       if (!Number.isFinite(opW) || !Number.isFinite(opH) || opW <= 0 || opH <= 0) return;
-      let tx = baseInst.cx + dx;
-      let ty = baseInst.cy + dy;
+      // Path-kind operands: cell math starts from the operand's FRAME
+      // center, not its vertex-0 position.
+      const opFc = instanceFrameCenter(op, baseInst);
+      let tx = opFc.cx + dx;
+      let ty = opFc.cy + dy;
       if (bSx === -1) tx = 2 * inst.cx - tx;
       if (bSy === -1) ty = 2 * inst.cy - ty;
       const rxC = tx - inst.cx;
@@ -511,12 +521,19 @@ export function buildAltDragTargetIndex(solved, paramValues, dimsByCompId, insta
   for (let k = 0; k < solved.length; k++) {
     const oc = solved[k];
     if (oc.consumedBy) continue;
-    const dims = (dimsByCompId && dimsByCompId[oc.id]) || {
+    // Path kinds: the frame is the displayBbox (cx/cy is vertex 0) —
+    // candidates on any other box would disagree with where the solver
+    // (anchorWorld) actually lands the committed snap.
+    const pathFr = PATH_KINDS.has(oc.kind) && oc.displayBbox ? oc.displayBbox : null;
+    const dims = pathFr || (dimsByCompId && dimsByCompId[oc.id]) || {
       w: evalExpr(oc.w, paramValues), h: evalExpr(oc.h, paramValues),
     };
     const ow = dims.w, oh = dims.h;
     if (!Number.isFinite(ow) || !Number.isFinite(oh) || ow <= 0 || oh <= 0) continue;
-    recs.push({ oc, ocIdx: k, ow, oh, rot: compRotationDeg(oc, paramValues) });
+    recs.push({
+      oc, ocIdx: k, ow, oh, rot: compRotationDeg(oc, paramValues),
+      fcx: pathFr ? pathFr.cx : oc.cx, fcy: pathFr ? pathFr.cy : oc.cy,
+    });
   }
   const cellSize = pickGridCellSize(recs.map(r => Math.max(r.ow, r.oh)));
   const anchorGrid = buildUniformGrid(cellSize);
@@ -524,15 +541,15 @@ export function buildAltDragTargetIndex(solved, paramValues, dimsByCompId, insta
   for (const r of recs) {
     for (let ai = 0; ai < ANCHORS.length; ai++) {
       const lp = anchorLocalRotated(ANCHORS[ai], r.ow, r.oh, r.rot);
-      const x = r.oc.cx + lp.x, y = r.oc.cy + lp.y;
+      const x = r.fcx + lp.x, y = r.fcy + lp.y;
       gridInsert(anchorGrid, x, y, x, y, {
         x, y, compId: r.oc.id, anchor: ANCHORS[ai], anchorIdx: ai, ocIdx: r.ocIdx,
       });
     }
     gridInsert(
       rectGrid,
-      r.oc.cx - r.ow / 2, r.oc.cy - r.oh / 2,
-      r.oc.cx + r.ow / 2, r.oc.cy + r.oh / 2,
+      r.fcx - r.ow / 2, r.fcy - r.oh / 2,
+      r.fcx + r.ow / 2, r.fcy + r.oh / 2,
       r
     );
   }
@@ -573,9 +590,12 @@ export function buildAltDragTargetIndex(solved, paramValues, dimsByCompId, insta
           || isx !== 1 || isy !== 1;
         if (!moved) continue;
       }
+      // Path kinds: anchor replicas about the instance's FRAME center
+      // (transformed displayBbox center), not the transformed vertex 0.
+      const rfc = instanceFrameCenter(oc, inst);
       for (let ai = 0; ai < ANCHORS.length; ai++) {
         const lp = anchorLocalInstance(ANCHORS[ai], iw, ih, irot, isx, isy);
-        const x = inst.cx + lp.x, y = inst.cy + lp.y;
+        const x = rfc.cx + lp.x, y = rfc.cy + lp.y;
         gridInsert(anchorGrid, x, y, x, y, {
           x, y, compId: inst.compId, anchor: ANCHORS[ai], anchorIdx: ai,
           ocIdx: replicaBlock, instanceIdx: inst.idx,
@@ -661,8 +681,11 @@ export function findAltDragSnapCandidate(index, {
       const oc = r.oc;
       if (clusterSet && clusterSet.has(oc.id)) return;
       const ow = r.ow, oh = r.oh;
-      const oxMin = oc.cx - ow / 2, oxMax = oc.cx + ow / 2;
-      const oyMin = oc.cy - oh / 2, oyMax = oc.cy + oh / 2;
+      // r.fcx/fcy = the record's FRAME center (displayBbox center for
+      // path kinds, cx/cy otherwise — set in buildAltDragTargetIndex).
+      const ocx = r.fcx ?? oc.cx, ocy = r.fcy ?? oc.cy;
+      const oxMin = ocx - ow / 2, oxMax = ocx + ow / 2;
+      const oyMin = ocy - oh / 2, oyMax = ocy + oh / 2;
       const xOverlap = Math.min(oxMax, dxMax) - Math.max(oxMin, dxMin);
       const yOverlap = Math.min(oyMax, dyMax) - Math.max(oyMin, dyMin);
       // Edge candidates get a constant ranking penalty on top of their raw
@@ -697,7 +720,7 @@ export function findAltDragSnapCandidate(index, {
       if (xOverlap > 0) {
         const midX = (Math.max(oxMin, dxMin) + Math.min(oxMax, dxMax)) / 2;
         const dSidesY = [['top', dyMax], ['bottom', dyMin], ['centerY', proposedCy]];
-        const tSidesY = [['top', oyMax], ['bottom', oyMin], ['centerY', oc.cy]];
+        const tSidesY = [['top', oyMax], ['bottom', oyMin], ['centerY', ocy]];
         for (let di = 0; di < dSidesY.length; di++) {
           for (let ti = 0; ti < tSidesY.length; ti++) {
             tryEdge('h', dSidesY[di][0], dSidesY[di][1], tSidesY[ti][0], tSidesY[ti][1], midX, tSidesY[ti][1], di * 3 + ti);
@@ -707,7 +730,7 @@ export function findAltDragSnapCandidate(index, {
       if (yOverlap > 0) {
         const midY = (Math.max(oyMin, dyMin) + Math.min(oyMax, dyMax)) / 2;
         const dSidesX = [['right', dxMax], ['left', dxMin], ['centerX', proposedCx]];
-        const tSidesX = [['right', oxMax], ['left', oxMin], ['centerX', oc.cx]];
+        const tSidesX = [['right', oxMax], ['left', oxMin], ['centerX', ocx]];
         for (let di = 0; di < dSidesX.length; di++) {
           for (let ti = 0; ti < tSidesX.length; ti++) {
             tryEdge('v', dSidesX[di][0], dSidesX[di][1], tSidesX[ti][0], tSidesX[ti][1], tSidesX[ti][1], midY, 9 + di * 3 + ti);
@@ -1050,7 +1073,11 @@ function EditableSnapDims({ svgRef, viewport, snaps, solved, transformInstances,
       const ra = resolveInstanceAnchorNumeric(s.from.compId, s.from.anchor, s.from.instanceIdx, byId, transformInstances || [], paramValues);
       if (ra && Number.isFinite(ra.x) && Number.isFinite(ra.y)) fromW = ra;
     }
-    const toW = anchorWorld(toComp, s.to.anchor, paramValues);
+    // Path-kind CHILD: the solver pins the vertex-chain root (v0) — the
+    // editable Δx/Δy measure to the point the snap actually constrains.
+    const toW = PATH_KINDS.has(toComp.kind)
+      ? { x: toComp.cx, y: toComp.cy }
+      : anchorWorld(toComp, s.to.anchor, paramValues);
     const valDx = evalExpr(s.dx, paramValues);
     const valDy = evalExpr(s.dy, paramValues);
     // dx leg: horizontal at fromW.y, from fromW.x to toW.x.
@@ -1235,6 +1262,36 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     }
     return m;
   }, [solved, paramValues]);
+
+  // Canonical world FRAME per solved component: for PATH KINDS (polyline/
+  // polyshape) the displayBbox — their cx/cy is the vertex-chain root
+  // (vertex 0), NOT the bbox center — else cx/cy with the evaluated dims
+  // (identical to the pre-existing math for every other kind; booleans
+  // keep their base-bbox semantics untouched). EVERY overlay that draws
+  // or hit-tests "the component's box" (selection frame, hit-pad, snap
+  // anchors, marquee, dims, guides) reads this — so what the user sees is
+  // exactly where anchorWorld resolves snaps.
+  const frameByCompId = useMemo(() => {
+    const m = {};
+    for (const c of solved) {
+      const d = dimsByCompId[c.id];
+      m[c.id] = PATH_KINDS.has(c.kind)
+        ? compFrame(c, paramValues)
+        : { cx: c.cx, cy: c.cy, w: d.w, h: d.h };
+    }
+    return m;
+  }, [solved, dimsByCompId, paramValues]);
+  // Solved-component lookup (plain object — the polyline vertex resolvers
+  // index it as byId[id]) for instance-frame math AND snap-vertex target
+  // resolution. Pinned vertices MUST resolve against the SOLVED map: raw
+  // scene comps carry neither displayBbox (path-kind targets' frame) nor
+  // solver-corrected positions (snap-bound targets) — resolving against
+  // raw drew the trace somewhere the exporters didn't (the same bug class
+  // the numeric exporters fixed via "resolve against the FULL solved map").
+  const solvedCompById = useMemo(
+    () => Object.fromEntries(solved.map(c => [c.id, c])),
+    [solved]
+  );
 
   // Layer visibility: ids hidden by the LAYERS-panel eyes. CANVAS-ONLY —
   // hidden components skip render + interaction below but stay fully in the
@@ -1945,9 +2002,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
 
   // C3: resolved vertex positions (one per vertex spec — index-stable) for a
   // polyline / polyshape, from the SOLVED component so solver-positioned
-  // paths put handles where the geometry actually renders.
+  // paths put handles where the geometry actually renders. Snap-pinned
+  // vertices resolve against the SOLVED map (displayBbox frame for path-
+  // kind targets, solver-corrected positions) — matching the exporters.
   const resolveVertsFor = (comp) =>
-    resolvePolylineVertices(comp, sceneCompById, paramValues, transformInstances);
+    resolvePolylineVertices(comp, solvedCompById, paramValues, transformInstances);
 
   // C3: mousedown on a vertex handle. Alt+click deletes the vertex (merging
   // its offset into a rel-numeric follower so downstream geometry stays
@@ -2402,10 +2461,14 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       for (const m of coMovers) {
         const c = solved.find(cc => cc.id === m.id);
         if (!c) continue;
-        const { w: cw, h: ch } = dimsByCompId[c.id]; // [F2]
-        if (!Number.isFinite(cw) || !Number.isFinite(ch)) continue;
-        const x0 = m.startCx - cw / 2, x1 = m.startCx + cw / 2;
-        const y0 = m.startCy - ch / 2, y1 = m.startCy + ch / 2;
+        // Frame box (displayBbox for path kinds — their cx/cy is vertex
+        // 0, not the bbox center; identical to the old dims math for
+        // every other kind). Keeps the dragged-cluster bbox on the
+        // VISIBLE geometry.
+        const fr = frameByCompId[c.id] || { cx: c.cx, cy: c.cy, ...dimsByCompId[c.id] };
+        if (!Number.isFinite(fr.w) || !Number.isFinite(fr.h)) continue;
+        const x0 = fr.cx - fr.w / 2, x1 = fr.cx + fr.w / 2;
+        const y0 = fr.cy - fr.h / 2, y1 = fr.cy + fr.h / 2;
         if (x0 < cbMinX) cbMinX = x0; if (x1 > cbMaxX) cbMaxX = x1;
         if (y0 < cbMinY) cbMinY = y0; if (y1 > cbMaxY) cbMaxY = y1;
       }
@@ -2707,7 +2770,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
               if (tAnchorList.length && dAnchorList.length && ctxTargetCompId) {
                 const oc = solved.find(c => c.id === ctxTargetCompId);
                 if (oc) {
-                  const { w: ow, h: oh } = dimsByCompId[oc.id]; // [F2]
+                  // Target FRAME (displayBbox for path kinds) — see
+                  // frameByCompId. ow/oh/ocFr replace the raw cx-centered
+                  // dims so sticky detents sit on the visible band.
+                  const ocFr = frameByCompId[oc.id] || { cx: oc.cx, cy: oc.cy, ...dimsByCompId[oc.id] };
+                  const ow = ocFr.w, oh = ocFr.h;
                   if (Number.isFinite(ow) && Number.isFinite(oh) && ow > 0 && oh > 0) {
                     // STICKY is scaled to the target's free-axis edge
                     // length so the sticky zone is a visible fraction of
@@ -2739,8 +2806,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                       const ta = tAnchorList[i];
                       const da = dAnchorList[i];
                       const tlp = anchorLocalRotated(ta, ow, oh, stickOcRot);
-                      const tx = oc.cx + tlp.x;
-                      const ty = oc.cy + tlp.y;
+                      // Detents about the FRAME center (ocFr — displayBbox
+                      // for path kinds), matching the alt-drag index and
+                      // where the solver lands the committed snap.
+                      const tx = ocFr.cx + tlp.x;
+                      const ty = ocFr.cy + tlp.y;
                       const dlp = anchorLocalRotated(da, dw, dh, stickDRot);
                       const dax = proposedCx + dlp.x;
                       const day = proposedCy + dlp.y;
@@ -2861,15 +2931,19 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             const iw = inst.w, ih = inst.h;
             if (!Number.isFinite(inst.cx) || !Number.isFinite(inst.cy)) continue;
             if (!Number.isFinite(iw) || !Number.isFinite(ih) || iw <= 0 || ih <= 0) continue;
+            // Path kinds: align to the instance FRAME (transformed
+            // displayBbox), not a box centered on vertex 0 — otherwise the
+            // magenta guides claim alignment off the visible band.
+            const afc = instanceFrameCenter(solvedCompById[inst.compId], inst);
             targetsX.push(
-              { val: inst.cx - iw / 2, compId: inst.compId },
-              { val: inst.cx, compId: inst.compId },
-              { val: inst.cx + iw / 2, compId: inst.compId },
+              { val: afc.cx - iw / 2, compId: inst.compId },
+              { val: afc.cx, compId: inst.compId },
+              { val: afc.cx + iw / 2, compId: inst.compId },
             );
             targetsY.push(
-              { val: inst.cy - ih / 2, compId: inst.compId },
-              { val: inst.cy, compId: inst.compId },
-              { val: inst.cy + ih / 2, compId: inst.compId },
+              { val: afc.cy - ih / 2, compId: inst.compId },
+              { val: afc.cy, compId: inst.compId },
+              { val: afc.cy + ih / 2, compId: inst.compId },
             );
           }
           const dwA = drag.clusterBboxW || 0;
@@ -3088,10 +3162,13 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // visibleSolved: hidden-layer components can't be marquee-selected —
         // an invisible selection could then be nudged/deleted blind.
         const hits = visibleSolved.filter(c => {
-          const { w, h } = dimsByCompId[c.id]; // [F2]
-          // intersection test (component bbox vs marquee bbox)
-          const cx1 = c.cx - w / 2, cx2 = c.cx + w / 2;
-          const cy1 = c.cy - h / 2, cy2 = c.cy + h / 2;
+          // Frame box (displayBbox for path kinds — cx/cy is vertex 0,
+          // not the bbox center): a marquee over the VISIBLE band should
+          // select the trace, not a phantom box near its start point.
+          const fr = frameByCompId[c.id] || { cx: c.cx, cy: c.cy, ...dimsByCompId[c.id] };
+          // intersection test (component frame vs marquee bbox)
+          const cx1 = fr.cx - fr.w / 2, cx2 = fr.cx + fr.w / 2;
+          const cy1 = fr.cy - fr.h / 2, cy2 = fr.cy + fr.h / 2;
           return cx2 >= x1 && cx1 <= x2 && cy2 >= y1 && cy1 <= y2;
         }).map(c => c.id);
         const newIds = marquee.additive ? new Set([...selectedIds, ...hits]) : new Set(hits);
@@ -3154,13 +3231,17 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // Capture the free-axis offset. Anchors land at the midpoint of
         // their respective edges (N/S sit on cx; E/W sit on cy), so the
         // relative offset between the two anchors on the FREE axis is
-        // exactly draggedComp.center − targetComp.center on that axis.
+        // exactly draggedComp.center − targetComp.center on that axis —
+        // using the FRAME centers (displayBbox for path kinds, whose
+        // cx/cy is vertex 0, not the bbox center).
         const targetComp = solved.find((c) => c.id === targetCompId);
         if (draggedComp && targetComp) {
+          const dFr = frameByCompId[draggedComp.id] || draggedComp;
+          const tFr = frameByCompId[targetComp.id] || targetComp;
           if (target.axis === 'h') {
-            initDx = draggedComp.cx - targetComp.cx;
+            initDx = dFr.cx - tFr.cx;
           } else {
-            initDy = draggedComp.cy - targetComp.cy;
+            initDy = dFr.cy - tFr.cy;
           }
         }
       }
@@ -3203,6 +3284,30 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           setDrag(null);
           setMoveSnapHover(null);
           return;
+        }
+        // PATH-KIND CHILD (polyline/polyshape as the snap's `to`): the
+        // solver collapses child anchors to the vertex-chain ROOT (v0),
+        // so a zero-offset commit would JUMP the trace from the previewed
+        // pose (frame-anchor on target) to v0-on-target. Capture the FULL
+        // offset d = v0 − fromAnchorWorld at the drop instead — the pose
+        // the user dropped is preserved exactly, and the snap still
+        // tracks the parent parametrically through the gap_* params.
+        const toSolvedPath = solved.find(c => c.id === toCompId);
+        if (toSolvedPath && PATH_KINDS.has(toSolvedPath.kind)) {
+          const fromSolved = solved.find(c => c.id === fromCompId);
+          let fx = null, fy = null;
+          if (target.kind === 'anchor' && fromCompId === targetCompId) {
+            // The preview point IS the from-anchor world position
+            // (includes replica instanceIdx targets).
+            fx = target.x; fy = target.y;
+          } else if (fromSolved) {
+            const wpt = anchorWorld(fromSolved, fromAnchor, paramValues);
+            fx = wpt.x; fy = wpt.y;
+          }
+          if (Number.isFinite(fx) && Number.isFinite(fy)) {
+            finalDx = toSolvedPath.cx - fx;
+            finalDy = toSolvedPath.cy - fy;
+          }
         }
         // Pick fresh gap-parameter names. The captured offset is the
         // expression value; the user can tune it later in the inspector.
@@ -3344,7 +3449,12 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       fromCompActual = toComp; toCompActual = fromComp;
     }
     const fW = instAwareAnchor(fromCompActual, actualFromAnchor, actualFromInstanceIdx);
-    const tW = anchorWorld(toCompActual, actualToAnchor, paramValues);
+    // Path-kind CHILD: the solver collapses child anchors to the vertex-
+    // chain root (v0) — measure the captured offset from THAT point, so
+    // the committed snap keeps the trace byte-exactly where it is.
+    const tW = PATH_KINDS.has(toCompActual.kind)
+      ? { x: toCompActual.cx, y: toCompActual.cy }
+      : anchorWorld(toCompActual, actualToAnchor, paramValues);
     let actualDx = tW.x - fW.x;
     let actualDy = tW.y - fW.y;
     // Shift held = axis-lock the resulting offset to a single axis (zero the smaller delta)
@@ -4293,7 +4403,6 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         const els = [];
         for (const inst of visibleTransformInstances) {
           if (consumedIds.has(inst.compId)) continue;
-          if (inst.cx < xMinS || inst.cx > xMaxS || inst.cy < yMinS || inst.cy > yMaxS) continue;
           const oc = solvedByIdInst.get(inst.compId);
           if (!oc) continue;
           const iw = inst.w, ih = inst.h;
@@ -4309,10 +4418,17 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
               || isx !== 1 || isy !== 1;
             if (!moved) continue;
           }
+          // Path kinds: dots about the instance FRAME center (transformed
+          // displayBbox center — inst.cx/cy is the transformed vertex 0).
+          // The viewport cull tests the SAME point the dots draw at — a
+          // long trace's v0 can be far outside the view while its frame is
+          // squarely inside it (and vice versa).
+          const instFc = instanceFrameCenter(oc, inst);
+          if (instFc.cx < xMinS || instFc.cx > xMaxS || instFc.cy < yMinS || instFc.cy > yMaxS) continue;
           for (const a of ANCHORS) {
             const lp = anchorLocalInstance(a, iw, ih, irot, isx, isy);
-            const axw = inst.cx + lp.x;
-            const ayw = inst.cy + lp.y;
+            const axw = instFc.cx + lp.x;
+            const ayw = instFc.cy + lp.y;
             const isPicked = snapPick?.compId === inst.compId && snapPick.anchor === a
               && (Number.isInteger(snapPick.instanceIdx) ? snapPick.instanceIdx : null) === inst.idx;
             const isHover = snapHover?.kind === 'anchor' && snapHover.compId === inst.compId
@@ -4388,6 +4504,12 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         const ordered = [...pass1, ...pass2].filter(c => !hiddenCompIds.has(c.id));
         return ordered.map(c => {
           const { w, h } = dimsByCompId[c.id]; // [F2]
+          // Canonical FRAME for every overlay drawn about "the component's
+          // box" (selection frame, snap dots, labels, edge strips): the
+          // displayBbox for path kinds — their cx/cy is vertex 0, NOT the
+          // bbox center — identical to (c.cx, c.cy, w, h) otherwise.
+          const fr = frameByCompId[c.id] || { cx: c.cx, cy: c.cy, w, h };
+          const isPathKindComp = PATH_KINDS.has(c.kind);
           const style = styleForComponent(c);
           const isSelected = selectedIds.has(c.id);
           const isPrimary = c.id === selectedId;
@@ -4491,12 +4613,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   // Polyline trace. The path is the TESSELLATED centerline
                   // (arcs expanded, spline runs Catmull-Rom-interpolated) so
                   // the canvas draws the same geometry HFSS builds from
-                  // AngularArc / Spline segments. Vertices are resolved from
-                  // the COMPONENT (not the instance) each render so vertex
-                  // snap-target moves are picked up live; the instance's
-                  // cx/cy is the post-transform bbox center, which we don't
-                  // use for the path here.
-                  const compById_pl = Object.fromEntries(scene.components.map(cc => [cc.id, cc]));
+                  // AngularArc / Spline segments. Snap-pinned vertices
+                  // resolve against the SOLVED map — targets carry their
+                  // solver-corrected positions AND (for path-kind targets)
+                  // the displayBbox frame, matching every exporter.
+                  const compById_pl = solvedCompById;
                   const wgW = Number.isFinite(inst.width) ? inst.width : evalExpr(c.width, paramValues) || 0;
                   // C3 live preview: while a vertex-handle drag is in
                   // flight, render from the locally patched vertices (the
@@ -4648,8 +4769,9 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   // expanded, spline runs interpolated) form the perimeter;
                   // we emit a <path> with `Z` so the browser fills the
                   // interior. Width is irrelevant — the layer fill color
-                  // paints the whole region.
-                  const compById_ps = Object.fromEntries(scene.components.map(cc => [cc.id, cc]));
+                  // paints the whole region. Snap-pinned vertices resolve
+                  // against the SOLVED map (see the polyline branch).
+                  const compById_ps = solvedCompById;
                   // C3 live preview (see the polyline branch above).
                   const cPs = (vertexDrag && vertexDrag.compId === c.id && vertexDrag.preview)
                     ? { ...c, vertices: vertexDrag.preview } : c;
@@ -4840,10 +4962,15 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                 const hitW = Math.max(inst.w, minHitWorld);
                 const hitH = Math.max(inst.h, minHitWorld);
                 const needsHitPad = hitW > inst.w + 1e-9 || hitH > inst.h + 1e-9;
+                // Path kinds: center the pad on the instance FRAME center
+                // (transformed displayBbox center) — inst.cx/cy is vertex
+                // 0, and a pad centered there covers the wrong span (the
+                // confirmed selection-frame bug).
+                const hitFc = isPathKindComp ? instanceFrameCenter(c, inst) : { cx: inst.cx, cy: inst.cy };
                 const hitPad = needsHitPad ? (
                   <rect
-                    x={inst.cx - hitW / 2}
-                    y={-(inst.cy + hitH / 2)}
+                    x={hitFc.cx - hitW / 2}
+                    y={-(hitFc.cy + hitH / 2)}
                     width={hitW}
                     height={hitH}
                     fill="transparent"
@@ -4876,7 +5003,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                 );
               })}
               {isPrimary && (
-                <text x={c.cx} y={-c.cy} fontSize={Math.max(2, Math.min(w, h) / 8)} textAnchor="middle" dominantBaseline="middle" fill="#0c4a6e" pointerEvents="none" fontFamily="monospace">
+                <text x={fr.cx} y={-fr.cy} fontSize={Math.max(2, Math.min(w, h) / 8)} textAnchor="middle" dominantBaseline="middle" fill="#0c4a6e" pointerEvents="none" fontFamily="monospace">
                   {c.id}
                 </text>
               )}
@@ -4886,7 +5013,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                 const zv = evalExpr(c.zOffset, paramValues);
                 const fs = Math.max(1.5, Math.min(w, h) / 11);
                 return (
-                  <text x={c.cx} y={-c.cy + fs * 1.4} fontSize={fs} textAnchor="middle" dominantBaseline="middle" fill="#7c2d92" pointerEvents="none" fontFamily="monospace">
+                  <text x={fr.cx} y={-fr.cy + fs * 1.4} fontSize={fs} textAnchor="middle" dominantBaseline="middle" fill="#7c2d92" pointerEvents="none" fontFamily="monospace">
                     {`z${zv >= 0 ? '+' : ''}${Number.isFinite(zv) ? zv.toFixed(2) : '?'}µm (${String(c.zOffset)})`}
                   </text>
                 );
@@ -4914,9 +5041,16 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   } else continue;
                   const otherComp = solved.find(cc => cc.id === otherCompId);
                   if (!otherComp) continue;
-                  const myLocal = anchorLocalRotated(myAnchor, w, h, compRotationDeg(c, paramValues));
-                  const myWX = c.cx + myLocal.x;
-                  const myWY = c.cy + myLocal.y;
+                  // Own-anchor position: FRAME anchors (displayBbox for
+                  // path kinds); EXCEPT a path-kind CHILD (incoming snap),
+                  // whose anchors collapse to the vertex-chain root in the
+                  // solver — draw the arrow where the snap actually pins.
+                  const myLocal = (isIncoming && isPathKindComp)
+                    ? { x: 0, y: 0 }
+                    : anchorLocalRotated(myAnchor, fr.w, fr.h, compRotationDeg(c, paramValues));
+                  const myBase = (isIncoming && isPathKindComp) ? { x: c.cx, y: c.cy } : { x: fr.cx, y: fr.cy };
+                  const myWX = myBase.x + myLocal.x;
+                  const myWY = myBase.y + myLocal.y;
                   const otherW = anchorWorld(otherComp, otherAnchor, paramValues);
                   // Direction from my-anchor toward other-anchor.
                   const ddx = otherW.x - myWX;
@@ -4931,11 +5065,13 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   // direction (which can be diagonal when the snap is
                   // corner-to-corner) or the local-anchor outward normal
                   // (which is also diagonal for corner anchors).
-                  const { w: ow, h: oh } = dimsByCompId[otherComp.id]; // [F2]
-                  const myL = c.cx - w / 2,    myR = c.cx + w / 2;
-                  const myB = c.cy - h / 2,    myT = c.cy + h / 2;
-                  const oL = otherComp.cx - ow / 2, oR = otherComp.cx + ow / 2;
-                  const oB = otherComp.cy - oh / 2, oT = otherComp.cy + oh / 2;
+                  // Frame boxes on BOTH sides (displayBbox for path kinds).
+                  const oFr = frameByCompId[otherComp.id] || { cx: otherComp.cx, cy: otherComp.cy, ...dimsByCompId[otherComp.id] };
+                  const ow = oFr.w, oh = oFr.h;
+                  const myL = fr.cx - fr.w / 2,    myR = fr.cx + fr.w / 2;
+                  const myB = fr.cy - fr.h / 2,    myT = fr.cy + fr.h / 2;
+                  const oL = oFr.cx - ow / 2, oR = oFr.cx + ow / 2;
+                  const oB = oFr.cy - oh / 2, oT = oFr.cy + oh / 2;
                   // Edge-coincidence tolerance: a tiny fraction of the smaller
                   // dimension, so floating-point noise doesn't fool the test.
                   const tol = Math.max(0.001, 0.001 * Math.min(w, h, ow, oh));
@@ -5019,11 +5155,26 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                 }
                 return elements;
               })()}
+              {/* Path kinds get a truthful dashed SELECTION FRAME around the
+                  displayBbox instead of resize handles — their w/h are
+                  derived from the vertex chain (edit vertices / EditablePoly
+                  dims to reshape), so corner handles would both mislead and
+                  corrupt (the resize commit would overwrite the '0' w/h
+                  placeholders and shift vertex 0 by half the drag). */}
+              {isPrimary && isPathKindComp && (
+                <rect
+                  x={fr.cx - fr.w / 2} y={-(fr.cy + fr.h / 2)}
+                  width={fr.w} height={fr.h}
+                  fill="none" stroke="#0ea5e9" strokeWidth={sw * 0.6}
+                  strokeDasharray={`${sw * 2},${sw * 1.5}`}
+                  pointerEvents="none"
+                />
+              )}
               {/* Resize handles (only on primary selected). Rotation-aware:
                   handles sit on the ROTATED shape's corners/edges (matching
                   the anchor dots); the drag math projects the pointer into
                   the shape's local frame (see the 'resize' branch). */}
-              {isPrimary && ANCHORS.filter(a => a !== 'C').map(a => {
+              {isPrimary && !isPathKindComp && ANCHORS.filter(a => a !== 'C').map(a => {
                 const local = anchorLocalRotated(a, w, h, compRotationDeg(c, paramValues));
                 const ax = c.cx + local.x;
                 const ay = -(c.cy + local.y);
@@ -5057,19 +5208,22 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                 const rotE = compRotationDeg(c, paramValues);
                 const radE = rotE * Math.PI / 180;
                 const caE = Math.cos(radE), saE = Math.sin(radE);
-                const toWorldE = (lx, ly) => ({ x: c.cx + lx * caE - ly * saE, y: c.cy + lx * saE + ly * caE });
-                const toLocalE = (x, y) => ({ x: (x - c.cx) * caE + (y - c.cy) * saE, y: -(x - c.cx) * saE + (y - c.cy) * caE });
+                // FRAME-centered local frame (displayBbox for path kinds —
+                // strips must trace the visible band, where anchorWorld
+                // resolves the committed edge anchor).
+                const toWorldE = (lx, ly) => ({ x: fr.cx + lx * caE - ly * saE, y: fr.cy + lx * saE + ly * caE });
+                const toLocalE = (x, y) => ({ x: (x - fr.cx) * caE + (y - fr.cy) * saE, y: -(x - fr.cx) * saE + (y - fr.cy) * caE });
                 // Local bounds of the rect (centered frame)
-                const lx0 = -w / 2, lx1 = w / 2;
-                const ly0 = -h / 2, ly1 = h / 2;
+                const lx0 = -fr.w / 2, lx1 = fr.w / 2;
+                const ly0 = -fr.h / 2, ly1 = fr.h / 2;
                 // Figure t from a screen click: use the SVG's CTM via
                 // screenToWorld, map into the LOCAL frame, then to t along
                 // the edge.
                 const tFromWorld = (side, x, y) => {
                   const l = toLocalE(x, y);
                   let t;
-                  if (side === 'T' || side === 'B') t = (l.x - lx0) / Math.max(1e-9, w);
-                  else                              t = (l.y - ly0) / Math.max(1e-9, h);
+                  if (side === 'T' || side === 'B') t = (l.x - lx0) / Math.max(1e-9, fr.w);
+                  else                              t = (l.y - ly0) / Math.max(1e-9, fr.h);
                   return Math.max(0, Math.min(1, t));
                 };
                 const handleEdgeClick = (side, e) => {
@@ -5100,8 +5254,8 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                       t = tFromWorld(side, fromW.x, fromW.y);
                     }
                   }
-                  const local = anchorLocalRotated(`${side}:${t}`, w, h, rotE);
-                  setSnapHover({ kind: 'edge', compId: c.id, side, t, x: c.cx + local.x, y: c.cy + local.y });
+                  const local = anchorLocalRotated(`${side}:${t}`, fr.w, fr.h, rotE);
+                  setSnapHover({ kind: 'edge', compId: c.id, side, t, x: fr.cx + local.x, y: fr.cy + local.y });
                 };
                 const mkEdge = (side, ax, ay, bx, by) => {
                   const p1 = toWorldE(ax, ay);
@@ -5143,9 +5297,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   ROTATED shape's actual corners/edges so what you click
                   is what the solver snaps to. */}
               {snapMode === 'creating' && ANCHORS.map(a => {
-                const local = anchorLocalRotated(a, w, h, compRotationDeg(c, paramValues));
-                const ax = c.cx + local.x;
-                const ay = -(c.cy + local.y);
+                // FRAME anchors (displayBbox for path kinds) — the dot must
+                // sit where anchorWorld resolves the committed snap.
+                const local = anchorLocalRotated(a, fr.w, fr.h, compRotationDeg(c, paramValues));
+                const ax = fr.cx + local.x;
+                const ay = -(fr.cy + local.y);
                 const isPicked = snapPick?.compId === c.id && snapPick.anchor === a;
                 const isHover = snapHover?.kind === 'anchor' && snapHover.compId === c.id && snapHover.anchor === a;
                 return (
@@ -5158,7 +5314,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                       fill={isPicked ? '#ef4444' : (isHover ? '#22d3ee' : '#f59e0b')}
                       stroke="white" strokeWidth={0.2}
                       style={{ cursor: 'crosshair' }}
-                      onMouseEnter={() => setSnapHover({ kind: 'anchor', compId: c.id, anchor: a, x: c.cx + local.x, y: c.cy + local.y })}
+                      onMouseEnter={() => setSnapHover({ kind: 'anchor', compId: c.id, anchor: a, x: fr.cx + local.x, y: fr.cy + local.y })}
                       onMouseLeave={() => setSnapHover(null)}
                       onMouseDown={(e) => e.stopPropagation()}
                       onClick={(e) => { e.stopPropagation(); onAnchorClick(c.id, a, e); }}
@@ -5225,7 +5381,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             const ra = resolveInstanceAnchorNumeric(s.from.compId, s.from.anchor, s.from.instanceIdx, byIdSolvedForDims, transformInstances, paramValues);
             if (ra && Number.isFinite(ra.x) && Number.isFinite(ra.y)) fromW = ra;
           }
-          const toW   = anchorWorld(toComp,   s.to.anchor,   paramValues);
+          // Path-kind CHILD: the solver pins the vertex-chain root (v0) —
+          // measure the dim to the point the snap actually constrains.
+          const toW = PATH_KINDS.has(toComp.kind)
+            ? { x: toComp.cx, y: toComp.cy }
+            : anchorWorld(toComp, s.to.anchor, paramValues);
           if (hasParam(s.dx)) {
             const valDx = evalExpr(s.dx, paramValues);
             // Skip if dx is essentially zero — a zero-length dim is useless
@@ -5466,7 +5626,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           );
         }
         if (cSel.kind === 'polyline' || cSel.kind === 'polyshape') {
-          const verts = resolvePolylineVertices(cSel, sceneCompById, paramValues, transformInstances);
+          const verts = resolvePolylineVertices(cSel, solvedCompById, paramValues, transformInstances);
           return (
             <EditablePolyDims
               key={`polydims-${cSel.id}`}
@@ -5753,11 +5913,15 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           if (drag?.clusterSet && drag.clusterSet.has(inst.compId)) continue;
           const iw = inst.w, ih = inst.h;
           if (!Number.isFinite(iw) || !Number.isFinite(ih) || iw <= 0 || ih <= 0) continue;
-          if (inst.cx < xMin || inst.cx > xMax || inst.cy < yMin || inst.cy > yMax) continue;
           const irot = inst.rotation || 0;
+          // Path kinds: dots about the instance FRAME center (transformed
+          // displayBbox center — inst.cx/cy is the transformed vertex 0).
+          // Cull on the SAME point the dots draw at.
+          const gFc = instanceFrameCenter(solvedCompById[inst.compId], inst);
+          if (gFc.cx < xMin || gFc.cx > xMax || gFc.cy < yMin || gFc.cy > yMax) continue;
           for (let ai = 0; ai < ANCHORS.length; ai++) {
             const lp = anchorLocalInstance(ANCHORS[ai], iw, ih, irot, inst.scaleX ?? 1, inst.scaleY ?? 1);
-            dots.push({ x: inst.cx + lp.x, y: inst.cy + lp.y, k: `sg_${inst.compId}_${inst.idx}_${ai}` });
+            dots.push({ x: gFc.cx + lp.x, y: gFc.cy + lp.y, k: `sg_${inst.compId}_${inst.idx}_${ai}` });
           }
         }
         if (!dots.length) return null;
@@ -5786,17 +5950,20 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         const dh = (drag.clusterBboxH && drag.clusterBboxH > 0) ? drag.clusterBboxH
           : dimsByCompId[dragged.id].h; // [F2]
         if (!Number.isFinite(dw) || !Number.isFinite(dh)) return null;
-        const dxMin = dragged.cx - dw / 2, dxMax = dragged.cx + dw / 2;
-        const dyMin = dragged.cy - dh / 2, dyMax = dragged.cy + dh / 2;
+        // Dragged + target frames (displayBbox for path kinds).
+        const dragFr = frameByCompId[dragged.id] || dragged;
+        const dxMin = dragFr.cx - dw / 2, dxMax = dragFr.cx + dw / 2;
+        const dyMin = dragFr.cy - dh / 2, dyMax = dragFr.cy + dh / 2;
         const guides = [];
         for (const oc of solved) {
           if (oc.id === dragId) continue;
           if (drag.clusterSet && drag.clusterSet.has(oc.id)) continue;
           if (oc.consumedBy) continue;
-          const { w: ow, h: oh } = dimsByCompId[oc.id]; // [F2]
+          const oFr = frameByCompId[oc.id] || { cx: oc.cx, cy: oc.cy, ...dimsByCompId[oc.id] };
+          const ow = oFr.w, oh = oFr.h;
           if (!Number.isFinite(ow) || !Number.isFinite(oh) || ow <= 0 || oh <= 0) continue;
-          const oxMin = oc.cx - ow / 2, oxMax = oc.cx + ow / 2;
-          const oyMin = oc.cy - oh / 2, oyMax = oc.cy + oh / 2;
+          const oxMin = oFr.cx - ow / 2, oxMax = oFr.cx + ow / 2;
+          const oyMin = oFr.cy - oh / 2, oyMax = oFr.cy + oh / 2;
           // Min bbox-to-bbox distance.
           const xGap = Math.max(0, Math.max(dxMin - oxMax, oxMin - dxMax));
           const yGap = Math.max(0, Math.max(dyMin - oyMax, oyMin - dyMax));
@@ -5813,7 +5980,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           const strokeW   = sw * 0.4;
           const baseOp    = 0.32;
           // Horizontal candidates: top, bottom, center-y.
-          for (const [y, isCenter] of [[oyMax, false], [oyMin, false], [oc.cy, true]]) {
+          for (const [y, isCenter] of [[oyMax, false], [oyMin, false], [oFr.cy, true]]) {
             guides.push(
               <line
                 key={`${oc.id}-h-${y}-${isCenter}`}
@@ -5825,7 +5992,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             );
           }
           // Vertical candidates: left, right, center-x.
-          for (const [x, isCenter] of [[oxMax, false], [oxMin, false], [oc.cx, true]]) {
+          for (const [x, isCenter] of [[oxMax, false], [oxMin, false], [oFr.cx, true]]) {
             guides.push(
               <line
                 key={`${oc.id}-v-${x}-${isCenter}`}
@@ -5863,10 +6030,12 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           {moveSnapHover.kind === 'edge' && (() => {
             const tc = solved.find(c => c.id === moveSnapHover.targetCompId);
             if (!tc) return null;
-            const { w: tw, h: th } = dimsByCompId[tc.id]; // [F2]
+            // Frame boxes (displayBbox for path kinds).
+            const tFr2 = frameByCompId[tc.id] || { cx: tc.cx, cy: tc.cy, ...dimsByCompId[tc.id] };
+            const tw = tFr2.w, th = tFr2.h;
             if (!Number.isFinite(tw) || !Number.isFinite(th)) return null;
-            const tx0 = tc.cx - tw / 2, tx1 = tc.cx + tw / 2;
-            const ty0 = tc.cy - th / 2, ty1 = tc.cy + th / 2;
+            const tx0 = tFr2.cx - tw / 2, tx1 = tFr2.cx + tw / 2;
+            const ty0 = tFr2.cy - th / 2, ty1 = tFr2.cy + th / 2;
             // Recompute the dragged cluster bbox at its CURRENT (post-snap) position by
             // using drag.startCx/Cy + the current effective offset. Easier: the
             // moveSnapHover.x/y is already the overlap midpoint, but we need
@@ -5876,9 +6045,10 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
             const dragId = drag.clickedId || drag.rootId;
             const dc = solved.find(c => c.id === dragId);
             if (!dc) return null;
-            const { w: dw2, h: dh2 } = dimsByCompId[dc.id]; // [F2]
-            const dx0 = dc.cx - dw2 / 2, dx1 = dc.cx + dw2 / 2;
-            const dy0 = dc.cy - dh2 / 2, dy1 = dc.cy + dh2 / 2;
+            const dFr2 = frameByCompId[dc.id] || { cx: dc.cx, cy: dc.cy, ...dimsByCompId[dc.id] };
+            const dw2 = dFr2.w, dh2 = dFr2.h;
+            const dx0 = dFr2.cx - dw2 / 2, dx1 = dFr2.cx + dw2 / 2;
+            const dy0 = dFr2.cy - dh2 / 2, dy1 = dFr2.cy + dh2 / 2;
             const stroke = '#67e8f9';
             if (moveSnapHover.axis === 'h') {
               const x1 = Math.min(tx0, dx0), x2 = Math.max(tx1, dx1);
@@ -5988,10 +6158,12 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
         for (const m of drag.coMovers) {
           const c = solved.find(cc => cc.id === m.id);
-          const dims = dimsByCompId[m.id];
-          if (!c || !dims || !Number.isFinite(dims.w) || !Number.isFinite(dims.h)) continue;
-          minX = Math.min(minX, c.cx - dims.w / 2); maxX = Math.max(maxX, c.cx + dims.w / 2);
-          minY = Math.min(minY, c.cy - dims.h / 2); maxY = Math.max(maxY, c.cy + dims.h / 2);
+          if (!c) continue;
+          // Frame box (displayBbox for path kinds).
+          const fr2 = frameByCompId[m.id] || { cx: c.cx, cy: c.cy, ...dimsByCompId[m.id] };
+          if (!Number.isFinite(fr2.w) || !Number.isFinite(fr2.h)) continue;
+          minX = Math.min(minX, fr2.cx - fr2.w / 2); maxX = Math.max(maxX, fr2.cx + fr2.w / 2);
+          minY = Math.min(minY, fr2.cy - fr2.h / 2); maxY = Math.max(maxY, fr2.cy + fr2.h / 2);
         }
         if (!Number.isFinite(minX)) return null;
         const fontSize = Math.max(2, Math.max(viewport.w, viewport.h) * 0.011);
@@ -6405,7 +6577,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         if (!cSel || (cSel.kind !== 'polyline' && cSel.kind !== 'polyshape')) return null;
         const cEff = (vertexDrag && vertexDrag.compId === cSel.id && vertexDrag.preview)
           ? { ...cSel, vertices: vertexDrag.preview } : cSel;
-        const verts = resolvePolylineVertices(cEff, sceneCompById, paramValues, transformInstances);
+        const verts = resolvePolylineVertices(cEff, solvedCompById, paramValues, transformInstances);
         const specs = cEff.vertices || [];
         const hs = screen(4); // half-size of the square handle (~8 px)
         return (
@@ -6474,7 +6646,10 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         const toComp = solved.find(c => c.id === s.to.compId);
         if (!fromComp || !toComp) return null;
         const fp = anchorWorld(fromComp, s.from.anchor, paramValues);
-        const tp = anchorWorld(toComp, s.to.anchor, paramValues);
+        // Path-kind CHILD: the constraint pins the vertex-chain root (v0).
+        const tp = PATH_KINDS.has(toComp.kind)
+          ? { x: toComp.cx, y: toComp.cy }
+          : anchorWorld(toComp, s.to.anchor, paramValues);
         const isHot = selectedId && (s.from.compId === selectedId || s.to.compId === selectedId);
         // Snap connection lines: same thickness as the halo (HALO_W) so the
         // selection's relationship lines read as part of the same visual

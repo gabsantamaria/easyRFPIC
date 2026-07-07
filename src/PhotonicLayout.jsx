@@ -2188,8 +2188,14 @@ export default function App() {
       setViewport({ x: 0, y: 0, w: 400, h: 280 });
       return;
     }
-    const xs = solved.flatMap(c => [c.cx - evalExpr(c.w, paramValues) / 2, c.cx + evalExpr(c.w, paramValues) / 2]);
-    const ys = solved.flatMap(c => [c.cy - evalExpr(c.h, paramValues) / 2, c.cy + evalExpr(c.h, paramValues) / 2]);
+    // Frame box per component: the displayBbox for path kinds (their
+    // cx/cy is vertex 0, not the bbox center — fitting on it could clip
+    // a long trace out of view), else cx/cy ± w/2 as before.
+    const frameOf = (c) => c.displayBbox && (c.kind === 'polyline' || c.kind === 'polyshape')
+      ? c.displayBbox
+      : { cx: c.cx, cy: c.cy, w: evalExpr(c.w, paramValues), h: evalExpr(c.h, paramValues) };
+    const xs = solved.flatMap(c => { const f = frameOf(c); return [f.cx - f.w / 2, f.cx + f.w / 2]; });
+    const ys = solved.flatMap(c => { const f = frameOf(c); return [f.cy - f.h / 2, f.cy + f.h / 2]; });
     const minX = Math.min(...xs), maxX = Math.max(...xs);
     const minY = Math.min(...ys), maxY = Math.max(...ys);
     const cx = (minX + maxX) / 2;
@@ -2209,8 +2215,12 @@ export default function App() {
     const solved = applyMirrors(solveLayout(scene.components, scene.snaps, paramValues), scene.mirrors);
     const sel = solved.filter(c => selectedIds.has(c.id));
     if (sel.length === 0) return;
-    const xs = sel.flatMap(c => [c.cx - evalExpr(c.w, paramValues) / 2, c.cx + evalExpr(c.w, paramValues) / 2]);
-    const ys = sel.flatMap(c => [c.cy - evalExpr(c.h, paramValues) / 2, c.cy + evalExpr(c.h, paramValues) / 2]);
+    // Frame box (displayBbox for path kinds — see fitToView).
+    const frameOf = (c) => c.displayBbox && (c.kind === 'polyline' || c.kind === 'polyshape')
+      ? c.displayBbox
+      : { cx: c.cx, cy: c.cy, w: evalExpr(c.w, paramValues), h: evalExpr(c.h, paramValues) };
+    const xs = sel.flatMap(c => { const f = frameOf(c); return [f.cx - f.w / 2, f.cx + f.w / 2]; });
+    const ys = sel.flatMap(c => { const f = frameOf(c); return [f.cy - f.h / 2, f.cy + f.h / 2]; });
     const minX = Math.min(...xs), maxX = Math.max(...xs);
     const minY = Math.min(...ys), maxY = Math.max(...ys);
     if (!Number.isFinite(minX) || !Number.isFinite(minY)) return;

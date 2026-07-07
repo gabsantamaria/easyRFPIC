@@ -23,7 +23,26 @@
 // uses these helpers and falls back to a numeric position when the
 // chain isn't parametric-friendly.
 import { evalExpr } from './params.js';
-import { anchorLocal, parseAnchor } from './anchors.js';
+import { anchorLocal, parseAnchor, PATH_KINDS } from './anchors.js';
+import { remapPointsToInstance } from '../geometry/rings.js';
+
+// World FRAME CENTER of a transform instance. For path kinds (polyline /
+// polyshape) the instance's cx/cy is the chain-transformed VERTEX-0
+// position, not the bbox center — the true frame center is the base
+// component's displayBbox center mapped through the SAME instance
+// transform the rendered path uses (remapPointsToInstance about the base
+// cx/cy, i.e. translate → mirror-scale → rotate). Everything drawing or
+// hit-testing an instance's bbox frame must go through this, or the
+// frame sits offset by (bboxCenter − v0) from the visible geometry.
+export function instanceFrameCenter(comp, inst) {
+  if (comp && PATH_KINDS.has(comp.kind) && comp.displayBbox) {
+    const [p] = remapPointsToInstance(
+      [[comp.displayBbox.cx, comp.displayBbox.cy]], inst, comp.cx, comp.cy,
+    );
+    return { cx: p[0], cy: p[1] };
+  }
+  return { cx: inst.cx, cy: inst.cy };
+}
 
 // Look up an instance's NUMERIC center for (compId, idx). Falls back
 // through the operand-of-boolean case if compId itself doesn't have
@@ -77,6 +96,12 @@ export function resolveInstanceAnchorNumeric(compId, anchor, instanceIdx, byId, 
   const inst = resolveInstanceCenterNumeric(compId, instanceIdx, byId, transformInstances);
   if (!inst) return null;
   if (!Number.isFinite(inst.w) || !Number.isFinite(inst.h)) return null;
+  // Path kinds: inst.cx/cy is the chain-transformed VERTEX 0, not the
+  // frame center — anchor about the transformed displayBbox center so
+  // the resolved point sits on the instance's ACTUAL footprint (same
+  // frame anchorWorld uses on the base component).
+  const comp = byId ? byId[compId] : null;
+  const fc = instanceFrameCenter(comp, inst);
   // Instance-frame anchor: mirror scale first, then rotation — matches
   // the rendered geometry exactly (rotate/mirror chains flip which
   // corner an anchor NAME lands on; ignoring that put dots and solve
@@ -89,7 +114,7 @@ export function resolveInstanceAnchorNumeric(compId, anchor, instanceIdx, byId, 
   const sa = Math.sin(rad);
   const mx = l.x * sx;
   const my = l.y * sy;
-  return { x: inst.cx + mx * ca - my * sa, y: inst.cy + mx * sa + my * ca };
+  return { x: fc.cx + mx * ca - my * sa, y: fc.cy + mx * sa + my * ca };
 }
 
 // Anchor offset as parametric (xOff, yOff) expressions given parametric

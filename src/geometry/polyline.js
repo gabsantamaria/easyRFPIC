@@ -65,6 +65,20 @@ import { resolveInstanceAnchorNumeric } from '../scene/instance-positions.js';
 // `rotation` get the anchor offset rotated to track the visible shape.
 export function anchorWorldNumeric(targetComp, anchorName, paramValues) {
   if (!targetComp) return null;
+  // PATH-KIND frame: a polyline/polyshape target's cx/cy is its vertex-
+  // chain root (vertex 0), not the bbox center — anchor on the solver-
+  // refreshed displayBbox so a vertex pinned to a trace's anchor lands
+  // where the snap dots / anchorWorld put it. GATED to path kinds:
+  // transformed BOOLEANS also carry a displayBbox (post-transform
+  // footprint, written only by resolveBooleanBboxes callers), and letting
+  // it win here made vertex resolution depend on WHICH pipeline built the
+  // component map (scene3d/cross-section vs GDS/HFSS/pyAEDT) — booleans
+  // keep the historical pre-transform cx ± w/2 frame.
+  if ((targetComp.kind === 'polyline' || targetComp.kind === 'polyshape') && targetComp.displayBbox) {
+    const bb = targetComp.displayBbox;
+    const local = anchorLocalRotated(anchorName, bb.w, bb.h, 0);
+    return { x: bb.cx + local.x, y: bb.cy + local.y };
+  }
   const w = typeof targetComp.w === 'number' ? targetComp.w : evalExpr(targetComp.w, paramValues);
   const h = typeof targetComp.h === 'number' ? targetComp.h : evalExpr(targetComp.h, paramValues);
   if (!Number.isFinite(w) || !Number.isFinite(h)) return null;
