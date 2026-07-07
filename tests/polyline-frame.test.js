@@ -21,7 +21,7 @@ import { normalizeScene } from '../src/scene/schema.js';
 import { solveLayout } from '../src/scene/solver.js';
 import { resolveParams, evalExpr } from '../src/scene/params.js';
 import { anchorWorld, compFrame, PATH_KINDS } from '../src/scene/anchors.js';
-import { anchorWorldNumeric } from '../src/geometry/polyline.js';
+import { anchorWorldNumeric, resolvePolylineVertices } from '../src/geometry/polyline.js';
 import { instanceFrameCenter } from '../src/scene/instance-positions.js';
 import { expandTransforms } from '../src/scene/transforms.js';
 import { detectPortIntegrationLine } from '../src/scene/lumpedPort.js';
@@ -298,10 +298,164 @@ describe('adversarial-review regressions: HFSS parity on hard chains', () => {
     const solved = solveLayout(scene.components, scene.snaps, pv);
     const byIdSolved = Object.fromEntries(solved.map(c => [c.id, c]));
     const tr = byIdSolved.tr;
-    const { resolvePolylineVertices } = require('../src/geometry/polyline.js');
     const verts = resolvePolylineVertices(tr, byIdSolved, pv);
     // sec's bbox center = (30, 0) — vertex 1 pins there.
     expect(verts[1][0]).toBeCloseTo(30, 6);
     expect(verts[1][1]).toBeCloseTo(0, 6);
+  });
+});
+
+// =========================================================================
+// MULTI-SEGMENT ("multipath") traces: the frame contract must hold for any
+// vertex count / shape — the bbox derives from the TESSELLATED PATH over
+// ALL vertices, never just the endpoints. Covers: a 5-vertex meander with
+// param segments, a branched pair (trace-B vertex pinned to trace-A's
+// anchor), a closed polyshape, and a tapered trace (per-vertex widths).
+// =========================================================================
+describe('multi-segment traces: frame + sweep parity', () => {
+  const evH = (e, pv) => evalExpr(String(e).replace(/\*1deg/g, '*pi/180').replace(/um/g, ''), pv);
+
+  const mkMeander = (a, b) => normalizeScene({
+    params: {
+      seg_a: { expr: String(a), unit: 'µm', desc: '' },
+      seg_b: { expr: String(b), unit: 'µm', desc: '' },
+    },
+    components: [
+      { id: 'm1', kind: 'polyline', layer: 'electrode', cx: 0, cy: 0, w: '0', h: '0', width: '4',
+        vertices: [
+          { kind: 'rel', dx: '0', dy: '0' },
+          { kind: 'rel', dx: 'seg_a', dy: '0' },
+          { kind: 'rel', dx: '0', dy: 'seg_b' },
+          { kind: 'rel', dx: 'seg_a', dy: '0' },
+          { kind: 'rel', dx: '0', dy: '-seg_b' },
+        ],
+        closed: false, cutouts: [], transforms: [] },
+      { id: 'child', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: '8', h: '8', cutouts: [], transforms: [] },
+    ],
+    snaps: [
+      { id: 's1', from: { compId: 'm1', anchor: 'NE' }, to: { compId: 'child', anchor: 'SW' }, dx: '3', dy: '3' },
+    ],
+    mirrors: [], groups: [], booleans: [],
+  });
+
+  it('5-vertex meander: frame over ALL vertices; NE child on the true corner; sweep parity on BOTH axes', () => {
+    const sc = mkMeander(50, 30);
+    const pv = resolveParams(sc.params).values;
+    const solved = solveLayout(sc.components, sc.snaps, pv);
+    const m1 = solved.find(c => c.id === 'm1');
+    // verts x ∈ [0,100] + width pad 2 → [−2,102]; y ∈ [0,30] → [−2,32]
+    expect(m1.displayBbox.cx).toBeCloseTo(50, 6);
+    expect(m1.displayBbox.w).toBeCloseTo(104, 6);
+    expect(m1.displayBbox.cy).toBeCloseTo(15, 6);
+    expect(m1.displayBbox.h).toBeCloseTo(34, 6);
+    const child = solved.find(c => c.id === 'child');
+    expect(child.cx).toBeCloseTo(109, 6); // NE.x 102 + 3 + 4
+    expect(child.cy).toBeCloseTo(39, 6);  // NE.y 32 + 3 + 4
+    // Parametric frame references BOTH segment params:
+    const pf = pathFrameExprs(m1, pv);
+    expect(pf.frozen).toBe(false);
+    expect(pf.offXExpr).toMatch(/seg_a/);
+    expect(pf.hExpr).toMatch(/seg_b/);
+    // HFSS sweep parity, both axes (seg_a 50→80, seg_b 30→45):
+    const pp = computeParametricPositions(solved, sc.snaps, pv);
+    const sc2 = mkMeander(80, 45);
+    const pv2 = resolveParams(sc2.params).values;
+    const solved2 = solveLayout(sc2.components, sc2.snaps, pv2);
+    const child2 = solved2.find(c => c.id === 'child');
+    expect(evH(pp.child.cxExpr, pv2)).toBeCloseTo(child2.cx, 4);
+    expect(evH(pp.child.cyExpr, pv2)).toBeCloseTo(child2.cy, 4);
+  });
+
+  it('branched pair: trace-B vertex pinned to trace-A.E tracks a sweep of A\'s length param', () => {
+    const mk = (a) => normalizeScene({
+      params: { la: { expr: String(a), unit: 'µm', desc: '' } },
+      components: [
+        { id: 'A', kind: 'polyline', layer: 'electrode', cx: 0, cy: 0, w: '0', h: '0', width: '4',
+          vertices: [ { kind: 'rel', dx: '0', dy: '0' }, { kind: 'rel', dx: 'la', dy: '0' } ],
+          closed: false, cutouts: [], transforms: [] },
+        { id: 'B', kind: 'polyline', layer: 'electrode', cx: 20, cy: -40, w: '0', h: '0', width: '2',
+          vertices: [ { kind: 'rel', dx: '0', dy: '0' }, { kind: 'snap', compId: 'A', anchor: 'E' } ],
+          closed: false, cutouts: [], transforms: [] },
+      ],
+      snaps: [], mirrors: [], groups: [], booleans: [],
+    });
+    const sc = mk(100);
+    const pv = resolveParams(sc.params).values;
+    const solved = solveLayout(sc.components, sc.snaps, pv);
+    const byId = Object.fromEntries(solved.map(c => [c.id, c]));
+    const vertsB = resolvePolylineVertices(byId.B, byId, pv);
+    // A bbox [−2, 102] → E at (102, 0)
+    expect(vertsB[1][0]).toBeCloseTo(102, 6);
+    expect(vertsB[1][1]).toBeCloseTo(0, 6);
+    // component-snap anchor == vertex-pin anchor (one frame):
+    const aw = anchorWorld(byId.A, 'E', pv);
+    const awn = anchorWorldNumeric(byId.A, 'E', pv);
+    expect(awn.x).toBeCloseTo(aw.x, 9);
+    // Parametric frame: expr E offset re-evaluated at la=150 == fresh solve
+    const pfA = pathFrameExprs(byId.A, pv);
+    expect(pfA.frozen).toBe(false);
+    const sc2 = mk(150);
+    const pv2 = resolveParams(sc2.params).values;
+    const solved2 = solveLayout(sc2.components, sc2.snaps, pv2);
+    const byId2 = Object.fromEntries(solved2.map(c => [c.id, c]));
+    const vertsB2 = resolvePolylineVertices(byId2.B, byId2, pv2);
+    const exprE = evH(pfA.offXExpr, pv2) + evH(pfA.wExpr, pv2) / 2;
+    expect(exprE).toBeCloseTo(vertsB2[1][0], 4);
+  });
+
+  it('closed polyshape: frame from the vertex loop; snapped child sweep-tracks the size param', () => {
+    const mk = (s) => normalizeScene({
+      params: { s: { expr: String(s), unit: 'µm', desc: '' } },
+      components: [
+        { id: 'ps', kind: 'polyshape', layer: 'electrode', cx: 5, cy: 5, w: '0', h: '0',
+          vertices: [
+            { kind: 'rel', dx: '0', dy: '0' },
+            { kind: 'rel', dx: 's', dy: '0' },
+            { kind: 'rel', dx: '0', dy: 's' },
+            { kind: 'rel', dx: '-s', dy: '0' },
+          ],
+          closed: true, cutouts: [], transforms: [] },
+        { id: 'child', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: '8', h: '8', cutouts: [], transforms: [] },
+      ],
+      snaps: [ { id: 's1', from: { compId: 'ps', anchor: 'E' }, to: { compId: 'child', anchor: 'W' }, dx: '2', dy: '0' } ],
+      mirrors: [], groups: [], booleans: [],
+    });
+    const sc = mk(40);
+    const pv = resolveParams(sc.params).values;
+    const solved = solveLayout(sc.components, sc.snaps, pv);
+    const ps = solved.find(c => c.id === 'ps');
+    expect(ps.displayBbox.cx).toBeCloseTo(25, 6); // verts x ∈ [5,45], no width pad
+    expect(ps.displayBbox.w).toBeCloseTo(40, 6);
+    const child = solved.find(c => c.id === 'child');
+    expect(child.cx).toBeCloseTo(51, 6); // E 45 + 2 + 4
+    const pp = computeParametricPositions(solved, sc.snaps, pv);
+    const sc2 = mk(70);
+    const pv2 = resolveParams(sc2.params).values;
+    const child2 = solveLayout(sc2.components, sc2.snaps, pv2).find(c => c.id === 'child');
+    expect(evH(pp.child.cxExpr, pv2)).toBeCloseTo(child2.cx, 4);
+  });
+
+  it('tapered multi-width trace: frame pads by the WIDEST width; frozen exprs reproduce it exactly', () => {
+    const sc = normalizeScene({
+      params: {},
+      components: [
+        { id: 'tp', kind: 'polyline', layer: 'electrode', cx: 0, cy: 0, w: '0', h: '0', width: '4',
+          vertices: [
+            { kind: 'rel', dx: '0', dy: '0', width: '4' },
+            { kind: 'rel', dx: '60', dy: '0', width: '12' },
+          ],
+          closed: false, cutouts: [], transforms: [] },
+      ],
+      snaps: [], mirrors: [], groups: [], booleans: [],
+    });
+    const pv = resolveParams(sc.params).values;
+    const tp = solveLayout(sc.components, sc.snaps, pv).find(c => c.id === 'tp');
+    expect(tp.displayBbox.w).toBeCloseTo(72, 6); // [−6, 66]: widest width 12
+    expect(tp.displayBbox.cx).toBeCloseTo(30, 6);
+    const pf = pathFrameExprs(tp, pv);
+    expect(pf.frozen).toBe(true); // per-vertex widths → frozen (exact)
+    const evU = (e) => evalExpr(String(e).replace(/um/g, ''), pv);
+    expect(evU(pf.offXExpr)).toBeCloseTo(30, 4);
+    expect(evU(pf.wExpr)).toBeCloseTo(72, 4);
   });
 });
