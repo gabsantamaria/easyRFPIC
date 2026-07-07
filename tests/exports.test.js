@@ -786,6 +786,15 @@ describe('generateHfssNative — analysis setup, frequency sweep, Optimetrics', 
         sweepEnabled: true, sweepStart: '1', sweepStop: '40',
         sweepPoints: '391', sweepType: 'Interpolating',
       },
+      // The sweep is gated on ≥1 EMITTED excitation (HFSS rejects sweeps
+      // on portless problems) — give the fixture an enabled flanked port.
+      components: [
+        ...scene.components,
+        { id: 'swg1', kind: 'rect', layer: 'electrode', cx: -106, cy: 90, w: '10', h: '10', cutouts: [], transforms: [] },
+        { id: 'swg2', kind: 'rect', layer: 'electrode', cx: -94, cy: 90, w: '10', h: '10', cutouts: [], transforms: [] },
+        { id: 'swp1', kind: 'rect', layer: 'port', cx: -100, cy: 90, w: '2', h: '2', cutouts: [], transforms: [],
+          lumpedPort: { enabled: true, impedance: '50' } },
+      ],
     });
     const out = generateHfssNative(s, values);
     expect(out).toContain('Frequency:=", "12GHz"');
@@ -1795,5 +1804,101 @@ describe('zero-thickness sheet impedance: replicas + per-layer Rs/Xs', () => {
     expect(code).toContain('NAME:PEC_sheets_l_cond2"');
     expect(code).toMatch(/PEC_sheets_l_cond"[\s\S]{0,200}"Resistance:=", "0\.1"/);
     expect(code).toMatch(/PEC_sheets_l_cond2"[\s\S]{0,200}"Reactance:=", "2\*pi\*Freq\*5e-12"/);
+  });
+});
+
+describe('HFSS case-insensitive param collisions + portless sweep skip', () => {
+  const pyParses3 = (code, name) => {
+    mkdirSync('tests/out', { recursive: true });
+    writeFileSync(`tests/out/${name}.py`, code);
+    expect(() => execSync(
+      `python3 -c "import ast; ast.parse(open('tests/out/${name}.py').read())"`,
+      { stdio: 'pipe' }
+    )).not.toThrow();
+  };
+  // HFSS variable names are case-INSENSITIVE: declaring bridge3_w then
+  // bridge3_W fails with "Can not create property ... conflicts with an
+  // existing ... variable" (real v10 design bug). The export resolves
+  // collisions up front: unreferenced colliders are DROPPED, referenced
+  // ones RENAMED (+ every expression rewritten), keeping the referenced
+  // name as the group winner.
+  const collisionScene = () => {
+    const s = makeBlankScene();
+    s.params.bridge3_w = { expr: '78.98', unit: 'µm', desc: 'orphan generic width' };
+    s.params.bridge3_W = { expr: '22.731', unit: 'µm', desc: 'strap width (referenced)' };
+    s.params.dup_a = { expr: '5', unit: 'µm', desc: 'referenced (r1.w)' };
+    s.params.DUP_A = { expr: '7', unit: 'µm', desc: 'referenced (r1.h)' };
+    s.components.push(
+      { id: 'br', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: 'bridge3_W', h: '4', cutouts: [], transforms: [] },
+      { id: 'r1', kind: 'rect', layer: 'electrode', cx: 30, cy: 0, w: 'dup_a', h: 'DUP_A', cutouts: [], transforms: [] },
+    );
+    return normalizeScene(s);
+  };
+
+  it('unreferenced collider DROPPED; referenced collider is the group winner', () => {
+    const scene = collisionScene();
+    const pv = resolveParams(scene.params).values;
+    const code = generateHfssNative(scene, pv, {});
+    const setVars = [...code.matchAll(/set_var\("([^"]+)"/g)].map(m => m[1]);
+    expect(setVars).not.toContain('bridge3_w');      // orphan dropped
+    expect(setVars).toContain('bridge3_W');          // referenced winner kept
+    expect(code).toContain('DROPPED from the export');
+    // No case-colliding pair may survive:
+    const lc = new Map();
+    for (const n of setVars) {
+      expect(lc.has(n.toLowerCase()) && lc.get(n.toLowerCase()) !== n).toBe(false);
+      lc.set(n.toLowerCase(), n);
+    }
+    pyParses3(code, 'vitest_hfss_case_drop');
+  });
+
+  it('BOTH-referenced colliders: later one renamed + expressions rewritten (geometry identical)', () => {
+    const scene = collisionScene();
+    const pv = resolveParams(scene.params).values;
+    const code = generateHfssNative(scene, pv, {});
+    const setVars = [...code.matchAll(/set_var\("([^"]+)"/g)].map(m => m[1]);
+    expect(setVars).toContain('dup_a');              // first referenced = winner
+    expect(setVars).not.toContain('DUP_A');          // renamed away
+    const renamed = setVars.find(n => /^DUP_A_cs/.test(n));
+    expect(renamed).toBeTruthy();
+    expect(code).toContain('RENAMED to');
+    // r1's height expression must now reference the renamed param:
+    expect(code).toMatch(new RegExp(`YSize:=[^\\n]*${renamed}`));
+    pyParses3(code, 'vitest_hfss_case_rename');
+  });
+
+  it('portless design: frequency sweep SKIPPED with a clear message (setup kept)', () => {
+    // Port rect present but Lumped-port flag off → no excitation emitted →
+    // HFSS would reject the sweep ("Interpolating sweeps are not supported
+    // for problems with no ports"). The export skips it and says why.
+    const s = makeBlankScene();
+    s.components.push(
+      { id: 'g1', kind: 'rect', layer: 'electrode', cx: -6, cy: 0, w: '10', h: '10', cutouts: [], transforms: [] },
+      { id: 'p1', kind: 'rect', layer: 'port', cx: 0, cy: 0, w: '2', h: '2', cutouts: [], transforms: [] },
+    );
+    const scene = normalizeScene(s);
+    const pv = resolveParams(scene.params).values;
+    const code = generateHfssNative(scene, pv, {});
+    expect(code).toContain('InsertSetup');                          // setup stays
+    expect(code).not.toContain('InsertFrequencySweep');             // sweep skipped
+    expect(code).toContain('Frequency sweep skipped: no port excitations');
+    expect(code).toContain('PORT RECT(S) WITHOUT AN EXCITATION');   // existing banner
+    pyParses3(code, 'vitest_hfss_portless_sweep');
+  });
+
+  it('design WITH an enabled flanked port keeps the sweep', () => {
+    const s = makeBlankScene();
+    s.components.push(
+      { id: 'g1', kind: 'rect', layer: 'electrode', cx: -6, cy: 0, w: '10', h: '10', cutouts: [], transforms: [] },
+      { id: 'g2', kind: 'rect', layer: 'electrode', cx: 6, cy: 0, w: '10', h: '10', cutouts: [], transforms: [] },
+      { id: 'p1', kind: 'rect', layer: 'port', cx: 0, cy: 0, w: '2', h: '2', cutouts: [], transforms: [],
+        lumpedPort: { enabled: true, impedance: '50' } },
+    );
+    const scene = normalizeScene(s);
+    const pv = resolveParams(scene.params).values;
+    const code = generateHfssNative(scene, pv, {});
+    expect(code).toContain('AssignLumpedPort');
+    expect(code).toContain('InsertFrequencySweep');
+    expect(code).not.toContain('Frequency sweep skipped');
   });
 });

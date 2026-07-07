@@ -2581,30 +2581,40 @@ export default function App() {
     updateScene(prev => {
       const newParams = { ...prev.params };
       // Width / height. Priority: span-case parametric > dimension-match >
-      // fresh literal parameter.
-      let finalW, finalH;
-      if (spanWExpr) {
-        const wParam = `${id}_w`;
-        newParams[wParam] = { expr: spanWExpr, unit: 'µm', desc: `${id} width — spans from ${snapStart.compId}.${snapStart.anchor} to ${snapEnd.compId}.${snapEnd.anchor}` };
-        finalW = wParam;
-      } else if (wExpr) {
-        finalW = wExpr;
-      } else {
-        const wParam = `${id}_w`;
-        newParams[wParam] = { expr: width.toFixed(3), unit: 'µm', desc: `${id} width` };
-        finalW = wParam;
-      }
-      if (spanHExpr) {
-        const hParam = `${id}_h`;
-        newParams[hParam] = { expr: spanHExpr, unit: 'µm', desc: `${id} height — spans from ${snapStart.compId}.${snapStart.anchor} to ${snapEnd.compId}.${snapEnd.anchor}` };
-        finalH = hParam;
-      } else if (hExpr) {
-        finalH = hExpr;
-      } else {
-        const hParam = `${id}_h`;
-        newParams[hParam] = { expr: height.toFixed(3), unit: 'µm', desc: `${id} height` };
-        finalH = hParam;
-      }
+      // fresh literal parameter. LAZY: the <id>_w / <id>_h params are only
+      // materialized by the branch whose component actually references
+      // them (the rect fallback). Creating them eagerly littered ORPHAN
+      // params for every other kind — and for BRIDGES the orphans
+      // case-collided with the strap params <id>_W / <id>_H: HFSS
+      // variable names are case-INSENSITIVE, so declaring bridge3_w then
+      // bridge3_W fails with "Can not create property ... conflicts with
+      // an existing ... variable" (a real shipped bug).
+      const makeFinalWH = () => {
+        let finalW, finalH;
+        if (spanWExpr) {
+          const wParam = `${id}_w`;
+          newParams[wParam] = { expr: spanWExpr, unit: 'µm', desc: `${id} width — spans from ${snapStart.compId}.${snapStart.anchor} to ${snapEnd.compId}.${snapEnd.anchor}` };
+          finalW = wParam;
+        } else if (wExpr) {
+          finalW = wExpr;
+        } else {
+          const wParam = `${id}_w`;
+          newParams[wParam] = { expr: width.toFixed(3), unit: 'µm', desc: `${id} width` };
+          finalW = wParam;
+        }
+        if (spanHExpr) {
+          const hParam = `${id}_h`;
+          newParams[hParam] = { expr: spanHExpr, unit: 'µm', desc: `${id} height — spans from ${snapStart.compId}.${snapStart.anchor} to ${snapEnd.compId}.${snapEnd.anchor}` };
+          finalH = hParam;
+        } else if (hExpr) {
+          finalH = hExpr;
+        } else {
+          const hParam = `${id}_h`;
+          newParams[hParam] = { expr: height.toFixed(3), unit: 'µm', desc: `${id} height` };
+          finalH = hParam;
+        }
+        return { finalW, finalH };
+      };
       // Build the new component. For non-rect shapes we ALSO need
       // primary parameters: r for circle, rx/ry for ellipse, r/n for
       // polygon. AABB w/h are derived from those parameters so the rest
@@ -2868,7 +2878,9 @@ export default function App() {
           ...(conductorLayerId ? { conductorLayerId } : {}),
         };
       } else {
-        // Rectangle (default).
+        // Rectangle (default) — the ONLY branch that consumes the
+        // <id>_w / <id>_h params (see makeFinalWH above).
+        const { finalW, finalH } = makeFinalWH();
         newComp = {
           id, kind: 'rect', layer: layerKind,
           cx, cy,

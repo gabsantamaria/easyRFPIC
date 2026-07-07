@@ -1144,6 +1144,33 @@ so they can't break the emitted Python literal.
 
 Custom REAL8 binary encoder. Each component emits BOUNDARY records using `shapeInstanceToRing` for the perimeter. Racetracks emit outer perimeter as DATATYPE=0 and inner perimeter as DATATYPE=1 (cutout convention). Booleans skip GDS emission (they're CAD-only constructs; GDS is the final flattened layout).
 
+### HFSS variable names are CASE-INSENSITIVE
+
+Scene params differing only by case (`bridge3_w` vs `bridge3_W`) make the
+second `set_var` fail with "Can not create property ... conflicts with an
+existing ... variable" — a real shipped bug: the airbridge's strap params
+`<id>_W`/`<id>_H` collided with orphan `<id>_w`/`<id>_h` auto-params. Two
+layers of defense: (1) `commitDragAdd` creates the generic `<id>_w`/`<id>_h`
+params LAZILY — only the rect branch (the sole consumer) materializes them;
+every other kind derives its AABB from its own primary params (eager
+creation littered orphans for bridge/polyline/polyshape/section). (2)
+`generateHfssNative` resolves collisions up front: an UNREFERENCED collider
+is dropped from the export, a REFERENCED one is renamed (`<name>_cs…`) with
+every expression rewritten via `renameIdentInScene` (the KEY is renamed by
+the caller — the walker rewrites references only); the group winner prefers
+the referenced name; all actions land in the safety-report NOTES.
+
+### Portless frequency sweeps
+
+HFSS rejects frequency sweeps on problems with no excitations
+("Interpolating sweeps are not supported for problems with no ports").
+`generateHfssNative` gates `InsertFrequencySweep` on ≥ 1 emitted lumped
+port (`lumpedPortTargets`); a portless design gets the setup WITHOUT the
+sweep plus a clear AddMessage explaining why (the PORT warning banner at
+the top of the script already lists the un-flagged port rects). The default
+scene is portless, so its canonical export carries the skip message, not a
+sweep.
+
 ## Common bug patterns to avoid
 
 - **`evalExpr` must scale with the EXPRESSION, not `paramValues`.** It substitutes only the identifiers that appear in the expression (via `tokenizeIdents`), NOT every key of `paramValues`. `solveLayout` grows a `workingPV` with 4 synthetic `_comp_<id>_*` params PER component, so on a large/flattened scene `paramValues` holds thousands of keys; a full-key scan made `evalExpr` O(#params) per call and quadratic in scene size (the 2-line wizard froze ~24 s on a 1216-component meander flatten — fixed to ~0.14 s). Never reintroduce an all-keys loop in `evalExpr`; guard: `tests/params.test.js` "scales with EXPRESSION size".

@@ -22,6 +22,7 @@ import { migrateStackCoplanarGroups, isNonModelComponent } from '../scene/schema
 import { shapeInstanceToRing } from '../geometry/rings.js';
 import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/racetrack.js';
 import { instanceChainOffsetExpr, chainOwnerForInstance, instanceFrameCenter } from '../scene/instance-positions.js';
+import { renameIdentInScene } from '../scene/rename-ident.js';
 import { twoLineOutputVariables } from '../scene/twoLine.js';
 import { generateQ3DCombinedBlock } from './q3d.js';
 import {
@@ -898,6 +899,76 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   };
   const projectName = sanName(options.projectName, 'PhotonicLayout');
   const designName = sanName(options.designName, 'Layout');
+  // ── HFSS variable names are CASE-INSENSITIVE ──────────────────────────
+  // A scene with params differing only by case (real case: the airbridge's
+  // strap params bridge3_W / bridge3_H next to orphan auto-params
+  // bridge3_w / bridge3_h) makes the SECOND set_var fail with "Can not
+  // create property ... conflicts with an existing ... variable" — and a
+  // silent fallback could clobber the OTHER variable. Resolve up front:
+  //   - a collider referenced by NO expression is DROPPED from the export
+  //     (it has no effect on geometry);
+  //   - a REFERENCED collider is renamed to a free case-insensitive name
+  //     via renameIdentInScene (every expression field rewritten).
+  // Both actions are surfaced in the safety report NOTES.
+  const caseCollisionNotes = [];
+  {
+    const names = Object.keys(scene.params || {});
+    const groups = new Map(); // lowercase -> [names in declaration order]
+    for (const n of names) {
+      const lc = n.toLowerCase();
+      if (!groups.has(lc)) groups.set(lc, []);
+      groups.get(lc).push(n);
+    }
+    const collGroups = [...groups.values()].filter(g => g.length > 1);
+    if (collGroups.length) {
+      let sceneCS = JSON.parse(JSON.stringify(scene));
+      const paramValuesCS = { ...paramValues };
+      // "Referenced" scan over EXPRESSION text only: strip the free-text
+      // desc fields (a desc naming another param must not count), then a
+      // word-boundary hit beyond the param's own dictionary key means
+      // some expression uses it. False positives are safe — they promote
+      // a DROP to a RENAME (the conservative action).
+      const scanScene = JSON.parse(JSON.stringify(sceneCS));
+      for (const v of Object.values(scanScene.params || {})) delete v.desc;
+      const sceneText = JSON.stringify(scanScene);
+      const referenced = (name) => {
+        const re = new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
+        return (sceneText.match(re) || []).length > 1; // 1 = its own key
+      };
+      const taken = new Set(names.map(n => n.toLowerCase()));
+      for (const group of collGroups) {
+        // Winner = the first REFERENCED name (keep the param expressions
+        // actually use), else the first-declared.
+        const winner = group.find(referenced) || group[0];
+        for (const n of group) {
+          if (n === winner) continue;
+          if (!referenced(n)) {
+            delete sceneCS.params[n];
+            delete paramValuesCS[n];
+            caseCollisionNotes.push(`param "${n}" DROPPED from the export: its name collides case-insensitively with "${winner}" (HFSS variable names are case-insensitive) and no expression references it`);
+            continue;
+          }
+          let cand = `${n}_cs`;
+          let k = 2;
+          while (taken.has(cand.toLowerCase())) cand = `${n}_cs${k++}`;
+          taken.add(cand.toLowerCase());
+          // Rename the dictionary KEY, then rewrite every expression field
+          // (renameIdentInScene rewrites references only — the key is the
+          // caller's job, matching the in-app renameParam split).
+          sceneCS.params[cand] = sceneCS.params[n];
+          delete sceneCS.params[n];
+          sceneCS = renameIdentInScene(sceneCS, n, cand);
+          if (Object.prototype.hasOwnProperty.call(paramValuesCS, n)) {
+            paramValuesCS[cand] = paramValuesCS[n];
+            delete paramValuesCS[n];
+          }
+          caseCollisionNotes.push(`param "${n}" RENAMED to "${cand}" in the export: its name collides case-insensitively with "${winner}" (HFSS variable names are case-insensitive); every expression was rewritten`);
+        }
+      }
+      scene = sceneCS;
+      paramValues = paramValuesCS;
+    }
+  }
   const { params, components, mirrors, snaps, stack } = scene;
   const solvedAll = applyMirrors(solveLayout(components, snaps, paramValues), mirrors);
   // Non-model components (section lines) are solver-visible — a child
@@ -1050,6 +1121,9 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   // these are positions that TRACK most sweeps but carry a baked piece.
   for (const it of ppMeta.orientationBaked || []) noteCaveat(it.id, it.detail);
   for (const it of ppMeta.pathFrameBaked || []) noteCaveat(it.id, it.detail);
+  // Case-insensitive param collisions resolved at the top of the export
+  // (dropped orphans / renamed+rewritten params).
+  for (const msg of caseCollisionNotes) noteCaveat('params', msg);
   for (const id of ppMeta.extremalBBox || []) {
     noteCaveat(id, 'position rides a union-bbox expression whose EXTREMAL-OPERAND identity is frozen at export values - very large sweeps that change which operand is outermost need a re-export');
   }
@@ -5274,7 +5348,21 @@ oModule.InsertSetup("HfssDriven",
      "PercentRefinement:=", 30,
      "IsEnabled:=", True])
 `;
-    if (sim.sweepEnabled !== false) {
+    if (sim.sweepEnabled !== false && lumpedPortTargets.length === 0) {
+      // NO excitations were emitted (no port rect has the Lumped-port
+      // flag on + a detected flanker pair). HFSS rejects frequency
+      // sweeps on portless problems ("Interpolating sweeps are not
+      // supported for problems with no ports") — skip the sweep and say
+      // WHY, instead of letting AEDT surface the cryptic error.
+      code += `
+# ===== Frequency sweep SKIPPED: no ports =====
+# No lumped-port excitation was emitted (see the PORT warning banner at
+# the top of this script, if any). HFSS rejects frequency sweeps on
+# problems with no ports. Enable the Lumped-port flag on a port rect
+# (flanked by two conductors) and re-export to restore the sweep.
+oDesktop.AddMessage("", "", 1, "Frequency sweep skipped: no port excitations were emitted (enable the Lumped-port flag on a port rect and re-export).")
+`;
+    } else if (sim.sweepEnabled !== false) {
       const sweepStart = stripGhz(sim.sweepStart, '0.1');
       const sweepStop = stripGhz(sim.sweepStop, '50');
       const sweepPointsNum = Math.floor(parseFloat(sim.sweepPoints));
