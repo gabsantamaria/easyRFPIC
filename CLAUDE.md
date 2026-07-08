@@ -328,7 +328,23 @@ local shift is zeroed for bound axes at any angle instead).
 
 **Duplication** (`duplicateIds` + module-scope `cloneSnapsForDuplicate`, exported): copies get `<id>_copy` (then `_copy2`…) ids and a grid-based offset. Snap cloning rules: INTERNAL snaps (both endpoints in the selection) clone fully remapped; EXTERNAL INCOMING snaps (parent outside → child inside) clone with only the `to` side remapped, so the copy hangs off the same external parent; EXTERNAL OUTGOING snaps are DROPPED (cloning would create a duplicate-to violation). Result always passes `validateSnapGraph`.
 
-**PARAMS panel search + grouping**: a search box filters the param list (Esc clears); `groupParamPrefixes` (exported) collapses params sharing a `<prefix>_` (≥4 by default) into sections — keeps template-generated param families (e.g. `cpw_*`, `gsg_*`) manageable.
+**PARAMS panel search + grouping**: the filter lives behind a FLOATING
+search button pinned to the left panel's bottom-right (a sibling of the
+scroll container, so it never scrolls away on long param lists; gated on
+`activePanel === 'params'`). Click → expands into a filter field
+(autoFocus) matching a fragment ANYWHERE in a param's name (middle
+included) or description, case-insensitive, with a live `n/N` match-count
+badge. Esc — in the field, or globally via the window keydown handler —
+clears the query AND collapses back to the button (all params shown);
+the global handler dismisses progressively (active filter first, THEN
+selection) under the same no-active-tool gate as selection-clear.
+Blurring an EMPTY field auto-collapses; a field with a query stays open
+so an active filter is never invisible (close paths always clear the
+query — no hidden-filter state). `groupParamPrefixes` (exported)
+collapses params sharing a `<prefix>_` (≥4 by default) into sections —
+keeps template-generated param families (e.g. `cpw_*`, `gsg_*`)
+manageable; filtering happens BEFORE grouping, so groups dissolve to a
+flat list when fewer than 4 members match.
 
 **Anchor flash** (C10): clicking a from/to anchor label in the SNAPS panel (or inspector snap rows) flashes that anchor dot on the canvas — `flashAnchor = { compId, anchor, nonce }` state; Canvas keys its timeout on the nonce so re-clicks re-flash.
 

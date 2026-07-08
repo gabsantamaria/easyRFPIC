@@ -338,7 +338,11 @@ export default function App() {
   }, []);
   const [activePanel, setActivePanel] = useState('params');
   // C7: PARAMS panel search + collapsible prefix groups (UI-only state).
+  // The filter lives behind a FLOATING search button pinned to the panel
+  // (bottom-right, above the scroll) so it stays reachable on long param
+  // lists; `paramSearchOpen` is the expanded/collapsed state of the field.
   const [paramSearch, setParamSearch] = useState('');
+  const [paramSearchOpen, setParamSearchOpen] = useState(false);
   // Resizable PARAMS name column. Shared by every ParamRow and persisted in
   // the LAYERED ui-prefs store (session cache → IndexedDB → localStorage —
   // bare localStorage silently drops writes in this user's browser). Kept out
@@ -2245,11 +2249,28 @@ export default function App() {
         const all = scene.components.filter(c => !c.consumedBy && !hiddenCompIds.has(c.id)).map(c => c.id);
         if (all.length > 0) setSelection({ ids: new Set(all), primary: all[all.length - 1] });
       } else if (e.key === 'Escape') {
-        // Clear selection — but only when no canvas tool is active (the
-        // ruler / add-shape / snap tools own Esc for cancel semantics;
-        // Canvas binds those handlers itself).
-        if (!addMode && !rulerMode && (!snapMode || snapMode === 'idle') && selectedIds.size > 0) {
-          setSelection({ ids: new Set(), primary: null });
+        // Progressive dismissal — but only when no canvas tool is active
+        // (the ruler / add-shape / snap tools own Esc for cancel semantics;
+        // Canvas binds those handlers itself). An active PARAMS filter is
+        // the innermost thing open, so it dismisses first: Esc clears the
+        // query AND collapses the floating field (all params shown again);
+        // the next Esc clears the selection. (Esc while typing IN the
+        // field is handled by the input itself — this window handler
+        // ignores INPUT targets.)
+        if (!addMode && !rulerMode && (!snapMode || snapMode === 'idle')) {
+          // VISIBILITY GATE (adversarial-review find): the filter state
+          // survives tab switches / panel collapse, but the widget only
+          // renders on the PARAMS tab of an expanded panel — dismissing
+          // an INVISIBLE filter would silently eat the keypress and make
+          // "Esc = clear selection" look dead for one press. trim() so a
+          // whitespace-only leftover can't count as an active filter.
+          const filterVisible = activePanel === 'params' && !panelLayout.leftCollapsed;
+          if (filterVisible && (paramSearchOpen || paramSearch.trim())) {
+            setParamSearch('');
+            setParamSearchOpen(false);
+          } else if (selectedIds.size > 0) {
+            setSelection({ ids: new Set(), primary: null });
+          }
         }
       } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedIds.size > 0) {
         e.preventDefault();
@@ -2268,7 +2289,7 @@ export default function App() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [fitToView, zoomToSelection, nudgeSelected, selectedIds, gridSize, scene.components, setSelection, addMode, rulerMode, snapMode, hiddenCompIds]);
+  }, [fitToView, zoomToSelection, nudgeSelected, selectedIds, gridSize, scene.components, setSelection, addMode, rulerMode, snapMode, hiddenCompIds, paramSearch, paramSearchOpen, activePanel, panelLayout.leftCollapsed]);
 
   // Refs so handlers always see the latest functions
   const undoRef = useRef(null);
@@ -6886,7 +6907,7 @@ export default function App() {
       <div className="flex-1 flex overflow-hidden">
         {/* LEFT — resizable via the divider; display:none when collapsed so
             the big panel subtree needs no conditional wrapping. */}
-        <div className="flex-none border-r border-slate-700 flex-col" style={{ width: panelLayout.leftW, display: panelLayout.leftCollapsed ? 'none' : 'flex', background: 'var(--app-slate-900)' }}>
+        <div className="flex-none border-r border-slate-700 flex-col relative" style={{ width: panelLayout.leftW, display: panelLayout.leftCollapsed ? 'none' : 'flex', background: 'var(--app-slate-900)' }}>
           <div className="flex flex-wrap border-b border-slate-700 text-[10px]">
             {[
               { id: 'params', label: 'PARAMS', icon: Settings2 },
@@ -6911,31 +6932,15 @@ export default function App() {
           <div className="flex-1 overflow-y-auto p-3">
             {activePanel === 'params' && (
               <div className="space-y-0.5">
-                {/* C7a: search box — substring filter on name + description,
-                    case-insensitive. Filtering happens BEFORE grouping, so
-                    groups naturally dissolve to a flat list when fewer than
-                    4 members match. add/cleanup keep acting on the FULL
+                {/* C7a: the param FILTER lives in the floating search
+                    widget pinned to the panel's bottom-right (rendered
+                    after the scroll container so it never scrolls away).
+                    Substring match on name + description, case-insensitive
+                    — matches a fragment ANYWHERE in the name, middle
+                    included. Filtering happens BEFORE grouping, so groups
+                    naturally dissolve to a flat list when fewer than 4
+                    members match. add/cleanup keep acting on the FULL
                     param list regardless of the filter. */}
-                <div className="relative mb-1">
-                  <Search size={11} className="absolute left-1.5 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
-                  <input
-                    value={paramSearch}
-                    onChange={(e) => setParamSearch(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Escape') { setParamSearch(''); e.target.blur(); } }}
-                    placeholder="filter params (name or description)…"
-                    className="w-full bg-slate-900 border border-slate-700 rounded pl-6 pr-5 py-1 text-[11px] font-mono text-slate-100 outline-none focus:border-cyan-400 placeholder:text-slate-600"
-                    spellCheck={false}
-                  />
-                  {paramSearch && (
-                    <button
-                      onClick={() => setParamSearch('')}
-                      className="absolute right-1 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"
-                      title="clear filter"
-                    >
-                      <XIcon size={11} />
-                    </button>
-                  )}
-                </div>
                 <div className="flex gap-1 mb-1">
                   <button onClick={addParam} className="flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded text-xs border border-dashed border-slate-600 hover:border-slate-400 text-slate-300">
                     <Plus size={11} /> add
@@ -7019,7 +7024,7 @@ export default function App() {
                       {flat.map(n => renderParamRow(n, byName[n]))}
                       {entries.length === 0 && (
                         <p className="text-xs text-slate-500 italic px-1 mt-1">
-                          {q ? `No params match "${paramSearch.trim()}".` : 'No parameters yet — use add above.'}
+                          {q ? `No params match "${paramSearch.trim()}" — Esc shows all.` : 'No parameters yet — use add above.'}
                         </p>
                       )}
                     </>
@@ -8001,6 +8006,75 @@ export default function App() {
               <pre className="text-[9px] font-mono leading-relaxed text-slate-300 whitespace-pre-wrap break-all">{code}</pre>
             )}
           </div>
+
+          {/* Floating PARAMS search — pinned to the panel column (a sibling
+              of the scroll container, so it never scrolls away on long
+              param lists). Collapsed: a round magnifier button. Expanded: a
+              filter field — substring match anywhere in a param's name
+              (middle included) or description, case-insensitive, live match
+              count. Esc (in the field, or globally via the window handler)
+              clears the query AND collapses back to the button — all params
+              shown again. Blurring an EMPTY field auto-collapses; a field
+              with a query stays visible so the active filter is never
+              invisible. */}
+          {activePanel === 'params' && (
+            <div className="absolute bottom-3 right-3 z-20">
+              {paramSearchOpen ? (
+                <div className="flex items-center gap-1 rounded-md border border-cyan-700/70 shadow-lg pl-1.5 pr-1 py-1" style={{ background: 'var(--app-slate-800)' }}>
+                  <Search size={11} className="text-cyan-400 shrink-0" />
+                  <input
+                    autoFocus
+                    value={paramSearch}
+                    onChange={(e) => setParamSearch(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape') {
+                        e.stopPropagation();
+                        setParamSearch('');
+                        setParamSearchOpen(false);
+                      }
+                    }}
+                    onBlur={() => {
+                      // Collapse on empty — and CLEAR the string, so a
+                      // whitespace-only leftover can't survive invisibly
+                      // (it filters nothing but would still register as
+                      // an active filter elsewhere).
+                      if (!paramSearch.trim()) { setParamSearch(''); setParamSearchOpen(false); }
+                    }}
+                    placeholder="filter params… (Esc clears)"
+                    className="w-44 bg-transparent text-[11px] font-mono text-slate-100 outline-none placeholder:text-slate-500"
+                    spellCheck={false}
+                  />
+                  {paramSearch.trim() && (() => {
+                    const q = paramSearch.trim().toLowerCase();
+                    const n = Object.entries(scene.params).filter(([name, p]) =>
+                      name.toLowerCase().includes(q) || (p.desc || '').toLowerCase().includes(q)).length;
+                    return (
+                      <span className={`text-[9px] shrink-0 tabular-nums ${n === 0 ? 'text-amber-400' : 'text-slate-400'}`}>
+                        {n}/{Object.keys(scene.params).length}
+                      </span>
+                    );
+                  })()}
+                  <button
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => { setParamSearch(''); setParamSearchOpen(false); }}
+                    className="text-slate-500 hover:text-slate-200 shrink-0 px-0.5"
+                    title="Clear filter and close (Esc)"
+                  >
+                    <XIcon size={11} />
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setParamSearchOpen(true)}
+                  className="w-8 h-8 rounded-full border border-slate-600 shadow-lg flex items-center justify-center text-slate-300 hover:text-cyan-300 hover:border-cyan-400"
+                  style={{ background: 'var(--app-slate-800)' }}
+                  title="Search / filter parameters"
+                >
+                  <Search size={13} />
+                </button>
+              )}
+            </div>
+          )}
         </div>
 
         {/* CENTER */}
