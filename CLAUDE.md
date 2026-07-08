@@ -1003,7 +1003,25 @@ Canvas uses SVG with `y-up world → y-down screen` transform.
 - **Per-version download** (`handleDownloadVersion(name, versionId)`): a Download icon on EVERY row of the SAVED DESIGNS version list — each snapshot AND the synthetic "current" row (`versionId === null` ⇒ live working scene) — writes that one scene as a standalone design JSON via `buildDesignExport`. Works for any design in the list (the active one reads live/in-memory state; another design is loaded from storage on demand). This REPLACED the old toolbar "export" button. Whole-design-with-history export still lives on each design row (`handleExportDesign` → `exportDesign` bundle).
 - **Design import** lives only in the SAVED DESIGNS panel footer (`handleImportDesignFromFile` → adds the file as a NEW design in the workspace). The old toolbar "import" (which REPLACED the canvas, `handleImportDesignFile`) was removed as redundant.
 - **Selected-shapes download / upload** (context menus): right-clicking selected shapes → "Download selection" writes an `{ format:'easyrfpic_shapes', components, snaps, params }` file (`handleDownloadSelection`); right-clicking the canvas BACKGROUND → "Upload shapes here…" (`handleUploadShapes`) inserts those shapes at the click point (`onBackgroundContextMenu` in Canvas.jsx supplies the world point). Upload also accepts a design export ({ scene:{components} }) or a bare scene.
-- **Shared fragment helpers**: `buildSelectionFragment(ids)` (components + INTERNAL snaps — both endpoints in the selection — + transitive param closure) backs both Copy and Download-selection; `applyShapeFragment(cb, { at? })` (id-collision `<id>_copy` rename, snap remap, dest-wins param backfill, select) backs both Paste and Upload-shapes. `applyShapeFragment` ALSO re-filters snaps to those whose BOTH endpoints are inside the inserted set (drops any link to a shape outside the fragment + can't emit a broken `undefined`-compId snap) — so only links among the copied components survive, for every fragment source. `opts.at` (world point) centers the fragment's centroid (mean of component centers) there; otherwise the 5-grid-step offset. **Paste lands at the cursor**: the Canvas reports the hover world position via `onHoverWorld` into `cursorWorldRef`; `handlePaste(at?)` uses an explicit `at` (right-click Paste passes the click point) else `cursorWorldRef.current`, else the offset. (⌘D duplicate is a separate path — `cloneSnapsForDuplicate` — and DELIBERATELY keeps external-incoming snaps so a duplicated child stays attached to its external parent.)
+- **Shared fragment helpers** (pure core in `src/scene/fragment.js` —
+  `buildFragmentFromScene` / `insertFragmentIntoScene` /
+  `fragmentParamConflicts`; tests/fragment.test.js): `buildSelectionFragment(ids)`
+  (components + INTERNAL snaps — both endpoints in the selection — +
+  transitive param closure) backs both Copy and Download-selection. It
+  FREEZES polyline/polyshape snap-kind vertices pinned to a component
+  OUTSIDE the selection into geometry-preserving rel steps (solved
+  positions); INTERNAL pins stay symbolic. `applyShapeFragment(cb, { at? })`
+  (ASYNC — `<id>_copy` rename, snap-endpoint AND snap-vertex remap through
+  the fresh ids, select) backs both Paste and Upload-shapes. Param merge:
+  new names backfill; **collisions with DIFFERENT values raise a
+  keep-current / use-imported dialog** (only the differing names listed;
+  "Use imported values" rewrites those dest params design-wide) — the old
+  silent dest-wins merge reshaped cross-design imports (feezZ0_W 10 vs 40
+  squeezed an uploaded CPW), and un-remapped vertex pins dangled and
+  collapsed the shape to a point (the "uploaded polyshape missing" bug).
+  Vertex-pin remap rules at insert: target inside fragment → fresh id;
+  target in the DEST scene (same-design paste) → keep tracking; else →
+  zero rel step (defensive). `applyShapeFragment` ALSO re-filters snaps to those whose BOTH endpoints are inside the inserted set (drops any link to a shape outside the fragment + can't emit a broken `undefined`-compId snap) — so only links among the copied components survive, for every fragment source. `opts.at` (world point) centers the fragment's centroid (mean of component centers) there; otherwise the 5-grid-step offset. **Paste lands at the cursor**: the Canvas reports the hover world position via `onHoverWorld` into `cursorWorldRef`; `handlePaste(at?)` uses an explicit `at` (right-click Paste passes the click point) else `cursorWorldRef.current`, else the offset. (⌘D duplicate is a separate path — `cloneSnapsForDuplicate` — and DELIBERATELY keeps external-incoming snaps so a duplicated child stays attached to its external parent.)
 
 ### pyAEDT (`generatePyAEDT`)
 

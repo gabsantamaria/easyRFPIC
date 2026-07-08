@@ -19,6 +19,9 @@ export function ModalDialog({
   // delete-style confirmations where the action can't be undone.
   confirmLabel,
   confirmTone = 'default',
+  // Optional cancel-button label — two-option choices (e.g. "Use imported
+  // values" vs "Keep current values") read better than OK/Cancel.
+  cancelLabel,
 }) {
   // kind: 'confirm' | 'prompt' | 'alert'
   const [value, setValue] = useState(defaultValue || '');
@@ -84,7 +87,7 @@ export function ModalDialog({
         <div className="px-4 py-3 border-t border-slate-700 flex justify-end gap-2">
           {kind !== 'alert' && (
             <button onClick={onCancel} className="px-3 py-1 rounded text-xs border border-slate-600 text-slate-300 hover:bg-slate-800">
-              Cancel
+              {cancelLabel || 'Cancel'}
             </button>
           )}
           <button

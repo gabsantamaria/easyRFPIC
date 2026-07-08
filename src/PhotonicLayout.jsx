@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { Plus, Trash2, RotateCcw, RotateCw, Download, Upload, Lock, Unlock, FlipHorizontal, FlipVertical, Layers, Settings2, Settings, Box, Square, Link2, Link2Off, Grid3x3, AlertTriangle, Maximize2, Save, FileText, FilePlus, Copy, FolderTree, BookOpen, Package, Boxes, Pencil, Ruler, Eye, EyeOff, ArrowDown, ArrowUp, Move, Repeat, Combine, Minus, X as XIcon, Circle, Hexagon, Radio, HelpCircle, Search, ChevronDown, ChevronRight, Sparkles } from 'lucide-react';
 import { eulerBend180Centerline, buildRacetrackCenterline, offsetCenterlineToBand } from './geometry/racetrack.js';
 import { tokenizeIdents, tokenizeComponentExprs, resolveParams, evalExpr, RESERVED_IDENTS } from './scene/params.js';
+import { buildFragmentFromScene, insertFragmentIntoScene, fragmentParamConflicts } from './scene/fragment.js';
 import { renameIdentInScene } from './scene/rename-ident.js';
 import { ANCHORS, parseAnchor, anchorLocal, anchorWorld } from './scene/anchors.js';
 import { rectInstanceToRing, shapeInstanceToRing } from './geometry/rings.js';
@@ -927,6 +928,7 @@ export default function App() {
       onCancel: () => { setDialog(null); resolve(false); },
       confirmLabel: opts.confirmLabel,
       confirmTone: opts.confirmTone,
+      cancelLabel: opts.cancelLabel,
     });
   }), []);
   const promptDialog = useCallback((message, defaultValue, title) => new Promise((resolve) => {
@@ -1791,106 +1793,60 @@ export default function App() {
   // components (deep-ish copied), their INTERNAL snaps (both endpoints in the
   // set), and the transitive closure of every referenced parameter. Shared by
   // Copy and "Download selection". Returns { components, snaps, params } or null.
-  const buildSelectionFragment = useCallback((ids) => {
-    if (!ids || ids.size === 0) return null;
-    const components = scene.components
-      .filter(c => ids.has(c.id))
-      .map(c => ({ ...c, cutouts: (c.cutouts || []).map(cu => ({ ...cu })) }));
-    if (components.length === 0) return null;
-    const snaps = scene.snaps
-      .filter(s => ids.has(s.from.compId) && ids.has(s.to.compId))
-      .map(s => ({ ...s }));
-    const params = {};
-    const used = new Set();
-    const frontier = [];
-    for (const c of components) for (const id of tokenizeComponentExprs(c)) frontier.push(id);
-    for (const s of snaps) for (const expr of [s.dx, s.dy]) {
-      if (typeof expr === 'string') for (const id of tokenizeIdents(expr)) frontier.push(id);
-    }
-    while (frontier.length) {
-      const id = frontier.pop();
-      if (RESERVED_IDENTS.has(id) || id.startsWith('_comp_') || used.has(id)) continue;
-      const p = scene.params[id];
-      if (!p) continue;
-      used.add(id);
-      params[id] = { ...p };
-      if (typeof p.expr === 'string') for (const childId of tokenizeIdents(p.expr)) {
-        if (!used.has(childId)) frontier.push(childId);
-      }
-    }
-    return { components, snaps, params };
-  }, [scene.components, scene.snaps, scene.params]);
+  // Thin wrapper over the pure builder in src/scene/fragment.js (external
+  // vertex pins frozen to rel steps, internal ones kept symbolic, param
+  // closure captured).
+  const buildSelectionFragment = useCallback(
+    (ids) => buildFragmentFromScene(scene, ids, paramValues),
+    [scene, paramValues],
+  );
 
   // Insert a scene fragment (components + internal snaps + params) into the
-  // current scene: fresh `<id>_copy` ids, snap endpoints remapped, params
-  // backfilled (destination WINS on a name collision), and the new components
-  // selected. Placement: opts.at = { x, y } (world) centers the fragment's
-  // centroid there; otherwise it's offset by 5 grid steps (the Paste default).
-  // Shared by Paste and "Upload shapes". Returns the number of components added.
-  const applyShapeFragment = useCallback((cb, opts = {}) => {
+  // current scene: fresh `<id>_copy` ids, snap endpoints AND snap-kind
+  // vertices remapped, params merged, and the new components selected.
+  // Param collisions with DIFFERENT values raise a keep-current /
+  // use-imported dialog (equal-value collisions merge silently; the old
+  // silent dest-wins merge reshaped cross-design imports). Placement:
+  // opts.at = { x, y } (world) centers the fragment's centroid there;
+  // otherwise it's offset by 5 grid steps (the Paste default). Shared by
+  // Paste and "Upload shapes"; the pure core lives in src/scene/fragment.js.
+  // Returns the number of components added.
+  const applyShapeFragment = useCallback(async (cb, opts = {}) => {
     if (!cb || !Array.isArray(cb.components) || cb.components.length === 0) return 0;
-    const idMap = {};
-    const existingIds = new Set(scene.components.map(c => c.id));
-    for (const c of cb.components) {
-      let candidate = `${c.id}_copy`;
-      let i = 2;
-      while (existingIds.has(candidate)) candidate = `${c.id}_copy${i++}`;
-      existingIds.add(candidate);
-      idMap[c.id] = candidate;
+    const conflicts = fragmentParamConflicts(scene.params, cb.params);
+    let useImported = false;
+    if (conflicts.length > 0) {
+      const rows = conflicts
+        .map(c => `  ${c.name}:  ${c.current}  →  ${c.imported}`)
+        .join('\n');
+      useImported = await confirmDialog(
+        `The imported shapes share ${conflicts.length} parameter${conflicts.length === 1 ? '' : 's'} with this design but with DIFFERENT values:\n\n${rows}\n\n"Use imported values" rewrites these parameters design-wide (existing shapes using them will resize too). "Keep current values" imports the shapes with this design's values (they may look different than in the source design).`,
+        'Parameter conflict',
+        { confirmLabel: 'Use imported values', cancelLabel: 'Keep current values' },
+      );
     }
-    let dx, dy;
-    if (opts.at && Number.isFinite(opts.at.x) && Number.isFinite(opts.at.y)) {
-      let sx = 0, sy = 0, n = 0;
-      for (const c of cb.components) {
-        if (Number.isFinite(c.cx) && Number.isFinite(c.cy)) { sx += c.cx; sy += c.cy; n++; }
-      }
-      dx = opts.at.x - (n ? sx / n : 0);
-      dy = opts.at.y - (n ? sy / n : 0);
-    } else {
-      const offset = gridSize * 5;
-      dx = offset; dy = -offset;
-    }
-    const newComponents = cb.components.map(c => ({
-      ...c,
-      id: idMap[c.id],
-      cx: (Number.isFinite(c.cx) ? c.cx : 0) + dx,
-      cy: (Number.isFinite(c.cy) ? c.cy : 0) + dy,
-      // Strip the group tag: fragments don't carry scene.groups, so a pasted
-      // copy naming a group in the DESTINATION scene would half-join it
-      // (visible in the tree via the c.group union, invisible to
-      // memberIds-based ops) — the membership-desync class. A paste is a new,
-      // ungrouped set; the user can ⌘G it.
-      group: undefined,
+    const ins = insertFragmentIntoScene(scene, cb, { ...opts, gridSize, useImported });
+    if (!ins) return 0;
+    updateScene(prev => ({
+      ...prev,
+      // Params re-merged against PREV (not the captured scene) so a
+      // concurrent edit between dialog and commit can't be dropped.
+      params: (() => {
+        const merged = { ...prev.params };
+        for (const [name, p] of Object.entries(cb.params || {})) {
+          if (!(name in merged)) merged[name] = { ...p };
+          else if (useImported && String(merged[name].expr ?? '').trim() !== String(p.expr ?? '').trim()) {
+            merged[name] = { ...merged[name], expr: p.expr };
+          }
+        }
+        return merged;
+      })(),
+      components: [...prev.components, ...ins.components],
+      snaps: [...prev.snaps, ...ins.snaps],
     }));
-    // Keep ONLY snaps whose BOTH endpoints are inside the inserted set — links
-    // to shapes outside the fragment are dropped (and a stray external endpoint
-    // can't produce a broken snap with an undefined compId). buildSelectionFragment
-    // already filters this way; enforcing it here covers every fragment source
-    // (paste, upload, a hand-edited OS-clipboard payload).
-    const newSnaps = (cb.snaps || [])
-      .filter(s => idMap[s.from?.compId] && idMap[s.to?.compId])
-      .map(s => ({
-        ...s,
-        id: `snap_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-        from: { ...s.from, compId: idMap[s.from.compId] },
-        to: { ...s.to, compId: idMap[s.to.compId] },
-      }));
-    updateScene(prev => {
-      const mergedParams = { ...prev.params };
-      for (const [name, p] of Object.entries(cb.params || {})) {
-        if (!(name in mergedParams)) mergedParams[name] = { ...p };
-      }
-      return {
-        ...prev,
-        params: mergedParams,
-        components: [...prev.components, ...newComponents],
-        snaps: [...prev.snaps, ...newSnaps],
-      };
-    });
-    const newIds = new Set(newComponents.map(c => c.id));
-    setSelection({ ids: newIds, primary: newComponents[newComponents.length - 1].id });
-    return newComponents.length;
-  }, [scene.components, gridSize, updateScene, setSelection]);
+    setSelection({ ids: new Set(ins.newIds), primary: ins.newIds[ins.newIds.length - 1] });
+    return ins.newIds.length;
+  }, [scene, gridSize, updateScene, setSelection, confirmDialog]);
 
   // The clipboard payload is a rich scene fragment (components + snaps,
   // with cutouts/transforms preserved). We persist it three ways, each
@@ -1991,7 +1947,7 @@ export default function App() {
     // else the last canvas hover position; if the cursor was never over the
     // canvas, applyShapeFragment falls back to its grid offset.
     const placeAt = at || cursorWorldRef.current;
-    applyShapeFragment(cb, (placeAt && Number.isFinite(placeAt.x) && Number.isFinite(placeAt.y)) ? { at: placeAt } : {});
+    await applyShapeFragment(cb, (placeAt && Number.isFinite(placeAt.x) && Number.isFinite(placeAt.y)) ? { at: placeAt } : {});
     // Keep the in-memory cache hot so the NEXT paste skips the
     // localStorage / OS-clipboard lookup.
     setClipboard(cb);
@@ -3105,7 +3061,7 @@ export default function App() {
       return;
     }
     const frag = { components: src.components, snaps: src.snaps || [], params: src.params || {} };
-    const n = applyShapeFragment(frag, at ? { at } : {});
+    const n = await applyShapeFragment(frag, at ? { at } : {});
     if (!n) await alertDialog('Could not insert the shapes from that file.', 'Upload failed');
   };
 
@@ -9476,6 +9432,7 @@ export default function App() {
         onCancel={dialog?.onCancel}
         confirmLabel={dialog?.confirmLabel}
         confirmTone={dialog?.confirmTone}
+        cancelLabel={dialog?.cancelLabel}
       />
 
       {/* Export preview modal — shows the generated pyAEDT script with copy/download */}
