@@ -3,8 +3,9 @@ import { Plus, Trash2, RotateCcw, RotateCw, Download, Upload, Lock, Unlock, Flip
 import { eulerBend180Centerline, buildRacetrackCenterline, offsetCenterlineToBand } from './geometry/racetrack.js';
 import { tokenizeIdents, tokenizeComponentExprs, resolveParams, evalExpr, RESERVED_IDENTS } from './scene/params.js';
 import { buildFragmentFromScene, insertFragmentIntoScene, fragmentParamConflicts } from './scene/fragment.js';
+import { reRootSnaps } from './scene/reroot.js';
 import { renameIdentInScene } from './scene/rename-ident.js';
-import { ANCHORS, parseAnchor, anchorLocal, anchorWorld } from './scene/anchors.js';
+import { parseAnchor } from './scene/anchors.js';
 import { rectInstanceToRing, shapeInstanceToRing } from './geometry/rings.js';
 import { resolvePolylineVertices, polylineIsTapered, synthArc90 } from './geometry/polyline.js';
 import { expandTransforms } from './scene/transforms.js';
@@ -3162,95 +3163,15 @@ export default function App() {
   // preserved.
   const reRootSnapChain = (rootId) => {
     updateScene(prev => {
-      // Reference-counter for parameter names across the scene; used to decide
-      // whether we can negate a param's expr in place (single use) vs wrap the
-      // snap's offset in -(...) (shared).
-      const paramRefCount = (paramName, snapsToConsider) => {
-        let n = 0;
-        for (const sn of snapsToConsider) {
-          if (sn.dx === paramName) n++;
-          if (sn.dy === paramName) n++;
-        }
-        for (const c of prev.components) {
-          for (const f of ['w', 'h']) if (c[f] === paramName) n++;
-          for (const cu of (c.cutouts || [])) {
-            for (const f of ['dx', 'dy', 'w', 'h']) if (cu[f] === paramName) n++;
-          }
-        }
-        for (const [, p] of Object.entries(prev.params)) {
-          if (typeof p.expr === 'string' && tokenizeIdents(p.expr).includes(paramName)) n++;
-        }
-        return n;
-      };
-
-      const newParams = { ...prev.params };
-      const newSnaps = [];
-      // Track which params we've already negated in place, so we don't double-flip
-      // if the same param is referenced by multiple flipped snaps.
-      const alreadyNegated = new Set();
-
-      const negateOffset = (offsetExpr) => {
-        if (typeof offsetExpr !== 'string') return offsetExpr;
-        const stripped = offsetExpr.trim();
-        if (/^[A-Za-z_][\w]*$/.test(stripped) && newParams[stripped]) {
-          if (alreadyNegated.has(stripped)) {
-            // Already flipped once via in-place edit; flipping again would
-            // restore the original sign. Wrap the snap-side instead.
-            return `-(${offsetExpr})`;
-          }
-          const refs = paramRefCount(stripped, prev.snaps);
-          if (refs <= 2) {
-            // 'refs' counts each occurrence; a sole-snap reference shows up
-            // once on dx OR dy of the same snap. We allow up to 2 just in case
-            // both dx and dy share the param (rare).
-            const old = newParams[stripped].expr;
-            newParams[stripped] = { ...newParams[stripped], expr: `-(${old})` };
-            alreadyNegated.add(stripped);
-            return stripped;
-          }
-        }
-        return `-(${offsetExpr})`;
-      };
-
-      // BFS from rootId, treating snaps as undirected. Each snap is visited
-      // exactly once (tracked by id) and oriented to point away from root.
-      const visited = new Set([rootId]);
-      const queue = [rootId];
-      const handledSnapIds = new Set();
-      while (queue.length > 0) {
-        const here = queue.shift();
-        for (const s of prev.snaps) {
-          if (handledSnapIds.has(s.id)) continue;
-          if (s.from.compId === here && !visited.has(s.to.compId)) {
-            // Already pointing away — keep as-is
-            newSnaps.push(s);
-            handledSnapIds.add(s.id);
-            visited.add(s.to.compId);
-            queue.push(s.to.compId);
-          } else if (s.to.compId === here && !visited.has(s.from.compId)) {
-            // Pointing toward us — flip
-            newSnaps.push({
-              ...s,
-              from: { compId: s.to.compId, anchor: s.to.anchor },
-              to:   { compId: s.from.compId, anchor: s.from.anchor },
-              dx: negateOffset(s.dx),
-              dy: negateOffset(s.dy),
-            });
-            handledSnapIds.add(s.id);
-            visited.add(s.from.compId);
-            queue.push(s.from.compId);
-          }
-          // Snaps where both endpoints are already visited: it's a cycle edge.
-          // Keep its current orientation (we can't sensibly re-root a cycle).
-        }
-      }
-      // Append snaps that weren't part of the connected component reachable
-      // from rootId (other disconnected sub-graphs and cycle-edges).
-      for (const s of prev.snaps) {
-        if (!handledSnapIds.has(s.id)) newSnaps.push(s);
-      }
-
-      return { ...prev, params: newParams, snaps: newSnaps };
+      // Pure core in src/scene/reroot.js — BFS orientation away from the
+      // new root, symbolic negation for rect-frame flips, SOLVED-POSITION
+      // offset capture for flips involving path kinds / replica
+      // instanceIdx (whose anchor semantics are asymmetric between the
+      // parent and child roles — plain swap+negate scattered the chain),
+      // and a solved-position bake of the new root's raw cx/cy (a stale
+      // child promoted to root otherwise teleports the whole assembly).
+      const { params, snaps, components } = reRootSnaps(prev, rootId);
+      return { ...prev, params, snaps, components };
     });
   };
 

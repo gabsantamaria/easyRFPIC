@@ -267,6 +267,33 @@ For non-rect shapes, `expandTransforms` propagates shape-specific fields (r, rx,
 
 **Snap-graph validation** (`validateSnapGraph`): live check surfaced in the UI; flags `duplicate-to` (two+ snaps target the same component) and dangling compId references. Run it after any programmatic snap surgery.
 
+**Re-root ("⇄ make root", `src/scene/reroot.js` — `reRootSnaps(scene,
+rootId)` → `{params, snaps, components}`; the Inspector button delegates)**:
+BFS from the new root over the undirected snap graph, keeping away-pointing
+snaps and flipping toward-pointing ones. GEOMETRY-PRESERVING by contract —
+tests/reroot.test.js. Two rules (both were real shipped bugs, the "everything
+falls apart on make-root" pair):
+(1) plain swap-endpoints+negate-offsets is exact ONLY when an anchor resolves
+to the same point in both snap roles — FALSE for path kinds (child pin = v0,
+parent anchor = displayBbox frame) and for replica `from.instanceIdx` (which
+can't survive on the child side; it's dropped). Those flips RECOMPUTE the
+offset from the solved layout (`dNew = childPoint(old parent) −
+anchorWorld(old child)`): the old expr stays symbolically live with the exact
+numeric frame correction appended (`-(gap) - 60` — frozen at current values,
+same accepted contract as other frame-offset freezes).
+(2) a snap child's raw cx/cy is STALE (the solver overwrites it every solve)
+— the new root's cx/cy is BAKED to its solved (pre-mirror) position and inert
+`cxExpr`/`cyExpr` are stripped, else the whole assembly rigidly teleports to
+the stale coordinates.
+Offset rewriting is TWO-PASS (BFS decides flips, then rewrite with the full
+flip set + per-axis capture modes known): a lone-param offset is negated
+IN PLACE on the param only when EVERY reference to it is a sym-mode flipped
+offset — any outside reference (kept snap, component dim, cutout, vertex,
+transform, other param expr) or a capture-corrected sibling forces the
+per-offset `-(...)` wrap (the old single-pass version could double-negate a
+shared param or silently flip a KEPT snap's sign). Cycle edges + disconnected
+subgraphs are left untouched.
+
 **Snap discoverability aids** (Canvas render):
 - **Alt-held anchor guides**: while Option/Alt is held (and not in add/ruler/snap-mode), faint amber dots show the 9 snap anchors of every instance INCLUDING repeat replicas (sourced from `transformInstances`, viewport-culled, `pointerEvents:none`), so the user can see where an Alt-drag will land. They vanish on Alt release; the dragged cluster's own anchors are skipped.
 - **Snap-mode anchor hover-highlight**: in `snapMode==='creating'`, hovering a fixed anchor enlarges it + draws a cyan ring (`#06b6d4`) and sets `snapHover={kind:'anchor', …}` so the preview line locks onto it. `snapHover` now carries a `kind` (`'anchor'`|`'edge'`); the edge hover-dot is gated to `kind==='edge'`.
