@@ -902,8 +902,25 @@ centered at the click point unless "keep original GDS coordinates").
 - **Mapping** (GdsImportDialog table, one row per GDS layer/datatype):
   checkbox OFF → not imported at all; target `<undefined>` → component
   layer **'gdsundef'**; `waveguide` → layer 'waveguide'; a conductor
-  stack layer → layer 'electrode' + `conductorLayerId`. BOUNDARY/BOX →
-  closed **polyshape**, PATH → **polyline** with the GDS width.
+  stack layer → layer 'electrode' + `conductorLayerId`.
+- **Shape flattening** (the "weird features on import" fix — every GDS
+  shape arrives fully flattened): BOUNDARY/BOX → closed **polyshape**;
+  an OPEN widthful PATH → its **OUTLINE polygon** via `pathToOutline`
+  (exported; KLayout-equivalent: natural/miter joins with a
+  4×halfwidth limit → bevel on sharp turns, end caps exact per GDS
+  pathtype — 0 butt, 1 round as 8-facet polygonal arcs, 2 square
+  extended w/2) so no stroked-rendering artifact (miter spike, cap
+  seam) can appear; a CLOSED-LOOP path (ring drawn as a PATH, first
+  point == last) → **closed constant-width polyline** (loops have no
+  end caps — NEVER "extend" a loop's endpoints: a shipped end-stretch
+  hack pushed them apart into a visible notch); width-less paths stay
+  thin polylines. The converter also SANITIZES vertices: consecutive
+  duplicates dropped, and COLLINEAR midpoints pruned (≤1 nm
+  perpendicular deviation AND travelling forward — spikes reverse
+  direction and are kept; v0/the root is never pruned) — deterministic,
+  so gdsSrc.v0x registration stays exact across re-imports. Absolute
+  STRANS magnification/angle bits are composed like relative (KLayout
+  behavior) + an `abs-strans` warning.
 - **Every shape is one independent component** on the PATH-KIND FRAME
   CONTRACT: cx/cy = vertex 0, NUMERIC rel-step vertices (1 pm rounding
   floor keeps String() out of exponent notation — evalExpr-safe), so

@@ -146,9 +146,17 @@ export function parseGDS(bufferOrU8) {
       case R.PATHTYPE:
         if (el) el.pathtype = dv.getInt16(dataStart, false);
         break;
-      case R.STRANS:
-        if (el) el.mirrorX = (dv.getUint16(dataStart, false) & 0x8000) !== 0;
+      case R.STRANS: {
+        if (el) {
+          const bits = dv.getUint16(dataStart, false);
+          el.mirrorX = (bits & 0x8000) !== 0;
+          // Absolute-magnification (0x0004) / absolute-angle (0x0002) bits:
+          // "do not compose with parent transforms". We compose anyway
+          // (KLayout-style) — flag it so a mis-placed reference is LOUD.
+          if (bits & 0x0006) el.absTransform = true;
+        }
         break;
+      }
       case R.MAG:
         if (el) el.mag = decodeReal8(u8, dataStart);
         break;
@@ -240,7 +248,7 @@ export function flattenGDSCell(parsed, cellName, { maxShapes = 100000, maxWalks 
   // entry counts against this budget, so flatten time is bounded even
   // when no shape is ever pushed.
   let walkBudget = maxWalks;
-  let roundEndPaths = 0;
+  let absTransformRefs = 0;
 
   const IDENT = { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0 }; // row-major 2x3
   const compose = (P, C) => ({
@@ -283,38 +291,26 @@ export function flattenGDSCell(parsed, cellName, { maxShapes = 100000, maxWalks 
       if (out.length >= maxShapes) { truncated = true; return; }
       const rawWidthUm = (sh.widthDbu || 0) * parsed.umPerDbu;
       const widthUm = rawWidthUm < 0 ? -rawWidthUm : rawWidthUm * magScale;
-      let pts = sh.ptsDbu.map(p => {
-        const q = apply(M, p);
-        return [q[0] * parsed.umPerDbu, q[1] * parsed.umPerDbu];
-      });
-      // PATHTYPE 1 (round) / 2 (square-extended) ends both extend the
-      // metal by width/2 beyond each endpoint — extend the flattened
-      // centerline so the imported polyline keeps the physical length
-      // (butt-join rendering approximates round ends as square; warned).
-      if (sh.kind === 'path' && (sh.pathtype === 1 || sh.pathtype === 2) && widthUm > 0 && pts.length >= 2) {
-        const ext = widthUm / 2;
-        const stretch = (a, b) => { // move a AWAY from b by ext
-          const dx = a[0] - b[0], dy = a[1] - b[1];
-          const len = Math.hypot(dx, dy);
-          return len > 1e-12 ? [a[0] + (dx / len) * ext, a[1] + (dy / len) * ext] : a;
-        };
-        pts = [...pts];
-        pts[0] = stretch(pts[0], pts[1]);
-        pts[pts.length - 1] = stretch(pts[pts.length - 1], pts[pts.length - 2]);
-        if (sh.pathtype === 1) roundEndPaths++;
-      }
+      // RAW centerline only — PATH end styles (pathtype) are applied by
+      // the outline builder in gdsShapesToComponents, never by mutating
+      // the centerline (a shipped end-stretch hack here pushed a
+      // CLOSED-LOOP path's first/last points apart — a visible notch).
       out.push({
         kind: sh.kind,
         layer: sh.layer, datatype: sh.datatype,
         cell: name,
         pathtype: sh.pathtype || 0,
         widthUm,
-        pts,
+        pts: sh.ptsDbu.map(p => {
+          const q = apply(M, p);
+          return [q[0] * parsed.umPerDbu, q[1] * parsed.umPerDbu];
+        }),
       });
     }
     const nextStack = [...stack, name];
     for (const r of cell.refs) {
       if (truncated) return;
+      if (r.absTransform) absTransformRefs++;
       if (r.kind === 'sref') {
         walk(r.cell, compose(M, refXform(r.xDbu, r.yDbu, r.angleDeg, r.mirrorX, r.mag)), nextStack);
       } else {
@@ -344,10 +340,110 @@ export function flattenGDSCell(parsed, cellName, { maxShapes = 100000, maxWalks 
   if (truncated) {
     warnings.push({ code: 'truncated-shapes', msg: `Import capped (${maxShapes} shapes / ${maxWalks} placements) — uncheck layers or import a smaller cell.` });
   }
-  if (roundEndPaths > 0) {
-    warnings.push({ code: 'round-ends', msg: `${roundEndPaths} path(s) had ROUND ends (pathtype 1) — imported at full physical length with square ends.` });
+  if (absTransformRefs > 0) {
+    warnings.push({ code: 'abs-strans', msg: `${absTransformRefs} reference(s) use ABSOLUTE magnification/angle (STRANS) — composed like relative transforms (KLayout behavior); verify placement.` });
   }
   return { shapes: out, warnings };
+}
+
+// ---------------------------------------------------------------------
+// pathToOutline: flatten a GDS PATH's width into its OUTLINE polygon
+// (KLayout-equivalent), so imports carry no stroked-rendering artifacts
+// (miter spikes, cap seams). `pts` is the OPEN centerline (µm), `width`
+// the full trace width, `pathtype` the GDS end style:
+//   0 = butt (flush), 1 = round (polygonal arc, ARC_SEGS facets),
+//   2 = square (extended by width/2). Unknown types render butt.
+// Joins are NATURAL (offset-line intersections = miter) with a bevel
+// fallback when the miter would spike past MITER_LIMIT × halfwidth
+// (reflex/hairpin turns). Returns the closed outline as a point list
+// (first point NOT repeated at the end), or null for degenerate input.
+export function pathToOutline(pts, width, pathtype = 0) {
+  const h = width / 2;
+  if (!(h > 0) || !Array.isArray(pts) || pts.length < 2) return null;
+  // Drop zero-length steps — they'd produce NaN directions.
+  const P = [];
+  for (const p of pts) {
+    const prev = P[P.length - 1];
+    if (prev && Math.hypot(p[0] - prev[0], p[1] - prev[1]) < 1e-9) continue;
+    P.push(p);
+  }
+  if (P.length < 2) return null;
+  const n = P.length;
+  const dirs = []; // unit direction of segment i (P[i] -> P[i+1])
+  for (let i = 0; i < n - 1; i++) {
+    const dx = P[i + 1][0] - P[i][0], dy = P[i + 1][1] - P[i][1];
+    const len = Math.hypot(dx, dy);
+    dirs.push([dx / len, dy / len]);
+  }
+  const normal = ([ux, uy]) => [-uy, ux];
+  const MITER_LIMIT = 4;
+  const ARC_SEGS = 8;
+
+  // One side of the band: offset points at sign s (+1 left of travel,
+  // -1 right), walking start -> end with natural joins.
+  const side = (s) => {
+    const outPts = [];
+    const n0 = normal(dirs[0]);
+    outPts.push([P[0][0] + s * h * n0[0], P[0][1] + s * h * n0[1]]);
+    for (let i = 1; i < n - 1; i++) {
+      const u1 = dirs[i - 1], u2 = dirs[i];
+      const n1 = normal(u1), n2 = normal(u2);
+      const A = [P[i][0] + s * h * n1[0], P[i][1] + s * h * n1[1]];
+      const B = [P[i][0] + s * h * n2[0], P[i][1] + s * h * n2[1]];
+      const cross = u1[0] * u2[1] - u1[1] * u2[0];
+      if (Math.abs(cross) < 1e-12) { // straight (or exact hairpin): keep A
+        outPts.push(A);
+        if (u1[0] * u2[0] + u1[1] * u2[1] < 0) outPts.push(B); // hairpin: both edges
+        continue;
+      }
+      // Intersection of A + t·u1 and B + r·u2 (natural/miter join).
+      const t = ((B[0] - A[0]) * u2[1] - (B[1] - A[1]) * u2[0]) / cross;
+      const M = [A[0] + t * u1[0], A[1] + t * u1[1]];
+      const miterLen = Math.hypot(M[0] - P[i][0], M[1] - P[i][1]);
+      if (miterLen <= MITER_LIMIT * h) {
+        outPts.push(M);
+      } else { // sharp turn — bevel with the two offset endpoints
+        outPts.push(A, B);
+      }
+    }
+    const nL = normal(dirs[n - 2]);
+    outPts.push([P[n - 1][0] + s * h * nL[0], P[n - 1][1] + s * h * nL[1]]);
+    return outPts;
+  };
+
+  // End cap around center C, bulging along outward unit direction `u`;
+  // sweeps from the +normal(u) offset to the −normal(u) offset.
+  const cap = (C, u) => {
+    const nn = normal(u);
+    const pushArc = (arr) => {
+      for (let k = 1; k < ARC_SEGS; k++) {
+        const th = (Math.PI * k) / ARC_SEGS;
+        // rotate the left-normal by -th about C (passes through +u at th=π/2)
+        const dx = nn[0] * Math.cos(th) + nn[1] * Math.sin(th);
+        const dy = -nn[0] * Math.sin(th) + nn[1] * Math.cos(th);
+        arr.push([C[0] + h * dx, C[1] + h * dy]);
+      }
+    };
+    if (pathtype === 1) { const a = []; pushArc(a); return a; }
+    if (pathtype === 2) {
+      const E = [C[0] + h * u[0], C[1] + h * u[1]]; // extended tip center
+      return [
+        [E[0] + h * nn[0], E[1] + h * nn[1]],
+        [E[0] - h * nn[0], E[1] - h * nn[1]],
+      ];
+    }
+    return []; // butt: straight connection
+  };
+
+  const left = side(+1);
+  const right = side(-1);
+  // Assemble: left start→end, END cap (left→right around the tip), right
+  // end→start, START cap. The start cap built along the OUTWARD direction
+  // −u₀ already sweeps right→left (its normal is the mirrored one), so it
+  // drops in without reversal.
+  const uEnd = dirs[n - 2];
+  const uStart = [-dirs[0][0], -dirs[0][1]];
+  return [...left, ...cap(P[n - 1], uEnd), ...right.reverse(), ...cap(P[0], uStart)];
 }
 
 // Per-(layer, datatype) stats for the mapping dialog table.
@@ -436,28 +532,89 @@ export function gdsShapesToComponents(shapes, mapping, opts = {}) {
     return { layer: 'gdsundef' }; // 'undef' and anything unknown
   };
 
-  const components = [];
-  let k = 0, degenerate = 0;
-  for (const s of included) {
-    const m = mapping[`${s.layer}/${s.datatype}`];
-    let pts = s.pts.map(([x, y]) => [x + dx, y + dy]);
-    if (s.kind === 'boundary') {
-      // GDS BOUNDARY repeats the first point as the last — drop it, plus
-      // any other consecutive duplicates (they'd make zero-length rel steps).
-      if (pts.length >= 2) {
-        const [fx, fy] = pts[0];
-        const [lx, ly] = pts[pts.length - 1];
-        if (Math.abs(fx - lx) < 1e-9 && Math.abs(fy - ly) < 1e-9) pts = pts.slice(0, -1);
-      }
-    }
+  // Consecutive-duplicate removal (zero-length rel steps break nothing
+  // but bloat the chain) + COLLINEAR pruning: a mid-point within 1 nm of
+  // the straight line between its neighbors (and travelling FORWARD —
+  // spikes reverse direction and are kept) is redundant tessellation
+  // noise; dropping it shrinks huge imported chains without moving any
+  // edge by more than fab resolution. Vertex 0 (the component root) is
+  // never pruned.
+  const sanitize = (pts, closed) => {
     const dedup = [];
     for (const p of pts) {
       const prev = dedup[dedup.length - 1];
       if (prev && Math.abs(prev[0] - p[0]) < 1e-9 && Math.abs(prev[1] - p[1]) < 1e-9) continue;
       dedup.push(p);
     }
+    if (closed && dedup.length >= 2) {
+      const [fx, fy] = dedup[0];
+      const [lx, ly] = dedup[dedup.length - 1];
+      if (Math.abs(fx - lx) < 1e-9 && Math.abs(fy - ly) < 1e-9) dedup.pop();
+    }
+    if (dedup.length < 3) return dedup;
+    const COLLIN_TOL = 1e-3; // µm — 1 nm perpendicular deviation
+    const keep = [dedup[0]];
+    const last = () => keep[keep.length - 1];
+    for (let i = 1; i < dedup.length; i++) {
+      const isLast = i === dedup.length - 1;
+      // Next point after i (wraps to v0 for closed outlines so the
+      // closing edge prunes too; the open-chain end point always stays).
+      const nxt = isLast ? (closed ? dedup[0] : null) : dedup[i + 1];
+      if (nxt) {
+        const a = last(), b = dedup[i];
+        const abx = nxt[0] - a[0], aby = nxt[1] - a[1];
+        const len = Math.hypot(abx, aby);
+        if (len > 1e-9) {
+          const perp = Math.abs((b[0] - a[0]) * aby - (b[1] - a[1]) * abx) / len;
+          const forward = (b[0] - a[0]) * abx + (b[1] - a[1]) * aby;
+          if (perp < COLLIN_TOL && forward > 0 && forward < len * len) continue; // prune b
+        }
+      }
+      keep.push(dedup[i]);
+    }
+    return keep;
+  };
+
+  const components = [];
+  let k = 0, degenerate = 0;
+  for (const s of included) {
+    const m = mapping[`${s.layer}/${s.datatype}`];
+    const raw = s.pts.map(([x, y]) => [x + dx, y + dy]);
     const isPath = s.kind === 'path';
-    const minVerts = isPath ? 2 : 3;
+    // PATH flattening: closed-loop centerlines (first == last point —
+    // rings drawn as paths) stay CLOSED constant-width polylines (no end
+    // caps exist, so no cap artifacts); open widthful paths are flattened
+    // to their OUTLINE polygon (pathToOutline — exact caps per pathtype,
+    // natural joins), which is what KLayout renders and what kills the
+    // stroked-rendering artifact family. Width-less paths (w <= 0,
+    // marker/annotation traces) stay thin open polylines.
+    let pts = raw;
+    let emitKind = isPath ? 'polyline' : 'polyshape';
+    let emitClosed = !isPath;
+    let emitWidth = null;
+    if (isPath) {
+      const loop = raw.length >= 3
+        && Math.abs(raw[0][0] - raw[raw.length - 1][0]) < 1e-9
+        && Math.abs(raw[0][1] - raw[raw.length - 1][1]) < 1e-9;
+      if (loop) {
+        emitClosed = true;
+        emitWidth = fmtUm(s.widthUm > 0 ? s.widthUm : 1);
+        pts = raw.slice(0, -1); // closed polyline: implicit closing edge
+      } else if (s.widthUm > 0) {
+        const outline = pathToOutline(raw, s.widthUm, s.pathtype);
+        if (outline) {
+          pts = outline;
+          emitKind = 'polyshape';
+          emitClosed = true;
+        } else {
+          emitWidth = '1';
+        }
+      } else {
+        emitWidth = '1';
+      }
+    }
+    const dedup = sanitize(pts, emitClosed);
+    const minVerts = emitKind === 'polyshape' || emitClosed ? 3 : 2;
     if (dedup.length < minVerts) { degenerate++; continue; }
 
     const vertices = dedup.map(([x, y], i) => (i === 0
@@ -476,20 +633,22 @@ export function gdsShapesToComponents(shapes, mapping, opts = {}) {
       // import — a later re-import of the same file uses it as
       // forcedOffset to land in exact registration (and it keeps
       // tracking even after the user drags the earlier import around).
+      // The outline builder + sanitizer are deterministic, so v0 is the
+      // SAME derived point on every import of the same file.
       gdsSrc: {
         file, cell: s.cell || '', layer: s.layer, datatype: s.datatype,
         v0x: dedup[0][0] - dx, v0y: dedup[0][1] - dy,
       },
       ...targetFields(m.target),
     };
-    if (isPath) {
-      components.push({ ...base, kind: 'polyline', width: fmtUm(s.widthUm > 0 ? s.widthUm : 1), closed: false });
+    if (emitKind === 'polyline') {
+      components.push({ ...base, kind: 'polyline', width: emitWidth || '1', closed: emitClosed });
     } else {
       components.push({ ...base, kind: 'polyshape', closed: true });
     }
   }
   if (degenerate > 0) {
-    warnings.push({ code: 'degenerate', msg: `${degenerate} shape(s) skipped (fewer than 3 distinct vertices).` });
+    warnings.push({ code: 'degenerate', msg: `${degenerate} shape(s) skipped (too few distinct vertices).` });
   }
   return { components, warnings };
 }

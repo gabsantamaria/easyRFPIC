@@ -217,16 +217,103 @@ describe('parseGDS — PATH elements', () => {
     rec(R.ENDSTR, 0x00),
     rec(R.ENDLIB, 0x00),
   );
-  it('imports a PATH as a widthful polyline component', () => {
+  it('flattens an open PATH to its OUTLINE polygon (miter joins, exact bbox)', () => {
     const parsed = parseGDS(buf);
     const { shapes } = flattenGDSCell(parsed, 'T');
     expect(shapes[0].kind).toBe('path');
     expect(shapes[0].widthUm).toBeCloseTo(2, 9);
     const { components } = gdsShapesToComponents(shapes, { '3/0': { include: true, target: 'undef' } }, { prefix: 'gds1' });
     expect(components.length).toBe(1);
-    expect(components[0].kind).toBe('polyline');
-    expect(components[0].width).toBe('2');
-    expect(components[0].vertices.length).toBe(3);
+    const c = components[0];
+    expect(c.kind).toBe('polyshape'); // width flattened into geometry
+    expect(c.closed).toBe(true);
+    // L-path (0,0)->(10,0)->(10,5), w=2, butt: 6-point miter outline
+    // [(0,1),(9,1),(9,5),(11,5),(11,-1),(0,-1)].
+    expect(c.vertices.length).toBe(6);
+    const abs = [];
+    let x = c.cx, y = c.cy;
+    abs.push([x, y]);
+    for (let i = 1; i < c.vertices.length; i++) {
+      x += Number(c.vertices[i].dx); y += Number(c.vertices[i].dy);
+      abs.push([x, y]);
+    }
+    const xs = abs.map(p => p[0]), ys = abs.map(p => p[1]);
+    expect(Math.min(...xs)).toBeCloseTo(0, 6);
+    expect(Math.max(...xs)).toBeCloseTo(11, 6);
+    expect(Math.min(...ys)).toBeCloseTo(-1, 6);
+    expect(Math.max(...ys)).toBeCloseTo(5, 6);
+    // inner miter corner present
+    expect(abs.some(([px, py]) => Math.abs(px - 9) < 1e-6 && Math.abs(py - 1) < 1e-6)).toBe(true);
+  });
+});
+
+describe('PATH flattening — end styles, loops, sanitization', async () => {
+  const { pathToOutline } = await import('../src/gds/gds-import.js');
+
+  it('pathtype 0/2 caps: flush vs extended by w/2', () => {
+    const straight = [[0, 0], [10, 0]];
+    const butt = pathToOutline(straight, 4, 0);
+    const xsB = butt.map(p => p[0]);
+    expect(Math.min(...xsB)).toBeCloseTo(0, 9);
+    expect(Math.max(...xsB)).toBeCloseTo(10, 9);
+    const sq = pathToOutline(straight, 4, 2);
+    const xsS = sq.map(p => p[0]);
+    expect(Math.min(...xsS)).toBeCloseTo(-2, 9); // extended w/2 per end
+    expect(Math.max(...xsS)).toBeCloseTo(12, 9);
+  });
+
+  it('pathtype 1 ROUND caps: polygonal arcs reach the tip, stay in the disc', () => {
+    const round = pathToOutline([[0, 0], [10, 0]], 4, 1);
+    const xs = round.map(p => p[0]);
+    expect(Math.min(...xs)).toBeCloseTo(-2, 6); // arc apex at w/2
+    expect(Math.max(...xs)).toBeCloseTo(12, 6);
+    expect(round.length).toBe(4 + 2 * 7); // 4 side pts + 7 arc pts per cap
+    // every cap point lies on the radius-2 circle around its endpoint
+    for (const [px, py] of round) {
+      const dEnd = Math.min(Math.hypot(px - 0, py - 0), Math.hypot(px - 10, py - 0));
+      expect(dEnd).toBeLessThanOrEqual(2 + 1e-9);
+    }
+  });
+
+  it('CLOSED-LOOP paths (rings) import as closed polylines — no end-stretch notch', () => {
+    // A square loop drawn as a PATH whose last point repeats the first —
+    // the old end-stretch pushed first/last apart (visible notch).
+    const shapes = [{
+      kind: 'path', layer: 4, datatype: 0, cell: 'T', widthUm: 2, pathtype: 1,
+      pts: [[0, 0], [20, 0], [20, 20], [0, 20], [0, 0]],
+    }];
+    const { components } = gdsShapesToComponents(shapes, { '4/0': { include: true, target: 'undef' } }, { prefix: 'g' });
+    expect(components.length).toBe(1);
+    const c = components[0];
+    expect(c.kind).toBe('polyline');
+    expect(c.closed).toBe(true);
+    expect(c.width).toBe('2');
+    expect(c.vertices.length).toBe(4); // closing point dropped, no stretch
+  });
+
+  it('collinear tessellation noise is pruned (v0 kept, spikes kept)', () => {
+    const shapes = [{
+      kind: 'boundary', layer: 1, datatype: 0, cell: 'T', widthUm: 0,
+      pts: [
+        [0, 0], [2, 0], [5, 0], [7, 0], [10, 0], // collinear run on the bottom edge
+        [10, 5], [5, 5], [5, 8], [5, 5.000000], // spike up at x=5 (direction reverses)
+        [0, 5],
+      ],
+    }];
+    const { components } = gdsShapesToComponents(shapes, { '1/0': { include: true, target: 'undef' } }, { prefix: 'g' });
+    const c = components[0];
+    // Bottom-edge midpoints pruned: (2,0),(5,0),(7,0) gone; spike kept.
+    const abs = [];
+    let x = c.cx, y = c.cy;
+    abs.push([x, y]);
+    for (let i = 1; i < c.vertices.length; i++) {
+      x += Number(c.vertices[i].dx); y += Number(c.vertices[i].dy);
+      abs.push([x, y]);
+    }
+    expect(abs.some(([px]) => Math.abs(px - 2) < 1e-6)).toBe(false);
+    expect(abs.some(([px, py]) => Math.abs(px - 5) < 1e-6 && Math.abs(py - 8) < 1e-6)).toBe(true); // spike apex
+    expect(abs[0][0]).toBeCloseTo(0, 9); // v0 never pruned
+    expect(abs[0][1]).toBeCloseTo(0, 9);
   });
 });
 
@@ -258,8 +345,15 @@ describe('parser hardening (adversarial-review finds)', () => {
     const { components } = gdsShapesToComponents(shapes, {
       '1/0': { include: true, target: 'undef' }, '2/0': { include: true, target: 'undef' },
     }, { prefix: 'g' });
-    expect(components.find(c => c.gdsSrc.layer === 1).width).toBe('6');
-    expect(components.find(c => c.gdsSrc.layer === 2).width).toBe('2');
+    // Widths are flattened into outline polygons — check the band heights.
+    const bandH = (c) => {
+      let y = c.cy;
+      const ys = [y];
+      for (let i = 1; i < c.vertices.length; i++) { y += Number(c.vertices[i].dy); ys.push(y); }
+      return Math.max(...ys) - Math.min(...ys);
+    };
+    expect(bandH(components.find(c => c.gdsSrc.layer === 1))).toBeCloseTo(6, 6);
+    expect(bandH(components.find(c => c.gdsSrc.layer === 2))).toBeCloseTo(2, 6);
   });
 
   it('PATHTYPE 2 square-extended ends keep the physical length (w/2 per end)', () => {
@@ -273,11 +367,17 @@ describe('parser hardening (adversarial-review finds)', () => {
         rec(R.XY, 0x03, int4(0, 0, 10000, 0)), rec(R.ENDEL, 0x00)),
       rec(R.ENDSTR, 0x00), rec(R.ENDLIB, 0x00),
     );
-    const { shapes, warnings } = flattenGDSCell(parseGDS(buf), 'T');
-    // Ends extend by width/2 = 2 µm: centerline −2 .. 12.
-    expect(shapes[0].pts[0][0]).toBeCloseTo(-2, 9);
-    expect(shapes[0].pts[1][0]).toBeCloseTo(12, 9);
-    expect(warnings.some(w => w.code === 'round-ends')).toBe(false); // type 2 exact, no warning
+    const { shapes } = flattenGDSCell(parseGDS(buf), 'T');
+    // Flatten keeps the RAW centerline (0..10); the extension lives in the
+    // outline the converter builds.
+    expect(shapes[0].pts[0][0]).toBeCloseTo(0, 9);
+    expect(shapes[0].pts[1][0]).toBeCloseTo(10, 9);
+    const { components } = gdsShapesToComponents(shapes, { '1/0': { include: true, target: 'undef' } }, { prefix: 'g' });
+    let x = components[0].cx;
+    const xs = [x];
+    for (let i = 1; i < components[0].vertices.length; i++) { x += Number(components[0].vertices[i].dx); xs.push(x); }
+    expect(Math.min(...xs)).toBeCloseTo(-2, 6); // extended by w/2
+    expect(Math.max(...xs)).toBeCloseTo(12, 6);
   });
 
   it('a huge AREF of a shape-less cell hits the WALK budget instead of freezing', () => {
