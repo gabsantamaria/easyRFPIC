@@ -91,6 +91,11 @@ import { SettingsPanel } from './ui/SettingsPanel.jsx';
 import { DEFAULT_SETTINGS, loadSettings, saveSettings, hydrateSettings, buildSettingsExport, parseSettingsImport } from './ui/settings.js';
 import { getUiPref, setUiPrefs, hydrateUiPrefs } from './ui/ui-prefs.js';
 import { loadSetupDefaults, saveSetupDefaults } from './ui/setupDefaults.js';
+import { parseGDS, gdsShapesToComponents, suggestGdsPrefix } from './gds/gds-import.js';
+
+// GDS import dialog — lazy like the other heavy dialogs; mounted only
+// while an upload is pending.
+const GdsImportDialog = React.lazy(() => import('./ui/GdsImportDialog.jsx'));
 import { computeHiddenCompIds } from './ui/canvas/layer-visibility.js';
 import { resolveCanvasTheme, applyThemeAttr } from './ui/theme.js';
 import { applyFragment as applyAiGeometryFragment } from './ai/assistant.js';
@@ -3100,11 +3105,68 @@ export default function App() {
     if (!n) await alertDialog('Could not insert the shapes from that file.', 'Upload failed');
   };
 
+  // GDS import (binary GDS-II upload → layer-mapping dialog → independent
+  // polyshape/polyline components). `gdsImport` holds the parsed file while
+  // the mapping dialog is open; `at` is the drop point (world µm) the
+  // import is centered on unless "keep original coordinates" is checked.
+  const [gdsImport, setGdsImport] = useState(null); // { fileName, parsed, at }
+  const handleImportGDS = async (at) => {
+    const file = await new Promise((resolve) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.gds,.gdsii,.gds2';
+      input.onchange = (e) => resolve(e.target.files?.[0] || null);
+      input.click();
+    });
+    if (!file) return;
+    let parsed;
+    try {
+      parsed = parseGDS(await file.arrayBuffer());
+    } catch (e) {
+      await alertDialog('Could not parse that file as GDS-II.\n\n' + e.message, 'GDS import failed');
+      return;
+    }
+    if (Object.keys(parsed.cells).length === 0) {
+      await alertDialog('No structures (cells) found in that file — is it a GDS-II stream?', 'GDS import failed');
+      return;
+    }
+    setGdsImport({ fileName: file.name, parsed, at: at || null });
+  };
+  const applyGdsImport = async ({ shapes, mapping, keepCoords }) => {
+    const imp = gdsImport;
+    setGdsImport(null);
+    if (!imp) return;
+    const prefix = suggestGdsPrefix(scene.components);
+    const at = keepCoords
+      ? null
+      : (imp.at || { x: viewport.x, y: viewport.y }); // drop point, else viewport center
+    const { components: newComps, warnings } = gdsShapesToComponents(shapes, mapping, {
+      prefix, file: imp.fileName, at,
+    });
+    if (newComps.length === 0) {
+      await alertDialog('Nothing to import — every layer was unchecked or every shape was degenerate.', 'GDS import');
+      return;
+    }
+    // One updateScene call = one undo step for the whole import.
+    updateScene(prev => ({ ...prev, components: [...prev.components, ...newComps] }));
+    setSelection({ ids: new Set(newComps.map(c => c.id)), primary: newComps[newComps.length - 1].id });
+    const undef = newComps.filter(c => c.layer === 'gdsundef').length;
+    const notes = warnings.map(w => '\n⚠ ' + w.msg).join('');
+    if (undef > 0 || notes) {
+      await alertDialog(
+        `Imported ${newComps.length} shape(s) from ${imp.fileName}.`
+        + (undef > 0 ? `\n${undef} shape(s) are <undefined> — they render on the canvas but are SKIPPED by every physical export (HFSS included) until you assign a layer in the Inspector.` : '')
+        + notes,
+        'GDS import');
+    }
+  };
+
   // Canvas-background right-click menu: upload shapes (at the click point) and,
   // when the clipboard holds shapes, a Paste shortcut.
   const openBackgroundContextMenu = ({ x, y, worldX, worldY }) => {
     const items = [
       { label: 'Upload shapes here…', icon: Upload, onClick: () => handleUploadShapes({ x: worldX, y: worldY }) },
+      { label: 'Import GDS here…', icon: Upload, onClick: () => handleImportGDS({ x: worldX, y: worldY }) },
     ];
     if (clipboard && Array.isArray(clipboard.components) && clipboard.components.length) {
       items.push({ label: `Paste (${clipboard.components.length})`, icon: Copy, hint: '⌘V', onClick: () => handlePaste({ x: worldX, y: worldY }) });
@@ -5341,6 +5403,16 @@ export default function App() {
       alertDialog(`"${sectionOperand}" is a section line (non-model) — it cannot participate in boolean operations.`, 'Cannot combine');
       return;
     }
+    // Unassigned GDS imports are non-model too — every physical exporter
+    // filters them out of `solved`, so a boolean built on one would ship
+    // WITHOUT that operand (a subtract loses its hole; a union whose
+    // operand[0] is unassigned inherits 'gdsundef' and drops the whole
+    // cluster) while the canvas renders it. Assign a layer first.
+    const undefOperand = ids.find(id => scene.components.find(cc => cc.id === id)?.layer === 'gdsundef');
+    if (undefOperand) {
+      alertDialog(`"${undefOperand}" is an unassigned GDS import — assign it a canvas layer in the Inspector (GDS import block) before using it in a boolean, or the exported boolean would silently lose this operand.`, 'Cannot combine');
+      return;
+    }
     // Compute the centroid of operand bboxes from the SOLVED scene so the
     // new component starts at the cluster's geometric center. After this
     // the boolean's cx/cy is what gets dragged; operand cx/cy stays at
@@ -7204,6 +7276,13 @@ export default function App() {
                     { key: 'port', label: 'Ports', hint: 'port-layer rects + integration-line arrows' },
                     { key: 'via', label: 'Vias', hint: 'vertical interconnects (plan-view circles)' },
                     { key: 'section', label: 'Section lines', hint: 'non-model A—A′ cross-section cuts' },
+                    // Only shown when the scene actually holds unassigned
+                    // GDS imports (same content-gating as the sections
+                    // toolbar toggle) — without this eye a big <undefined>
+                    // import had no hide control at all.
+                    ...(scene.components.some(c => c.layer === 'gdsundef')
+                      ? [{ key: 'gdsundef', label: 'Unassigned GDS', hint: 'imported shapes not yet mapped to a layer' }]
+                      : []),
                   ].map(({ key, label, hint }) => {
                     const off = hiddenLayerKeys.has(key);
                     return (
@@ -8474,7 +8553,12 @@ export default function App() {
                     layer would turn a non-model annotation into geometry
                     (the select's fallback rendering even LIED — an unknown
                     value displayed as "waveguide"). */}
-                {selected.kind !== 'bridge' && selected.layer !== 'section' && (
+                {/* 'gdsundef' excluded too: its value matches none of the
+                    options (blank controlled select), and the GDS-import
+                    block below owns layer assignment for imported shapes —
+                    including the only path back to <undefined> and the
+                    conductor binding the generic select can't set. */}
+                {selected.kind !== 'bridge' && selected.layer !== 'section' && selected.layer !== 'gdsundef' && (
                 <div>
                   <label className="text-[10px] uppercase tracking-wider text-slate-500">Layer</label>
                   <select value={selected.layer} onChange={(e) => updateComp(selected.id, { layer: e.target.value })} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-slate-100 outline-none">
@@ -8482,6 +8566,15 @@ export default function App() {
                     <option value="electrode">electrode</option>
                     <option value="port">port</option>
                   </select>
+                </div>
+                )}
+                {selected.layer === 'gdsundef' && (
+                <div>
+                  <label className="text-[10px] uppercase tracking-wider text-slate-500">Layer</label>
+                  <div className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-amber-400"
+                    title="Unassigned GDS import — not exported anywhere. Assign a canvas layer in the GDS import block below.">
+                    &lt;undefined&gt; (GDS import — assign below)
+                  </div>
                 </div>
                 )}
                 {selected.layer === 'section' && (
@@ -9085,6 +9178,79 @@ export default function App() {
                     );
                   })()
                 )}
+                {/* GDS import provenance + layer (re-)assignment. Any shape
+                    carrying gdsSrc was imported from a GDS file; shapes whose
+                    mapping was left <undefined> sit on layer 'gdsundef'
+                    (non-model: every physical export skips them) until
+                    assigned here. The select assigns THIS shape immediately;
+                    the button copies the assignment to every shape from the
+                    same (file, GDS layer/datatype). */}
+                {selected.kind !== 'boolean' && selected.gdsSrc && (() => {
+                  const conductorsG = (scene.stack || []).filter(l => l.role === 'conductor');
+                  const hasWgLayer = (scene.stack || []).some(l => l.role === 'waveguide');
+                  const src = selected.gdsSrc;
+                  const curTarget = selected.layer === 'waveguide' ? 'wg'
+                    : selected.layer === 'electrode' ? `cond:${selected.conductorLayerId || (conductorsG[0]?.id || '')}`
+                    : 'undef';
+                  const groupIds = scene.components
+                    .filter(c => c.gdsSrc && c.gdsSrc.file === src.file
+                      && c.gdsSrc.layer === src.layer && c.gdsSrc.datatype === src.datatype)
+                    .map(c => c.id);
+                  const applyTarget = (targetVal, ids) => {
+                    const idSet = new Set(ids);
+                    updateScene(prev => ({
+                      ...prev,
+                      components: prev.components.map(c => {
+                        if (!idSet.has(c.id)) return c;
+                        if (targetVal === 'wg') {
+                          const n = { ...c, layer: 'waveguide' };
+                          delete n.conductorLayerId;
+                          return n;
+                        }
+                        if (typeof targetVal === 'string' && targetVal.startsWith('cond:')) {
+                          return { ...c, layer: 'electrode', conductorLayerId: targetVal.slice(5) };
+                        }
+                        const n = { ...c, layer: 'gdsundef' }; // back to <undefined>
+                        delete n.conductorLayerId;
+                        return n;
+                      }),
+                    }));
+                  };
+                  return (
+                    <div className="mt-2 rounded border border-slate-700 px-2 py-1.5" style={{ background: 'rgba(15,23,42,0.45)' }}>
+                      <div className="text-[10px] uppercase tracking-wider text-slate-500 mb-1">GDS import</div>
+                      <p className="text-[10px] text-slate-500 leading-snug mb-1">
+                        {src.file || 'GDS'}{src.cell ? ` · ${src.cell}` : ''} · layer {src.layer}/{src.datatype}
+                      </p>
+                      {selected.layer === 'gdsundef' && (
+                        <p className="text-[10px] text-amber-400 leading-snug mb-1">
+                          Unassigned — skipped by every physical export (HFSS included) until mapped to a canvas layer.
+                        </p>
+                      )}
+                      <label className="text-[10px] uppercase tracking-wider text-slate-500">canvas layer</label>
+                      <select
+                        value={curTarget}
+                        onChange={(e) => applyTarget(e.target.value, [selected.id])}
+                        className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs font-mono text-slate-100 outline-none focus:border-cyan-400"
+                      >
+                        <option value="undef">&lt;undefined&gt; (not exported)</option>
+                        {hasWgLayer && <option value="wg">waveguide</option>}
+                        {conductorsG.map(l => (
+                          <option key={l.id} value={`cond:${l.id}`}>{l.name || l.id} (conductor)</option>
+                        ))}
+                      </select>
+                      {groupIds.length > 1 && (
+                        <button
+                          onClick={() => applyTarget(curTarget, groupIds)}
+                          className="mt-1 w-full px-2 py-1 rounded text-[10px] border border-slate-600 hover:border-cyan-400 hover:text-cyan-300 text-slate-300"
+                          title={`Copy this shape's layer assignment to every imported shape from GDS layer ${src.layer}/${src.datatype} of ${src.file || 'this file'}`}
+                        >
+                          apply to all {groupIds.length} shapes from L{src.layer}/{src.datatype}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()}
                 {/* First-class rotation (rect / circle / ellipse / polygon)
                     + per-component z offset (all flat-shape kinds). Both are
                     parametric expression fields wired through the standard
@@ -9440,6 +9606,20 @@ export default function App() {
         designBaseName={exportFileBase()}
         onDownload={(text, filename) => downloadFile(filename, text)}
       />
+
+      {/* GDS import — layer-mapping dialog (mounted only while an upload
+          is pending; the chunk lazy-loads with the first import). */}
+      {gdsImport && (
+        <React.Suspense fallback={null}>
+          <GdsImportDialog
+            fileName={gdsImport.fileName}
+            parsed={gdsImport.parsed}
+            stack={scene.stack}
+            onImport={applyGdsImport}
+            onClose={() => setGdsImport(null)}
+          />
+        </React.Suspense>
+      )}
 
       {/* Modal dialog (confirm/prompt/alert) */}
       <ModalDialog

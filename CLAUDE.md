@@ -716,13 +716,17 @@ panel eye (canvas-only, scene/exports untouched); deletion is the normal
 Delete-key / context-menu path like any component.
 
 **Non-model contract** (`isNonModelComponent(c)` in schema.js — layer ===
-'section'): every exporter filters it AFTER solving (`solvedAll` →
-`solved`; hfss-native computes `computeParametricPositions` on
-`solvedAll` so a child snapped to a section still resolves), scene3d
-skips it, figure SVG/PDF export strips `[data-nonmodel]` from the cloned
-DOM, `buildTwoLineScene` drops it before the cell build, `createBoolean`
-rejects it as an operand, `layerVisKey` gives it its own 'section' eye
-(LAYERS panel canvas overlays). Guard: tests/section-line.test.js.
+'section' OR 'gdsundef'): every exporter filters it AFTER solving
+(`solvedAll` → `solved`; hfss-native computes
+`computeParametricPositions` on `solvedAll` so a child snapped to a
+non-model comp still resolves), scene3d skips it, figure SVG/PDF export
+strips `[data-nonmodel]` from the cloned DOM, `buildTwoLineScene` drops
+it before the cell build, `createBoolean` rejects it as an operand,
+`layerVisKey` gives each its own eye key ('section' / 'gdsundef').
+'section' is an annotation; 'gdsundef' is an UNASSIGNED GDS import
+(geometry-in-waiting — no stack layer ⇒ no Z/thickness/material; see
+"GDS import" below). Guard: tests/section-line.test.js +
+tests/gds-import.test.js.
 
 **Cross-section extraction** (`src/scene/cross-section.js`, pure —
 tests/cross-section.test.js): `buildCrossSection(scene, pv, sectionCompId)`
@@ -879,6 +883,66 @@ signal + validation error. Prefs persist LAYERED (key
 localStorage-hostile rationale as the 2-line wizard). Downloads go
 through `downloadFile` as `<exportFileBase()>_q2d.py` /
 `..._eo_section.ipynb`.
+
+## GDS import
+
+Binary GDS-II upload → per-layer mapping dialog → independent canvas
+shapes (background right-click → "Import GDS here…"; the import is
+centered at the click point unless "keep original GDS coordinates").
+
+- **`src/gds/gds-import.js`** (pure; tests/gds-import.test.js):
+  `parseGDS(bytes)` (record stream, REAL8 excess-64 decode — exact
+  inverse of gds.js's writer; UNITS → µm/dbu; unknown records counted
+  into warnings), `topCellsOf`, `flattenGDSCell` (SREF/AREF hierarchy
+  flattened: translate ∘ rotate(ANGLE CCW) ∘ mag ∘ x-axis-mirror (STRANS
+  bit 15), AREF lattice vectors in parent coords, cycle guard, maxShapes
+  cap), `gdsLayerStats`, `gdsShapesToComponents(shapes, mapping, opts)`,
+  `suggestGdsPrefix` (ids/params `gds<N>_<k>`, collision-free across
+  repeat imports).
+- **Mapping** (GdsImportDialog table, one row per GDS layer/datatype):
+  checkbox OFF → not imported at all; target `<undefined>` → component
+  layer **'gdsundef'**; `waveguide` → layer 'waveguide'; a conductor
+  stack layer → layer 'electrode' + `conductorLayerId`. BOUNDARY/BOX →
+  closed **polyshape**, PATH → **polyline** with the GDS width.
+- **Every shape is one independent component** on the PATH-KIND FRAME
+  CONTRACT: cx/cy = vertex 0, NUMERIC rel-step vertices (1 pm rounding
+  floor keeps String() out of exponent notation — evalExpr-safe), so
+  imported shapes get the standard 9 displayBbox frame anchors, snap
+  participation (parent + child side), the dashed selection frame, and —
+  because pure-rel numeric chains pass pathFrameExprs' round-trip guard
+  — FULLY PARAMETRIC snap chains in the HFSS export (gold test: snap a
+  rect to an imported shape's NE with a param gap; the emitted position
+  expr references the param).
+- **'gdsundef'** is non-model (see the non-model contract): renders dim
+  slate on canvas (FIRST in Canvas's pass1 layer list — under real
+  geometry), solves + snaps, but is skipped by every physical export
+  (HFSS included) until assigned. Provenance rides on the component as
+  `gdsSrc: { file, cell, layer, datatype }` (normalizeScene passthrough);
+  the Inspector "GDS import" block re-assigns the canvas layer per shape
+  and offers "apply to all N shapes from L<layer>/<dt>" (matched on
+  gdsSrc), so `<undefined>` layers can be mapped later in bulk.
+- **Adversarial-review hardening** (all probe-confirmed, fixed
+  pre-commit): PATH widths scale with the composed SREF/AREF
+  magnification (`sqrt(|det M|)`); NEGATIVE GDS widths are ABSOLUTE
+  (|w|, mag-exempt per spec); PATHTYPE 1/2 end extensions are applied
+  (centerline stretched w/2 per end; round ends warned as
+  square-approximated); flattening has a WALK budget (`maxWalks`)
+  separate from the shape cap — a spec-legal 32767² AREF of an empty/
+  missing cell froze the UI ~40 s with zero shapes emitted (missing
+  cells now skip the whole lattice with one probe); `createBoolean`
+  blocks 'gdsundef' operands (exporters filter them from `solved`, so a
+  subtract would silently ship without its hole and a union with an
+  unassigned operand[0] inherited 'gdsundef' with NO recovery path —
+  booleans carry no gdsSrc); scene3d's top-level walk uses
+  `isNonModelComponent` (its old `layer === 'section'` literal let
+  unassigned imports render as full conductor solids in the 3-D preview
+  of "what HFSS builds"); the generic Inspector Layer select excludes
+  'gdsundef' (blank controlled select + it can't set the conductor
+  binding — the GDS block owns assignment); the LAYERS panel gains a
+  content-gated "Unassigned GDS" eye; the dialog closes on Escape
+  (capture+stopPropagation — Delete was reaching the canvas behind the
+  modal) and its backdrop uses the mousedown-target guard (a text-select
+  drag released over the backdrop discarded the whole mapping table).
 
 ## Storage durability, multi-tab safety & disk mirrors
 

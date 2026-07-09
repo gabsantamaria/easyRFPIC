@@ -18,15 +18,26 @@ import defaultSceneJson from './default-scene.json' with { type: 'json' };
 // ----------------------------------------------------------------------
 // NON-MODEL COMPONENTS
 // ----------------------------------------------------------------------
-// A component on the 'section' layer is an ANNOTATION, not geometry: it
-// exists only on the canvas (the cross-section slicing line feeding the
-// Q2D / Tidy3D wizards). EVERY physical consumer — HFSS native, pyAEDT,
-// GDS, gdsfactory, the 3-D viewer, figure SVG/PDF export, the two-line
-// scene builder — must skip components for which this returns true.
-// Central predicate so a new exporter can't forget the rule by
-// re-deriving it from layer strings.
+// Two layers qualify, for different reasons:
+//   'section'  — an ANNOTATION, not geometry: exists only on the canvas
+//                (the cross-section slicing line feeding the Q2D / Tidy3D
+//                wizards).
+//   'gdsundef' — an imported GDS shape whose layer mapping was left
+//                `<undefined>` at import: REAL geometry-in-waiting, but
+//                with no stack layer it has no Z/thickness/material, so
+//                no physical export can represent it. It renders on the
+//                canvas (dim/dashed), solves, and snaps — assigning it a
+//                canvas layer later (Inspector) makes it a normal
+//                component.
+// EVERY physical consumer — HFSS native, pyAEDT, GDS, gdsfactory, the
+// 3-D viewer, the two-line scene builder, cross-section slicing — must
+// skip components for which this returns true. Central predicate so a
+// new exporter can't forget the rule by re-deriving it from layer
+// strings. (Both stay solver-visible: children snapped to them must land
+// where the canvas puts them, and hfss-native computes parametric
+// positions on the FULL solved list.)
 export function isNonModelComponent(c) {
-  return !!c && c.layer === 'section';
+  return !!c && (c.layer === 'section' || c.layer === 'gdsundef');
 }
 
 // ----------------------------------------------------------------------

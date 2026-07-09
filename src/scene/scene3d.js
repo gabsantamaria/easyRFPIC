@@ -63,7 +63,7 @@
 //     the same butt-join per-segment quads the HFSS export emits.
 //   - port rects render as thin sheets at the bound conductor's mid-Z
 //     (where the HFSS port sheet sits).
-import { normalizeScene } from './schema.js';
+import { normalizeScene, isNonModelComponent } from './schema.js';
 import { evalExpr } from './params.js';
 import { solveLayout, applyMirrors, resolveBooleanBboxes } from './solver.js';
 import { expandTransforms } from './transforms.js';
@@ -615,7 +615,7 @@ export function buildScene3D(rawScene, paramValues) {
   // ── Top-level walk: mirror the canvas's standalone-render filter ───────
   for (const c of solved) {
     if (c.consumedBy) continue; // operands render inside their boolean
-    if (c.layer === 'section') continue; // non-model annotation — never a solid
+    if (isNonModelComponent(c)) continue; // non-model (section line / unassigned GDS import) — never a solid
     emitComponent(c, [], null, c.id, 0);
   }
 

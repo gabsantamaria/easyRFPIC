@@ -3524,6 +3524,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     // width-0 polyline render branch draws it as a dashed centerline and
     // adds end ticks + labels. Never exported anywhere.
     section:   { fill: '#fb7185', stroke: '#fb7185', opacity: 0.95 },
+    // Unassigned GDS import (<undefined> layer mapping): geometry-in-
+    // waiting — dim slate so it reads as "not yet on a layer". Non-model
+    // (skipped by every physical export) until the Inspector assigns it
+    // a canvas layer.
+    gdsundef:  { fill: '#64748b', stroke: '#94a3b8', opacity: 0.35 },
   };
 
   // Stack-layer lookup so per-component fills can read the BOUND layer's
@@ -4490,7 +4495,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // (pass2 only takes selected/related comps), which is exactly how
         // section lines used to vanish the moment focus moved to a newly
         // drawn component.
-        for (const layer of ['waveguide', 'electrode', 'via', 'bridge', 'port', 'section']) {
+        for (const layer of ['gdsundef', 'waveguide', 'electrode', 'via', 'bridge', 'port', 'section']) {
           for (const c of solved) {
             if (c.layer === layer && isInPass1(c) && !isBoolOperand(c) && !isBoolComp(c)) pass1.push(c);
           }
