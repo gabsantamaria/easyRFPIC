@@ -1092,8 +1092,15 @@ output-variable + report block before `oProject.Save()` (see "2-line method
 wizard"). Absent the option, output is byte-identical to before.
 
 **Export target mode** (`options.appendMode`, shared by `generateHfssNative`
-AND `generateQ2DExtractor`) — WHERE the generated script builds. Three values:
-- `'new'` (default): `oDesktop.NewProject()`, then a guarded `oProject.Rename`
+AND `generateQ2DExtractor`) — WHERE the generated script builds. TWO defaults
+by layer, deliberately different: the EXPORTER's no-option fallback stays
+`'new'` (API back-compat — direct generator calls are byte-identical to
+before), while the APP default is `'project'` (normalizeScene seeds
+`simSetup.appendMode = 'project'` when absent — checking the legacy
+`appendToActive:true → 'design'` migration FIRST, else an unconditional seed
+would shadow it — and the UI always threads the scene value via
+`nativeNameOpts()`). Three values:
+- `'new'` (exporter fallback): `oDesktop.NewProject()`, then a guarded `oProject.Rename`
   to `<options.projectName>.aedt` inside `oDesktop.GetProjectDirectory()`
   (`import os` + `os.path.join`; the project stays UNSAVED, a clash/read-only
   dir just leaves the default `ProjectN` name), then
@@ -1121,7 +1128,18 @@ AND `generateQ2DExtractor`) — WHERE the generated script builds. Three values:
 
 The UI (SETUP panel) writes `scene.simSetup.appendMode` (a 3-radio group;
 also mirrors the legacy `appendToActive` boolean so old readers stay
-consistent). `PhotonicLayout.jsx` derives the names: `projectNameForExport()
+consistent). **SETUP defaults persistence** (`src/ui/setupDefaults.js`,
+tests/setup-defaults.test.js): every deliberate SETUP-panel edit
+(`updateSim`) persists the WHOLE merged `simSetup` to a layered store
+(key `photonic_layout_setup_defaults` — memory → window.storage/IndexedDB
+→ localStorage, hydrated pre-mount in main.jsx, same rationale as the
+2-line wizard prefs). FRESH scenes only (initial useState, boot fallback,
+handleNew, handleNewBlank) are seeded from it via `seedSimSetup()` —
+loading/importing an EXISTING design keeps its own stored simSetup (the
+per-design source of truth); merely loading a design never overwrites the
+remembered values. The store's `sanitizeSetup` is whitelist-free (scalar
+entries pass) so future simSetup knobs persist without touching the
+store. `PhotonicLayout.jsx` derives the names: `projectNameForExport()
 = aedtName("<workspace>_<design>")`; `designNameForExport()` =
 `v<N><c>_<description>_<yyyymmdd>_<hhmm>` where N is the CURRENT snapshot's
 `versionNumber` (0 if never snapshotted), `c` is present iff

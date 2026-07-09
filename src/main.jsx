@@ -7,6 +7,7 @@ import { hydrateTwoLinePrefs } from './ui/twoLineSettings.js'
 import { hydrateSectionWizardPrefs } from './ui/sectionWizardSettings.js'
 import { hydrateSettings } from './ui/settings.js'
 import { hydrateUiPrefs } from './ui/ui-prefs.js'
+import { hydrateSetupDefaults } from './ui/setupDefaults.js'
 
 // Provide an IndexedDB-backed `window.storage` (falling back to
 // localStorage, then memory) when the host doesn't supply its own.
@@ -27,6 +28,9 @@ hydrateSectionWizardPrefs();
 // means PhotonicLayout's own awaits usually resolve immediately.
 hydrateSettings();
 hydrateUiPrefs();
+// SETUP-panel defaults (export target, sweep, pads) — seeds NEW designs
+// with the last-used values. Hydrated pre-mount for the same reason.
+hydrateSetupDefaults();
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>

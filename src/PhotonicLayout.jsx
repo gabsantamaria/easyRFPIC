@@ -90,6 +90,7 @@ import { Tidy3DWizard } from './ui/Tidy3DWizard.jsx';
 import { SettingsPanel } from './ui/SettingsPanel.jsx';
 import { DEFAULT_SETTINGS, loadSettings, saveSettings, hydrateSettings, buildSettingsExport, parseSettingsImport } from './ui/settings.js';
 import { getUiPref, setUiPrefs, hydrateUiPrefs } from './ui/ui-prefs.js';
+import { loadSetupDefaults, saveSetupDefaults } from './ui/setupDefaults.js';
 import { computeHiddenCompIds } from './ui/canvas/layer-visibility.js';
 import { resolveCanvasTheme, applyThemeAttr } from './ui/theme.js';
 import { applyFragment as applyAiGeometryFragment } from './ai/assistant.js';
@@ -292,9 +293,20 @@ export function groupParamPrefixes(names, minGroup = 4) {
 
 // =========================================================================
 // MAIN APP
+// Fresh scenes (new design / new blank / first boot) inherit the user's
+// LAST-USED SETUP config — export target, sweep band, adaptive knobs,
+// chip pads — from the layered setup-defaults store. Loading an EXISTING
+// design never goes through this: its own stored simSetup stays the
+// per-design source of truth.
+function seedSimSetup(sc) {
+  const remembered = loadSetupDefaults();
+  if (!remembered) return sc;
+  return { ...sc, simSetup: { ...(sc.simSetup || {}), ...remembered } };
+}
+
 // =========================================================================
 export default function App() {
-  const [scene, setScene] = useState(makeDefaultScene);
+  const [scene, setScene] = useState(() => seedSimSetup(makeDefaultScene()));
   // On mount, ensure the active scene is normalized — older sessions may
   // have a scene that predates current normalizeScene rules. Use a
   // hash-based diff so we catch component-level migrations (e.g. punch
@@ -994,8 +1006,9 @@ export default function App() {
       }
       setVersions([]);
       setCurrentVersionId(null);
-      // No active design saved in this workspace — start fresh
-      setScene(normalizeScene(makeDefaultScene()));
+      // No active design saved in this workspace — start fresh (with the
+      // remembered SETUP defaults, hydrated pre-mount in main.jsx).
+      setScene(normalizeScene(seedSimSetup(makeDefaultScene())));
       setHistory([]);
       setFuture([]);
       setDesignName('Untitled');
@@ -1369,7 +1382,7 @@ export default function App() {
     if (!name || !name.trim()) return;
     const nameCheck = validateDesignName(name);
     if (!nameCheck.ok) { await alertDialog(nameCheck.reason, 'Invalid design name'); return; }
-    const fresh = makeDefaultScene();
+    const fresh = seedSimSetup(makeDefaultScene());
     setScene(fresh);
     setHistory([]);
     setFuture([]);
@@ -1391,7 +1404,7 @@ export default function App() {
     if (!name || !name.trim()) return;
     const nameCheck = validateDesignName(name);
     if (!nameCheck.ok) { await alertDialog(nameCheck.reason, 'Invalid design name'); return; }
-    const fresh = makeBlankScene();
+    const fresh = seedSimSetup(makeBlankScene());
     setScene(fresh);
     setHistory([]);
     setFuture([]);
@@ -5643,9 +5656,12 @@ export default function App() {
   // boolean simSetup.appendToActive (true -> 'design').
   const nativeAppendMode = () => {
     const m = scene.simSetup && scene.simSetup.appendMode;
-    if (m === 'project' || m === 'design') return m;
+    if (m === 'new' || m === 'project' || m === 'design') return m;
     if (scene.simSetup && scene.simSetup.appendToActive) return 'design';
-    return 'new';
+    // Post-normalize scenes always carry appendMode; this fallback (and the
+    // matching one in the SETUP panel) only guards un-normalized blobs.
+    // Default = 'project' (append to the active AEDT project).
+    return 'project';
   };
   // The naming + append-mode options threaded into every native (HFSS/Q2D)
   // generator, so a fresh project is named <workspace>_<design> and each
@@ -7799,9 +7815,9 @@ export default function App() {
               // legacy boolean appendToActive (true -> 'design').
               const appendModeVal = (() => {
                 const m = scene.simSetup && scene.simSetup.appendMode;
-                if (m === 'project' || m === 'design') return m;
+                if (m === 'new' || m === 'project' || m === 'design') return m;
                 if (scene.simSetup && scene.simSetup.appendToActive) return 'design';
-                return 'new';
+                return 'project'; // default: append to the active AEDT project
               })();
               // Analysis / sweep knobs (see normalizeScene for the contract
               // defaults — these ?? fallbacks only matter for scenes that
@@ -7814,15 +7830,24 @@ export default function App() {
               const sweepStopStr = (scene.simSetup && scene.simSetup.sweepStop) ?? '50';
               const sweepPointsStr = (scene.simSetup && scene.simSetup.sweepPoints) ?? '500';
               const sweepTypeStr = (scene.simSetup && scene.simSetup.sweepType) ?? 'Interpolating';
-              const updateSim = (patch) => updateScene(prev => ({
-                ...prev,
-                simSetup: {
-                  fnominal: '4', padXNeg: '50', padXPos: '50', padYNeg: '50', padYPos: '50',
-                  solveFreq: '', maxPasses: '12', maxDeltaS: '0.02',
-                  sweepEnabled: true, sweepStart: '0.1', sweepStop: '50', sweepPoints: '500', sweepType: 'Interpolating',
-                  ...(prev.simSetup || {}), ...patch,
-                },
-              }));
+              const updateSim = (patch) => {
+                updateScene(prev => ({
+                  ...prev,
+                  simSetup: {
+                    fnominal: '4', padXNeg: '50', padXPos: '50', padYNeg: '50', padYPos: '50',
+                    solveFreq: '', maxPasses: '12', maxDeltaS: '0.02',
+                    sweepEnabled: true, sweepStart: '0.1', sweepStop: '50', sweepPoints: '500', sweepType: 'Interpolating',
+                    ...(prev.simSetup || {}), ...patch,
+                  },
+                }));
+                // Layered persistence (setupDefaults.js): every deliberate
+                // SETUP edit becomes the app-wide default that seeds FUTURE
+                // designs. Outside the updater (updateScene updaters must
+                // stay pure — StrictMode double-invokes them); merging the
+                // current render's simSetup + patch matches what the
+                // updater writes, since this panel is the sole writer.
+                saveSetupDefaults({ ...(scene.simSetup || {}), ...patch });
+              };
               const PadField = ({ label, value, field }) => (
                 <div className="flex items-center gap-2">
                   <label className="text-[10px] text-slate-400 w-12 text-right">{label}</label>
@@ -7971,7 +7996,7 @@ export default function App() {
                     {[
                       { v: 'new', label: 'New project',
                         hint: `A fresh project named "${projectNameForExport()}" with a new design + Setup1 and the sweep above.` },
-                      { v: 'project', label: 'Append to active project',
+                      { v: 'project', label: 'Append to active project (default)',
                         hint: 'Add a new design (with its own Setup1 + sweep) to the project currently open in HFSS. No new project is created.' },
                       { v: 'design', label: 'Append to active design',
                         hint: 'Attach only the geometry to whatever design is open in HFSS — existing setups, sweeps, and excitations are kept untouched.' },

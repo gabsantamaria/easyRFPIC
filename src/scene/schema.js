@@ -558,6 +558,15 @@ export function normalizeScene(s) {
     airPad: '',
     ...(s.simSetup || {}),
   };
+  // HFSS/Q2D export target ('new' | 'project' | 'design') — the DEFAULT is
+  // 'project' (append the generated design to the ACTIVE AEDT project).
+  // Migration order matters: an explicit saved appendMode wins; else the
+  // LEGACY boolean appendToActive:true maps to 'design' (must be checked
+  // BEFORE defaulting, or an unconditional 'project' seed would shadow it);
+  // else 'project'. Deterministic — safe for the scenesEqual contract.
+  if (simSetup.appendMode !== 'new' && simSetup.appendMode !== 'project' && simSetup.appendMode !== 'design') {
+    simSetup.appendMode = simSetup.appendToActive ? 'design' : 'project';
+  }
 
   return {
     params,
