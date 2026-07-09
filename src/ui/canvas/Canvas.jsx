@@ -1120,6 +1120,37 @@ function EditableSnapDims({ svgRef, viewport, snaps, solved, transformInstances,
 // resolved world point per vertex spec (resolvePolylineVertices), computed by
 // the caller so this matches the on-canvas vertex handles exactly. Arc/snap
 // vertices have no dx/dy and are skipped. Mounted with key=comp id.
+// Imported-GDS dim budget: a complex imported shape can carry thousands
+// of vertices — rendering a Δx/Δy field pair + arrows per segment buried
+// the canvas and froze the UI. For shapes with gdsSrc provenance, dims
+// render ONLY when at most this many segments are visible in the current
+// zoom window; more → none at all (zoom in to edit). Non-imported shapes
+// (hand-drawn, a handful of vertices) are untouched.
+export const GDS_DIMS_MAX_VISIBLE = 10;
+
+// Pure helper (exported for tests): which rel-segment indices of `specs`
+// are visible through `rect` (screen px, padded), given `toPx(wx, wy)`.
+// Returns null as soon as MORE than `maxCount` are visible — the caller
+// renders nothing in that case.
+export function gdsVisibleDimSegments(specs, verts, toPx, rect, maxCount = GDS_DIMS_MAX_VISIBLE, pad = 30) {
+  const vis = new Set();
+  const L = rect.left - pad, T = rect.top - pad, Rt = rect.right + pad, Bm = rect.bottom + pad;
+  for (let i = 1; i < specs.length; i++) {
+    const v = specs[i];
+    if (!v || (v.kind && v.kind !== 'rel')) continue;
+    const a = verts[i - 1], b = verts[i];
+    if (!a || !b || !a.every(Number.isFinite) || !b.every(Number.isFinite)) continue;
+    const A = toPx(a[0], a[1]), B = toPx(b[0], b[1]);
+    const minX = Math.min(A.x, B.x), maxX = Math.max(A.x, B.x);
+    const minY = Math.min(A.y, B.y), maxY = Math.max(A.y, B.y);
+    if (maxX >= L && minX <= Rt && maxY >= T && minY <= Bm) {
+      vis.add(i);
+      if (vis.size > maxCount) return null;
+    }
+  }
+  return vis;
+}
+
 function EditablePolyDims({ svgRef, viewport, cSel, verts, params, updateScene, commitExpr }) {
   const [, bump] = useState(0);
   useEffect(() => {
@@ -1144,6 +1175,17 @@ function EditablePolyDims({ svgRef, viewport, cSel, verts, params, updateScene, 
   const specs = cSel.vertices || [];
   const paramNames = Object.keys(params || {});
   const tagStyle = { fontSize: '9px', fontWeight: 700, fontFamily: 'monospace', color: '#94a3b8' };
+
+  // Imported GDS shape: cheap counting pass FIRST (math only, no JSX).
+  // More than GDS_DIMS_MAX_VISIBLE segments in the current view → render
+  // NO dims (zoom in to edit); otherwise render only the visible ones —
+  // building portal fields for thousands of off-screen segments is what
+  // froze the canvas on complex imports.
+  let visIdx = null;
+  if (cSel.gdsSrc) {
+    visIdx = gdsVisibleDimSegments(specs, verts, px, r);
+    if (visIdx === null) return null; // over budget at this zoom
+  }
 
   const updateVertex = (i, patch) => {
     updateScene((prev) => ({
@@ -1173,6 +1215,7 @@ function EditablePolyDims({ svgRef, viewport, cSel, verts, params, updateScene, 
   const arrows = []; // SVG dimension lines + arrowheads (screen px)
   const groups = []; // HTML editable Δx / Δy field groups
   for (let i = 1; i < specs.length; i++) {
+    if (visIdx && !visIdx.has(i)) continue; // GDS import: off-screen segment
     const v = specs[i];
     if (!v || (v.kind && v.kind !== 'rel')) continue; // only rel steps carry dx/dy
     const a = verts[i - 1], b = verts[i];
@@ -6585,10 +6628,18 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         const verts = resolvePolylineVertices(cEff, solvedCompById, paramValues, transformInstances);
         const specs = cEff.vertices || [];
         const hs = screen(4); // half-size of the square handle (~8 px)
+        // Imported GDS shapes can carry thousands of vertices — cull the
+        // handles to the current view (same perf rationale as the dims
+        // budget in EditablePolyDims; handles have no count gate since
+        // the visible ones are still needed for editing).
+        const vxL = viewport.x - viewport.w / 2 - hs * 4, vxR = viewport.x + viewport.w / 2 + hs * 4;
+        const vyB = viewport.y - viewport.h / 2 - hs * 4, vyT = viewport.y + viewport.h / 2 + hs * 4;
+        const cullOffscreen = !!cSel.gdsSrc;
         return (
           <g key={`vtx-handles-${cSel.id}`}>
             {verts.map(([vx, vy], i) => {
               if (!Number.isFinite(vx) || !Number.isFinite(vy)) return null;
+              if (cullOffscreen && (vx < vxL || vx > vxR || vy < vyB || vy > vyT)) return null;
               const spec = specs[i];
               const block = vertexDragBlock(spec);
               const isDragging = vertexDrag && vertexDrag.compId === cSel.id && vertexDrag.idx === i;

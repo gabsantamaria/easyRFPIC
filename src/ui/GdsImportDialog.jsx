@@ -14,7 +14,7 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { topCellsOf, flattenGDSCell, gdsLayerStats } from '../gds/gds-import.js';
 
-export default function GdsImportDialog({ fileName, parsed, stack, onImport, onClose }) {
+export default function GdsImportDialog({ fileName, parsed, stack, alignCount = 0, onImport, onClose }) {
   // Escape closes — CAPTURE + stopPropagation so the app's global keydown
   // handlers (Esc = clear selection, Delete = delete components!) can't
   // fire behind the modal (same pattern as SettingsPanel/ModalDialog).
@@ -144,10 +144,18 @@ export default function GdsImportDialog({ fileName, parsed, stack, onImport, onC
             </tbody>
           </table>
 
-          <label className="flex items-center gap-2 text-[11px] text-slate-300 cursor-pointer">
-            <input type="checkbox" checked={keepCoords} onChange={(e) => setKeepCoords(e.target.checked)} />
-            Keep original GDS coordinates (otherwise the import is centered at the drop point)
-          </label>
+          {alignCount > 0 ? (
+            <p className="text-[10px] text-cyan-300 leading-snug">
+              {alignCount} shape{alignCount === 1 ? '' : 's'} from this file {alignCount === 1 ? 'is' : 'are'} already
+              in the scene — this import will ALIGN to them so all original GDS
+              distances are preserved (drop point ignored).
+            </p>
+          ) : (
+            <label className="flex items-center gap-2 text-[11px] text-slate-300 cursor-pointer">
+              <input type="checkbox" checked={keepCoords} onChange={(e) => setKeepCoords(e.target.checked)} />
+              Keep original GDS coordinates (otherwise the import is centered at the drop point)
+            </label>
+          )}
 
           {totalVerts > 50000 && (
             <p className="text-[10px] text-amber-400 leading-snug">

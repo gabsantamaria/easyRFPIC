@@ -388,21 +388,35 @@ const fmtUm = (v) => {
 // gdsShapesToComponents: apply the dialog mapping and build components.
 //
 // opts:
-//   prefix     — id prefix (suggestGdsPrefix)
-//   file       — source filename (provenance)
-//   at         — {x, y} world µm: center the imported bbox there.
-//                Omit/null → keep original GDS coordinates.
+//   prefix       — id prefix (suggestGdsPrefix)
+//   file         — source filename (provenance)
+//   at           — {x, y} world µm: center the imported bbox there.
+//                  Omit/null → keep original GDS coordinates.
+//   forcedOffset — {dx, dy} world µm: EXACT translation to apply to every
+//                  shape (wins over `at`). Used to REGISTER a re-import of
+//                  the same file with shapes already in the scene: every
+//                  component records its ORIGINAL GDS root in gdsSrc
+//                  (v0x/v0y), so `existing.cx − existing.gdsSrc.v0x` is
+//                  the live offset of the earlier import — applying it
+//                  here keeps ALL original inter-shape distances exact
+//                  across imports (per-import recentering used to stack
+//                  different layer subsets of one file on top of each
+//                  other — a real shipped bug).
 export function gdsShapesToComponents(shapes, mapping, opts = {}) {
-  const { prefix = 'gds1', file = '', at = null } = opts;
+  const { prefix = 'gds1', file = '', at = null, forcedOffset = null } = opts;
   const warnings = [];
   const included = shapes.filter(s => {
     const m = mapping[`${s.layer}/${s.datatype}`];
     return m && m.include !== false;
   });
 
-  // Optional recentering: overall bbox center → `at`.
+  // One translation for EVERY shape (relative geometry always exact):
+  // forced registration offset first, else recentering on `at`.
   let dx = 0, dy = 0;
-  if (at && included.length > 0) {
+  if (forcedOffset && Number.isFinite(forcedOffset.dx) && Number.isFinite(forcedOffset.dy)) {
+    dx = forcedOffset.dx;
+    dy = forcedOffset.dy;
+  } else if (at && included.length > 0) {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const s of included) {
       for (const [x, y] of s.pts) {
@@ -457,7 +471,15 @@ export function gdsShapesToComponents(shapes, mapping, opts = {}) {
       cutouts: [], transforms: [],
       vertices,
       label: `${prefix} L${s.layer}/${s.datatype}`,
-      gdsSrc: { file, cell: s.cell || '', layer: s.layer, datatype: s.datatype },
+      // v0x/v0y = this shape's root in ORIGINAL GDS coordinates (before
+      // dx/dy). `cx − v0x` therefore always yields the live offset of an
+      // import — a later re-import of the same file uses it as
+      // forcedOffset to land in exact registration (and it keeps
+      // tracking even after the user drags the earlier import around).
+      gdsSrc: {
+        file, cell: s.cell || '', layer: s.layer, datatype: s.datatype,
+        v0x: dedup[0][0] - dx, v0y: dedup[0][1] - dy,
+      },
       ...targetFields(m.target),
     };
     if (isPath) {

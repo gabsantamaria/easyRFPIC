@@ -917,10 +917,34 @@ centered at the click point unless "keep original GDS coordinates").
   slate on canvas (FIRST in Canvas's pass1 layer list — under real
   geometry), solves + snaps, but is skipped by every physical export
   (HFSS included) until assigned. Provenance rides on the component as
-  `gdsSrc: { file, cell, layer, datatype }` (normalizeScene passthrough);
-  the Inspector "GDS import" block re-assigns the canvas layer per shape
-  and offers "apply to all N shapes from L<layer>/<dt>" (matched on
-  gdsSrc), so `<undefined>` layers can be mapped later in bulk.
+  `gdsSrc: { file, cell, layer, datatype, v0x, v0y }` (normalizeScene
+  passthrough); the Inspector "GDS import" block re-assigns the canvas
+  layer per shape and offers "apply to all N shapes from L<layer>/<dt>"
+  (matched on gdsSrc), so `<undefined>` layers can be mapped later in
+  bulk.
+- **CROSS-IMPORT REGISTRATION** (the "shapes overlap" fix): within one
+  import the geometry is exact by construction (one shared translation),
+  but each import used to recenter ITS OWN included-bbox at the click
+  point — importing layer subset A, then subset B of the SAME file
+  stacked the two groups on top of each other. Fix: `gdsSrc.v0x/v0y`
+  store each shape's root in ORIGINAL GDS coordinates, so
+  `existing.cx − v0x` is the live per-file translation (drag-tracking);
+  `findGdsRegistration(fileName)` (PhotonicLayout, prefers UNSNAPPED
+  shapes — a snap child's raw cx/cy is solver-stale) feeds it to
+  `gdsShapesToComponents` as `forcedOffset`, which WINS over `at` and
+  keepCoords. The dialog shows an "will ALIGN to N existing shapes" note
+  (hiding the keep-coords checkbox) and the post-import alert states the
+  alignment. Guard: tests/gds-import.test.js "cross-import registration".
+- **Dims budget on imported shapes** (the "label flood" fix): a selected
+  path kind renders per-segment Δx/Δy editable dims (EditablePolyDims) —
+  thousands of vertices buried the canvas and froze the UI (portal DOM
+  inputs per segment). For components WITH gdsSrc: a cheap counting pass
+  (`gdsVisibleDimSegments`, exported) runs first; if MORE than
+  `GDS_DIMS_MAX_VISIBLE` (10) rel segments are visible in the current
+  zoom window, NO dims render (zoom in to edit); at ≤10 only the VISIBLE
+  segments render fields. Vertex handles are likewise viewport-culled
+  for gdsSrc shapes (no count gate — visible ones stay editable).
+  Hand-drawn polylines/polyshapes are untouched.
 - **Adversarial-review hardening** (all probe-confirmed, fixed
   pre-commit): PATH widths scale with the composed SREF/AREF
   magnification (`sqrt(|det M|)`); NEGATIVE GDS widths are ABSOLUTE

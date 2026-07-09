@@ -3132,16 +3132,36 @@ export default function App() {
     }
     setGdsImport({ fileName: file.name, parsed, at: at || null });
   };
+  // Registration anchor for RE-imports of the same file: a component from
+  // an earlier import of `fileName` whose current position still yields
+  // the live offset (raw cx/cy is stale on snap CHILDREN — the solver
+  // overwrites it — so prefer unsnapped shapes). `cx − gdsSrc.v0x` (the
+  // stored ORIGINAL GDS root) is the exact translation that earlier
+  // import sits at, drags included.
+  const findGdsRegistration = (fileName) => {
+    const candidates = scene.components.filter(c => c.gdsSrc
+      && c.gdsSrc.file === fileName
+      && Number.isFinite(c.gdsSrc.v0x) && Number.isFinite(c.gdsSrc.v0y));
+    if (candidates.length === 0) return null;
+    const anchor = candidates.find(c => !scene.snaps.some(s => s.to.compId === c.id)) || candidates[0];
+    return { dx: anchor.cx - anchor.gdsSrc.v0x, dy: anchor.cy - anchor.gdsSrc.v0y, count: candidates.length };
+  };
   const applyGdsImport = async ({ shapes, mapping, keepCoords }) => {
     const imp = gdsImport;
     setGdsImport(null);
     if (!imp) return;
     const prefix = suggestGdsPrefix(scene.components);
+    // Same-file shapes already in the scene? ALIGN to them — the exact
+    // per-file translation wins over the drop point AND keepCoords, so
+    // original inter-shape distances hold across split imports (each
+    // import recentering its OWN layer subset used to stack the subsets
+    // on top of each other — a real shipped bug).
+    const reg = findGdsRegistration(imp.fileName);
     const at = keepCoords
       ? null
       : (imp.at || { x: viewport.x, y: viewport.y }); // drop point, else viewport center
     const { components: newComps, warnings } = gdsShapesToComponents(shapes, mapping, {
-      prefix, file: imp.fileName, at,
+      prefix, file: imp.fileName, at, forcedOffset: reg ? { dx: reg.dx, dy: reg.dy } : null,
     });
     if (newComps.length === 0) {
       await alertDialog('Nothing to import — every layer was unchecked or every shape was degenerate.', 'GDS import');
@@ -3152,9 +3172,10 @@ export default function App() {
     setSelection({ ids: new Set(newComps.map(c => c.id)), primary: newComps[newComps.length - 1].id });
     const undef = newComps.filter(c => c.layer === 'gdsundef').length;
     const notes = warnings.map(w => '\n⚠ ' + w.msg).join('');
-    if (undef > 0 || notes) {
+    if (undef > 0 || notes || reg) {
       await alertDialog(
         `Imported ${newComps.length} shape(s) from ${imp.fileName}.`
+        + (reg ? `\nAligned to the ${reg.count} shape(s) already imported from this file — original GDS distances preserved (drop point ignored).` : '')
         + (undef > 0 ? `\n${undef} shape(s) are <undefined> — they render on the canvas but are SKIPPED by every physical export (HFSS included) until you assign a layer in the Inspector.` : '')
         + notes,
         'GDS import');
@@ -9615,6 +9636,7 @@ export default function App() {
             fileName={gdsImport.fileName}
             parsed={gdsImport.parsed}
             stack={scene.stack}
+            alignCount={findGdsRegistration(gdsImport.fileName)?.count || 0}
             onImport={applyGdsImport}
             onClose={() => setGdsImport(null)}
           />

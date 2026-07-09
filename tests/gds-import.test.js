@@ -382,6 +382,100 @@ describe('gdsShapesToComponents', () => {
   });
 });
 
+describe('cross-import registration (overlap fix)', () => {
+  // The shipped bug: importing layer subset A (recentered at the click
+  // point) and later subset B of the SAME file (recentered again) stacked
+  // the two groups on top of each other — each import centered its OWN
+  // bbox. Fix: gdsSrc stores the ORIGINAL GDS root (v0x/v0y), and a
+  // re-import applies forcedOffset = existing.cx − existing.gdsSrc.v0x.
+  const shapes = [
+    { kind: 'boundary', layer: 1, datatype: 0, cell: 'T', widthUm: 0, pts: [[0, 0], [10, 0], [10, 5], [0, 5]] },
+    { kind: 'boundary', layer: 2, datatype: 0, cell: 'T', widthUm: 0, pts: [[100, 40], [110, 40], [110, 45], [100, 45]] },
+  ];
+
+  it('stores the original GDS root in gdsSrc (v0x/v0y) net of any recentering', () => {
+    const { components } = gdsShapesToComponents(shapes, {
+      '1/0': { include: true, target: 'undef' }, '2/0': { include: true, target: 'undef' },
+    }, { prefix: 'g', at: { x: -500, y: 300 } });
+    for (const c of components) {
+      // cx − v0x must equal the ONE shared translation for every shape.
+      expect(c.cx - c.gdsSrc.v0x).toBeCloseTo(components[0].cx - components[0].gdsSrc.v0x, 9);
+      expect(c.cy - c.gdsSrc.v0y).toBeCloseTo(components[0].cy - components[0].gdsSrc.v0y, 9);
+    }
+    expect(components[0].gdsSrc.v0x).toBeCloseTo(0, 9);   // original coords
+    expect(components[1].gdsSrc.v0x).toBeCloseTo(100, 9);
+  });
+
+  it('forcedOffset beats `at` and re-imports land in EXACT registration', () => {
+    // First import: only layer 1, recentered at (0, 0).
+    const A = gdsShapesToComponents(shapes, {
+      '1/0': { include: true, target: 'undef' }, '2/0': { include: false, target: 'undef' },
+    }, { prefix: 'a', at: { x: 0, y: 0 } }).components;
+    // Second import: only layer 2, DIFFERENT click point — but aligned via
+    // the registration offset recovered from the existing components.
+    const reg = { dx: A[0].cx - A[0].gdsSrc.v0x, dy: A[0].cy - A[0].gdsSrc.v0y };
+    const B = gdsShapesToComponents(shapes, {
+      '1/0': { include: false, target: 'undef' }, '2/0': { include: true, target: 'undef' },
+    }, { prefix: 'b', at: { x: 999, y: -999 }, forcedOffset: reg }).components;
+    // Original delta between the two shapes' roots: (100, 40).
+    expect(B[0].cx - A[0].cx).toBeCloseTo(100, 9);
+    expect(B[0].cy - A[0].cy).toBeCloseTo(40, 9);
+  });
+
+  it('registration keeps tracking after the earlier import is DRAGGED', () => {
+    const A = gdsShapesToComponents(shapes, {
+      '1/0': { include: true, target: 'undef' }, '2/0': { include: false, target: 'undef' },
+    }, { prefix: 'a', at: { x: 0, y: 0 } }).components;
+    const dragged = { ...A[0], cx: A[0].cx + 77, cy: A[0].cy - 33 }; // user moved it
+    const reg = { dx: dragged.cx - dragged.gdsSrc.v0x, dy: dragged.cy - dragged.gdsSrc.v0y };
+    const B = gdsShapesToComponents(shapes, {
+      '1/0': { include: false, target: 'undef' }, '2/0': { include: true, target: 'undef' },
+    }, { prefix: 'b', forcedOffset: reg }).components;
+    expect(B[0].cx - dragged.cx).toBeCloseTo(100, 9);
+    expect(B[0].cy - dragged.cy).toBeCloseTo(40, 9);
+  });
+});
+
+describe('GDS dims budget (gdsVisibleDimSegments)', async () => {
+  const { gdsVisibleDimSegments, GDS_DIMS_MAX_VISIBLE } = await import('../src/ui/canvas/Canvas.jsx');
+  const rect = { left: 0, top: 0, right: 800, bottom: 600 };
+  const toPx = (wx, wy) => ({ x: wx, y: -wy }); // identity-ish for the test
+
+  const mkSpecs = (n) => Array.from({ length: n }, () => ({ kind: 'rel', dx: '1', dy: '0' }));
+
+  it('returns the visible-index set when at most N segments are in view', () => {
+    // 5 segments inside the rect, 20 far outside.
+    const verts = [];
+    for (let i = 0; i <= 5; i++) verts.push([i * 50, -50]);          // inside
+    for (let i = 0; i < 20; i++) verts.push([50000 + i * 50, -50]);  // way outside
+    const specs = mkSpecs(verts.length);
+    const vis = gdsVisibleDimSegments(specs, verts, toPx, rect);
+    expect(vis).not.toBeNull();
+    expect(vis.size).toBeLessThanOrEqual(GDS_DIMS_MAX_VISIBLE);
+    expect(vis.has(1)).toBe(true);   // early in-view segments
+    expect(vis.has(10)).toBe(false); // off-screen segment culled
+  });
+
+  it('returns null (render nothing) when MORE than N segments are visible', () => {
+    const verts = [];
+    for (let i = 0; i <= 30; i++) verts.push([i * 20, -50]); // 30 in-view segments
+    const specs = mkSpecs(verts.length);
+    expect(gdsVisibleDimSegments(specs, verts, toPx, rect)).toBeNull();
+    expect(GDS_DIMS_MAX_VISIBLE).toBe(10);
+  });
+
+  it('non-rel vertices never count against the budget', () => {
+    const verts = [];
+    for (let i = 0; i <= 30; i++) verts.push([i * 20, -50]);
+    const specs = mkSpecs(verts.length).map((s, i) => (i % 2 ? { kind: 'snap', compId: 'x', anchor: 'C' } : s));
+    // Half the segments are snap-kind (no dx/dy dims) — the rel ones in
+    // view are ~15, still over budget → null.
+    expect(gdsVisibleDimSegments(specs, verts, toPx, rect)).toBeNull();
+    // With a higher budget they fit.
+    expect(gdsVisibleDimSegments(specs, verts, toPx, rect, 20)).not.toBeNull();
+  });
+});
+
 describe('HFSS export integration', () => {
   // Imported L-shape assigned to the conductor + a rect snapped to its NE
   // frame anchor with a parametric gap; plus one UNASSIGNED shape.
