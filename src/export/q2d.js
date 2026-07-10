@@ -51,7 +51,7 @@
 // difference re-typed with *1um; mismatched/unstrippable expr pairs fall back
 // to the always-present numerics.
 
-import { simplifyExpr } from '../scene/expr-simplify.js';
+import { simplifyExpr, stripUnaryPlus } from '../scene/expr-simplify.js';
 
 // ASCII sanitizer for the emitted script. Common typographic chars map to
 // readable ASCII first (the emitted comments use em-dashes/arrows) so the
@@ -103,8 +103,8 @@ const posStr = (expr, numeric) => {
   const s = String(expr ?? '').trim();
   if (!s) return `${dec(numeric)}um`;
   const inner = innerOf(s); // "(X)" if the standalone quirk form, else null
-  if (inner) return `(${simplifyExpr(inner)})um`;
-  return s;
+  if (inner) return `(${stripUnaryPlus(simplifyExpr(inner))})um`;
+  return stripUnaryPlus(s); // syntactic-only backstop (AEDT rejects unary plus)
 };
 
 // Size field: (end - start). Compound context, so "(X)um" operands must be
@@ -122,8 +122,8 @@ const spanStr = (e0, e1, n0, n1) => {
   const s0 = String(e0 ?? '').trim(), s1 = String(e1 ?? '').trim();
   if (s0 && s1) {
     const i0 = innerOf(s0), i1 = innerOf(s1);
-    if (i0 && i1) return `(${simplifyExpr(`${i1} - ${i0}`)})*1um`;
-    if (!i0 && !i1) return `(${simplifyExpr(`(${s1}) - (${s0})`)})`;
+    if (i0 && i1) return `(${stripUnaryPlus(simplifyExpr(`${i1} - ${i0}`))})*1um`;
+    if (!i0 && !i1) return `(${stripUnaryPlus(simplifyExpr(`(${s1}) - (${s0})`))})`;
   }
   return `${dec(n1 - n0)}um`;
 };

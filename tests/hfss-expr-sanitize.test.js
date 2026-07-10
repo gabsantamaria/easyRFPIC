@@ -62,6 +62,36 @@ describe('hfssAngleDegExpr simplifies its unitless inner', () => {
     expect(hfssAngleDegExpr('60 + 30')).toBe('90deg');
     expect(hfssAngleDegExpr('rot1')).toBe('(rot1)*1deg');
   });
+  it('strips unary plus even when the never-expand gate bails (adversarial-review find)', () => {
+    // simplifyExpr('+rot/2') bails ('0.5*rot' is longer... now rescued by
+    // the unary-plus cruft rule, but the backstop must hold regardless).
+    expect(hasUnaryPlus(hfssAngleDegExpr('+rot/2'))).toBe(false);
+    expect(hasUnaryPlus(hfssAngleDegExpr('+(a1/b1/c1)'))).toBe(false);
+    expect(hasUnaryPlus(hfssAngleDegExpr('+rot-5'))).toBe(false);
+  });
+});
+
+describe('adversarial-review regressions', () => {
+  it('never-expand gate no longer preserves unary plus (cruft rule)', () => {
+    for (const e of ['+x/2', '+(w/2+g)', '+(a1/b1/c1)', '+rot-5']) {
+      const out = simplifyExpr(e);
+      expect(hasUnaryPlus(out)).toBe(false);
+      const pv = { x: 3, w: 4, g: 5, a1: 2, b1: 3, c1: 5, rot: 7 };
+      expect(evalExpr(out, pv)).toBeCloseTo(evalExpr(e, pv), 9);
+    }
+  });
+  it('tiny coefficients survive (no silent fold-to-zero under the probe floor)', () => {
+    const out = simplifyExpr('1.5e-12*LL');
+    expect(evalExpr(out, { LL: 5 })).toBeCloseTo(7.5e-12, 20);
+    const out2 = simplifyExpr('(a - a + 1.5e-12) * X');
+    expect(evalExpr(out2, { a: 3, X: 2 })).toBeCloseTo(3e-12, 20);
+  });
+  it('sci-notation rescued by the cruft rule into a safe form', () => {
+    const out = simplifyExpr('1e-3*LL');
+    expect(evalExpr(out, { LL: 5 })).toBeCloseTo(5e-3, 12);
+    // Either plain decimal or e-notation is fine — but never bail-then-
+    // spaceHyphens-split (checked end-to-end below).
+  });
 });
 
 describe('generateHfssNative emits AEDT-parseable expressions', () => {
@@ -150,5 +180,50 @@ describe('generateHfssNative emits AEDT-parseable expressions', () => {
     expect(m).toBeTruthy();
     expect(hasUnaryPlus(m[1])).toBe(false);
     expect(evalExpr(m[1].replace(/um$/, ''), {})).toBe(12);
+  });
+
+  it('set_var: never-expand-gate bail path still drops unary plus (review find)', () => {
+    const scene = buildScene();
+    scene.params.badp = { expr: '+(w1/2/g1)', unit: '' };
+    const pv = resolveParams(scene.params).values;
+    const script = generateHfssNative(scene, pv, {});
+    const m = script.match(/set_var\("badp", "([^"]+)"\)/);
+    expect(m).toBeTruthy();
+    expect(hasUnaryPlus(m[1])).toBe(false);
+  });
+
+  it('sci-notation survives the transform-chain Move (spaceHyphens must not split e-3)', () => {
+    const scene = buildScene();
+    scene.components.push({
+      transforms: [{ id: 't1', kind: 'displace', enabled: true, dx: '1e-3*L1', dy: '0' }],
+      id: 'sci', kind: 'rect', layer: 'electrode',
+      cx: 500, cy: 500, w: '10', h: '10', cutouts: [],
+    });
+    const pv = resolveParams(scene.params).values;
+    const script = generateHfssNative(scene, pv, {});
+    expect(script).not.toMatch(/\d[eE]\s+-\s+\d/); // the '1e - 3' corruption
+    // The cruft rule rescues '1e-3*L1' into '0.001*L1' (or keeps a glued
+    // e-form) — either way the displace Move must evaluate to 1e-3*200.
+    const line = script.split('\n').find(l =>
+      l.includes('TranslateVectorX') && (l.includes('0.001*L1') || l.includes('1e-3*L1')));
+    expect(line).toBeTruthy();
+    const expr = line.match(/TranslateVectorX:=",\s*"([^"]+)"/)[1];
+    expect(evalExpr(expr.replace(/(\d|\))\s*um\b/g, '$1'), pv)).toBeCloseTo(0.2, 9); // 1e-3*200
+  });
+
+  it('transform rotate: RotateAngle carries no unary plus (was raw ascii(t.angle))', () => {
+    const scene = buildScene();
+    scene.params.rot_a = { expr: '45', unit: '' };
+    scene.components.push({
+      transforms: [{ id: 't1', kind: 'rotate', enabled: true, angle: '+(rot_a)', pivot: 'origin' }],
+      id: 'spun', kind: 'rect', layer: 'electrode',
+      cx: 600, cy: 0, w: '10', h: '10', cutouts: [],
+    });
+    const pv = resolveParams(scene.params).values;
+    const script = generateHfssNative(scene, pv, {});
+    const rot = script.split('\n').filter(l => l.includes('RotateAngle'));
+    expect(rot.length).toBeGreaterThan(0);
+    for (const l of rot) expect(hasUnaryPlus(l.split('RotateAngle:=')[1])).toBe(false);
+    expect(script).toContain('rot_a'); // still parametric
   });
 });

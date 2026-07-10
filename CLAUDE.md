@@ -1246,11 +1246,24 @@ inside `generateHfssNative`): `degToRad` (canonical home now
 unary plus at parse, folds `cos(180*pi/180)`, collapses `((0)) + (0)`
 noise into compact linear forms; SELF-GUARDED — bails to its input on
 any doubt, so um-bearing compounds pass through untouched) →
-`spaceHyphens` → `stripUnaryPlus` (syntactic backstop for bail paths; a
-`+` after start/`(`/`,`/operator is unary and value-free to remove).
+`spaceHyphens` (SCI-NOTATION-AWARE: the exponent hyphen of `1e-3` stays
+glued — spacing it made AEDT read ident `1e` minus 3; fired on every
+simplify-bail path, an adversarial-review find) → `stripUnaryPlus`
+(exported from expr-simplify.js; syntactic backstop for bail paths; a
+`+` after start/`(`/`,`/operator is unary and value-free to remove —
+REQUIRED because simplifyExpr's never-expand length gate can hand back
+the original WITH the plus, e.g. `+x/2`). The simplifier itself: unary
+plus and e-notation count as `hasCruft` (so the clean re-emission wins
+the length race), `fmtNum` keeps |x|<1e-6 in exponential form and the
+term-drop epsilon is 1e-14 — the old 1e-9 cut silently folded
+`1.5e-12*L`-style kinetic-inductance coefficients to ZERO, under the
+probe guard's absolute-floor tolerance (all adversarial-review finds).
 Choke points: `exprWithUm` (all rect/box/via/bridge positions + sizes),
-`formatVarValue` (set_var; simplify only, NO degToRad), `hfssAngleDegExpr`
-(inner simplify only — the inner is unitless by the deg² contract),
+`formatVarValue` (set_var; simplify + stripUnaryPlus, NO degToRad),
+`hfssAngleDegExpr` (inner simplify + stripUnaryPlus — unitless by the
+deg² contract), the transform-chain `rotate` angleExpr (simplify +
+stripUnaryPlus, NO degToRad — angle-typed), q2d.js `posStr`/`spanStr`
+(same backstop),
 `pushPt`/arc-record/`quadSheet` (polyline/polyshape point writes — the
 snap-vertex compositions use RAW parametricPos strings, so the pieces
 are sanitized via `sanE` AND the whole point again at the write, where a

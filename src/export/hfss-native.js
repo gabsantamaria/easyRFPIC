@@ -23,7 +23,7 @@ import { shapeInstanceToRing } from '../geometry/rings.js';
 import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/racetrack.js';
 import { instanceChainOffsetExpr, chainOwnerForInstance, instanceFrameCenter } from '../scene/instance-positions.js';
 import { renameIdentInScene } from '../scene/rename-ident.js';
-import { simplifyExpr, degToRad } from '../scene/expr-simplify.js';
+import { simplifyExpr, degToRad, stripUnaryPlus } from '../scene/expr-simplify.js';
 import { twoLineOutputVariables } from '../scene/twoLine.js';
 import { generateQ3DCombinedBlock } from './q3d.js';
 import {
@@ -101,6 +101,7 @@ export function hfssAngleDegExpr(expr) {
   let s = String(expr ?? '0').trim();
   const simp = simplifyExpr(s);
   if (typeof simp === 'string' && simp.trim() !== '') s = simp.trim();
+  s = stripUnaryPlus(s); // backstop: simplify's never-expand gate may bail
   if (/^-?\d+(?:\.\d+)?$/.test(s)) return `${s}deg`;
   return `(${s})*1deg`;
 }
@@ -1180,7 +1181,15 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   // therefore evaluates to 0 and shifts geometry by tens of µm without
   // any error message. Insert spaces around any '-' that sits between
   // two identifier characters before handing the string to HFSS.
-  const spaceHyphens = (s) => String(s).replace(/(\w)-(\w)/g, '$1 - $2');
+  // Ident-to-ident hyphens get spaced so HFSS doesn't lex "cap_s-feed_w"
+  // as ONE unknown identifier (silent 0). SCI-NOTATION EXCEPTION: the
+  // exponent hyphen of "1e-3" must stay glued — "1e - 3" makes AEDT read
+  // an unknown ident '1e' minus 3 (and evalExpr scores it 0). A hyphen is
+  // an exponent iff it sits between [eE] (itself preceded by a digit) and
+  // a digit. (An identifier literally ending in digit+e, e.g. "x1e-3",
+  // also matches and stays unspaced — pathological naming, accepted.)
+  const spaceHyphens = (s) => String(s).replace(/(\w)-(\w)/g, (m, a, b, off, str) =>
+    (/[eE]/.test(a) && /\d/.test(str[off - 1] ?? '') && /\d/.test(b)) ? m : `${a} - ${b}`);
   // ── AEDT expression sanitizer (THE emission choke point) ────────────
   // AEDT's expression parser REJECTS unary plus: "(+(x))*sin(a)" fails with
   // "Expected a value ... Instead found this: +(...)" — a real import
@@ -1203,20 +1212,6 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   //                  simplifier's own output is already spaced)
   // Cached — position expressions repeat heavily across sheet / move /
   // boundary emission, and the probe guard costs ~10 evalExpr runs each.
-  // Backstop for simplifyExpr's bail path (um-bearing compounds, unknown
-  // tokens): unary plus is a NO-OP in every parser that feeds us, so
-  // stripping it textually is always value-preserving. A '+' is unary iff
-  // it follows an opening context (start, '(', ',', or another operator)
-  // — a binary '+' is always preceded by an operand (\w or ')'), and
-  // scientific-notation 'e+5' is preceded by 'e', outside the class.
-  const stripUnaryPlus = (s) => {
-    let out = String(s), prev;
-    do {
-      prev = out;
-      out = out.replace(/(^|[(,*/+\-])\s*\+(?=\s*[A-Za-z0-9_(.])/g, '$1');
-    } while (out !== prev);
-    return out;
-  };
   const _sanCache = new Map();
   const sanitizeLenExpr = (e) => {
     const key = String(e ?? '0');
@@ -1331,7 +1326,7 @@ export function generateHfssNative(scene, paramValues, options = {}) {
     // simplifyExpr (NOT degToRad — a param's own expr keeps its units
     // untouched) drops AEDT-fatal unary plus and folds noise; the
     // self-guard bails to the raw expr on anything it can't prove.
-    const expr = spaceHyphens(simplifyExpr(ascii(resolveSynthetics(String(p.expr ?? '')))));
+    const expr = stripUnaryPlus(spaceHyphens(simplifyExpr(ascii(resolveSynthetics(String(p.expr ?? ''))))));
     const unit = unitFor(p.unit);
     const isBareNumber = /^[\d\s+\-*/.()]+$/.test(expr);
     return expr + (unit && isBareNumber ? unit : '');
@@ -4406,7 +4401,9 @@ except Exception as e:
         const angleNum = evalExpr(t.angle ?? '0', paramValues);
         if (!Number.isFinite(angleNum)) continue;
         const pivot = t.pivot || 'C';
-        const angleExpr = (typeof t.angle === 'string' && /[A-Za-z_]/.test(t.angle)) ? ascii(t.angle) : `${angleNum.toFixed(4)}deg`;
+        const angleExpr = (typeof t.angle === 'string' && /[A-Za-z_]/.test(t.angle))
+          ? stripUnaryPlus(simplifyExpr(ascii(t.angle))) // angle-typed: NO degToRad
+          : `${angleNum.toFixed(4)}deg`;
         if (pivot === 'origin') {
           // World-origin rotation: a single Rotate call. Both position
           // and orientation get rotated.

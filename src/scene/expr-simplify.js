@@ -48,6 +48,25 @@ export const degToRad = (s) => String(s ?? '')
   .replace(/\*\s*1deg\b/g, '*(pi/180)')
   .replace(/(?<![A-Za-z0-9_.])(\d+(?:\.\d+)?)\s*deg\b/g, '($1*pi/180)');
 
+// ── Syntactic unary-plus stripper ───────────────────────────────────────
+// AEDT's expression parser hard-rejects unary plus ("(+(x))" -> "Expected a
+// value ... Instead found this: +(...)"), while evalExpr accepts it — so it
+// must never reach an emitted script. A '+' is unary iff it follows an
+// opening context (start, '(', ',', or another operator); a binary '+' is
+// always preceded by an operand (\w or ')'), and scientific-notation 'e+5'
+// is preceded by 'e', outside the class. Purely syntactic and always
+// value-preserving — safe to run OUTSIDE the numeric self-guard (which is
+// exactly why the exporters use it as the backstop for simplifyExpr's
+// bail path).
+export const stripUnaryPlus = (s) => {
+  let out = String(s), prev;
+  do {
+    prev = out;
+    out = out.replace(/(^|[(,*/+\-])\s*\+(?=\s*[A-Za-z0-9_(.])/g, '$1');
+  } while (out !== prev);
+  return out;
+};
+
 // ── Numeric formatting ──────────────────────────────────────────────────
 // Same rounding/trim contract as q2d.js `dec` so simplified constants read
 // identically to the baked numerics elsewhere (round ~1e-9, no float noise,
@@ -55,6 +74,14 @@ export const degToRad = (s) => String(s ?? '')
 const NUM_EPS = 1e-9;
 function fmtNum(x) {
   if (!Number.isFinite(x)) return '0';
+  // TINY nonzero magnitudes (|x| < 1e-6) keep an exponential form — the
+  // toFixed(9) path would round e.g. a 1.5e-12 kinetic-inductance-style
+  // coefficient to '0', a value change the probe guard can NOT catch (its
+  // tolerance has an absolute floor of 1e-7). The exponent hyphen is safe
+  // downstream: spaceHyphens is sci-notation-aware.
+  if (x !== 0 && Math.abs(x) < 1e-6) {
+    return x.toExponential(9).replace(/\.?0+e/, 'e');
+  }
   // Snap values that are within rounding noise of an integer (float noise like
   // 106.30499999999998 vs 106.305 is handled by the toFixed(9) below; this
   // extra snap catches e.g. 9.999999999 -> 10).
@@ -231,10 +258,14 @@ function makeLinearizer() {
 
   const emptyForm = () => ({ c: 0, terms: new Map() });
   const constForm = (v) => ({ c: v, terms: new Map() });
-  // A form that is numerically zero: no surviving atom terms and a ~0 constant.
+  // A form that is numerically zero: no surviving atom terms and a ~0
+  // constant. Threshold 1e-14 (NOT NUM_EPS): above trig-fold float noise
+  // (~1e-16) but below legitimate tiny engineering constants — with the
+  // old 1e-9 cut, "(a - a + 1.5e-12) * X" was killed as a zero product, a
+  // value change under the probe guard's absolute-floor tolerance.
   const isZeroForm = (f) => {
-    if (Math.abs(f.c) > NUM_EPS) return false;
-    for (const v of f.terms.values()) if (Math.abs(v) > NUM_EPS) return false;
+    if (Math.abs(f.c) > 1e-14) return false;
+    for (const v of f.terms.values()) if (Math.abs(v) > 1e-14) return false;
     return true;
   };
 
@@ -420,7 +451,11 @@ function foldConst(node) {
 function emitLinForm(form) {
   const keys = [...form.terms.keys()].filter((k) => {
     const coeff = form.terms.get(k);
-    return Math.abs(coeff) > NUM_EPS; // drop atoms that rounded to zero
+    // Drop threshold 1e-14: kills trig-fold float noise (sin(pi) ~ 1.2e-16)
+    // but PRESERVES legitimate tiny coefficients (1.5e-12*L) that the old
+    // NUM_EPS cut silently zeroed — a value change under the probe guard's
+    // absolute-floor tolerance.
+    return Math.abs(coeff) > 1e-14;
   });
   // Split bare-var atoms from opaque ones; opaque keys contain non-ident chars.
   const isBareVar = (k) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(k);
@@ -434,7 +469,7 @@ function emitLinForm(form) {
     // Parenthesize an opaque atom that is a sum/difference so a coefficient
     // multiply binds correctly. A bare var never needs parens.
     const atomStr = isBareVar(k) ? k : parenIfNeeded(k);
-    const c = Math.round(coeff * 1e9) / 1e9;
+    const c = coeff; // display rounding is fmtNum's job (tiny coeffs stay exponential)
     if (Math.abs(c - 1) < NUM_EPS) {
       pieces.push({ sign: 1, body: atomStr });
     } else if (Math.abs(c + 1) < NUM_EPS) {
@@ -446,8 +481,8 @@ function emitLinForm(form) {
     }
   }
 
-  const cc = Math.round(form.c * 1e9) / 1e9;
-  const hasConst = Math.abs(cc) > NUM_EPS;
+  const cc = form.c;
+  const hasConst = Math.abs(cc) > 1e-14;
 
   if (pieces.length === 0) return hasConst ? fmtNum(cc) : '0';
 
@@ -571,5 +606,10 @@ export function simplifyExpr(s) {
 // decide whether to accept a same-or-slightly-longer result; the self-guard is
 // the real correctness gate. Matches the noise the derivation emits.
 function hasCruft(s) {
+  // Unary plus and negative-exponent sci-notation are ALWAYS worth a
+  // (possibly longer) re-emission: the plus is AEDT-fatal, and the bail
+  // path's spaceHyphens must never see an unrescued 'e-3' if avoidable.
+  if (/(^|[(,*/+\-])\s*\+/.test(s)) return true;
+  if (/\d[eE][+-]?\d/.test(s)) return true;
   return /\+\s*\(0\)|\*\s*\(1\)|\*\s*\(0\)|\/\s*\(1\)|cos\(|sin\(|tan\(|-1\.0{6,}|\d\.\d*0{6,}\d/.test(s);
 }
