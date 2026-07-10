@@ -211,6 +211,48 @@ describe('generateHfssNative emits AEDT-parseable expressions', () => {
     expect(evalExpr(expr.replace(/(\d|\))\s*um\b/g, '$1'), pv)).toBeCloseTo(0.2, 9); // 1e-3*200
   });
 
+  it('bare additive constants in length exprs get um-typed (the 10-meters port bug)', () => {
+    // AEDT resolves a bare number mixed with length-typed variables in a
+    // NON-µm unit (SI/default) — a "- 10" inset in a port cxExpr put the
+    // sheet ~10 m off its integration line ("port line endpoints must lie
+    // on the port" + Parasolid size-box, a real shipped import failure).
+    const scene = buildScene();
+    scene.components.push({
+      transforms: [], id: 'inset', kind: 'rect', layer: 'electrode',
+      cx: 140, cy: 0, cxExpr: 'L1/2 - 10', cyExpr: '0', w: '15', h: '4', cutouts: [],
+    });
+    const pv = resolveParams(scene.params).values;
+    const script = generateHfssNative(scene, pv, {});
+    const line = script.split('\n').find(l => /X(?:Start|Position):=/.test(l) && l.includes('L1') && l.includes('10'));
+    expect(line).toContain('(10*1um)');
+    const expr = line.match(/X(?:Start|Position):=", "([^"]+)"/)[1];
+    const strip = (s) => s.replace(/\*\s*1um\b/g, '*1').replace(/(\d|\))\s*um\b/g, '$1');
+    expect(evalExpr(strip(expr), pv)).toBeCloseTo(100 - 10 - 7.5, 6); // L1/2 - 10 - w/2
+  });
+
+  it('um-typed param with a mixed expr gets its constant tagged; unitless does not', () => {
+    const scene = buildScene();
+    scene.params.rib_w = { expr: 'w1 + 0.6', unit: 'µm' };
+    scene.params.n_cells = { expr: 'w1/10 + 2', unit: '' };
+    const pv = resolveParams(scene.params).values;
+    const script = generateHfssNative(scene, pv, {});
+    expect(script.match(/set_var\("rib_w", "([^"]+)"\)/)[1]).toContain('(0.6*1um)');
+    expect(script.match(/set_var\("n_cells", "([^"]+)"\)/)[1]).not.toContain('1um');
+  });
+
+  it('constants inside function args stay untagged (dimensionless trig context)', () => {
+    const scene = buildScene();
+    scene.components.push({
+      transforms: [], id: 'trg', kind: 'rect', layer: 'electrode',
+      cx: 170, cy: 0, cxExpr: 'jx + w1*cos(w1/40 + 1)', cyExpr: '0', w: '10', h: '4', cutouts: [],
+    });
+    const pv = resolveParams(scene.params).values;
+    const script = generateHfssNative(scene, pv, {});
+    const line = script.split('\n').find(l => /X(?:Start|Position):=/.test(l) && l.includes('cos('));
+    expect(line).toBeTruthy();
+    expect(line).not.toMatch(/cos\([^)]*1um/); // arg untouched
+  });
+
   it('transform rotate: RotateAngle carries no unary plus (was raw ascii(t.angle))', () => {
     const scene = buildScene();
     scene.params.rot_a = { expr: '45', unit: '' };

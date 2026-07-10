@@ -1277,8 +1277,18 @@ FOLDED (don't assert on literal `cos(60*pi/180)`), and deg-typed trig
 inside POSITION exprs becomes `*(pi/180)`. Angle-TYPED fields
 (RotateAngle/ArcAngle) stay deg-typed — NEVER degToRad an angle field:
 `(45*pi/180)` as a bare RotateAngle would be read as 0.785 degrees.
-Simplification never introduces a bare additive constant that wasn't
-already bare in the original (unit-hazard-neutral). Guard:
+`umTagBareTerms` (LAST in the pipeline) um-types DEPTH-0 bare additive
+numeric terms — AEDT resolves a bare number mixed with length-typed
+variables in a NON-µm unit (a `- 10` port inset in a cxExpr put the
+sheet ~10 m off its baked integration line: "port line endpoints must
+lie on the port" + a Parasolid size-box error, a real shipped import
+failure). Everything in this app is µm, so a depth-0 additive constant
+in a LENGTH field can only mean µm — tagged with the proven `(N*1um)`
+form; terms inside parens/function args stay untouched (trig args are
+dimensionless), pure-number whole strings keep the callers' `(Xum)`
+forms, and `formatVarValue` tags mixed exprs of µm-UNIT params only
+(unitless rotation/count params keep bare constants bare). NEVER put a
+bare numeric literal in a scene length expression anyway — use a param. Guard:
 tests/hfss-expr-sanitize.test.js (incl. the verbatim AEDT-log expr and
 sweep-parity through the sanitized emission).
 

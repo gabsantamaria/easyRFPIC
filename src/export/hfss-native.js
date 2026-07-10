@@ -1212,12 +1212,56 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   //                  simplifier's own output is already spaced)
   // Cached — position expressions repeat heavily across sheet / move /
   // boundary emission, and the probe guard costs ~10 evalExpr runs each.
+  // um-type DEPTH-0 bare additive numeric terms in a LENGTH expression.
+  // AEDT resolves a bare number mixed with length-typed variables in SI
+  // METERS ("dyb2_Lo + ... - 10" put a port sheet 10 m off its baked
+  // integration line — Parasolid size-box error + "port line endpoints
+  // must lie on the port", a real shipped import failure). Everything in
+  // this app is µm, so a depth-0 additive constant in a length field can
+  // only MEAN µm — tag it with the proven `(N*1um)` form (pathFrameExprs'
+  // idiom; appending `um` directly mis-binds on e-notation). Terms inside
+  // parens/function args are untouched (trig args are dimensionless), a
+  // digit+[eE] before the sign is an exponent (not a term boundary), and
+  // a term that IS the whole expression uses the `(Num um)` numeric form.
+  const umTagBareTerms = (s) => {
+    const str = String(s);
+    const NUMRE = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
+    // A PURE-number string is left alone: the numeric-context callers
+    // (exprWithUm's `(Xum)` branch, the transform emitters' toFixed
+    // paths) already unit-handle it — tagging here would churn the
+    // proven forms. Mixed ident+constant expressions are the hazard.
+    if (NUMRE.test(str.trim())) return str;
+    let out = '', depth = 0, termStart = 0;
+    const flush = (end) => {
+      const term = str.slice(termStart, end);
+      const t = term.trim();
+      out += NUMRE.test(t) ? term.replace(t, `(${t}*1um)`) : term;
+    };
+    for (let i = 0; i < str.length; i++) {
+      const ch = str[i];
+      if (ch === '(') depth++;
+      else if (ch === ')') depth--;
+      else if ((ch === '+' || ch === '-') && depth === 0 && i > termStart) {
+        const prev = str.slice(termStart, i).trimEnd();
+        const last = prev[prev.length - 1];
+        // Binary operator only (preceded by an operand) and NOT the sign
+        // of a scientific exponent (digit+[eE] immediately before).
+        if (last && /[\w)]/.test(last) && !/\d[eE]$/.test(prev)) {
+          flush(i);
+          out += ch;
+          termStart = i + 1;
+        }
+      }
+    }
+    flush(str.length);
+    return out;
+  };
   const _sanCache = new Map();
   const sanitizeLenExpr = (e) => {
     const key = String(e ?? '0');
     let v = _sanCache.get(key);
     if (v === undefined) {
-      v = stripUnaryPlus(spaceHyphens(simplifyExpr(degToRad(key))));
+      v = umTagBareTerms(stripUnaryPlus(spaceHyphens(simplifyExpr(degToRad(key)))));
       _sanCache.set(key, v);
     }
     return v;
@@ -1326,9 +1370,13 @@ export function generateHfssNative(scene, paramValues, options = {}) {
     // simplifyExpr (NOT degToRad — a param's own expr keeps its units
     // untouched) drops AEDT-fatal unary plus and folds noise; the
     // self-guard bails to the raw expr on anything it can't prove.
-    const expr = stripUnaryPlus(spaceHyphens(simplifyExpr(ascii(resolveSynthetics(String(p.expr ?? ''))))));
+    let expr = stripUnaryPlus(spaceHyphens(simplifyExpr(ascii(resolveSynthetics(String(p.expr ?? ''))))));
     const unit = unitFor(p.unit);
     const isBareNumber = /^[\d\s+\-*/.()]+$/.test(expr);
+    // µm-typed param with a MIXED expr ("w_slab + 0.6"): a depth-0 bare
+    // constant would resolve as SI METERS in the HFSS variable — tag it
+    // µm. Unitless params (rotation, counts) keep bare constants bare.
+    if (unit === 'um' && !isBareNumber) expr = umTagBareTerms(expr);
     return expr + (unit && isBareNumber ? unit : '');
   };
 
