@@ -210,10 +210,11 @@ describe('C9: custom pivot in the exporters', () => {
     const idx = out.indexOf('Transforms for rot_part');
     expect(idx).toBeGreaterThan(0);
     const block = out.slice(idx, idx + 2500);
-    // Pre-translate by -(px), rotate, translate back by (px) — parametric.
+    // Pre-translate by -px, rotate, translate back by px — parametric.
+    // (sanitizeLenExpr collapses the old "-((piv_x))" to "-piv_x".)
     expect(block).toContain('piv_x');
     expect(block).toContain('piv_y');
-    expect(block).toContain('-((piv_x))');
+    expect(block).toContain('"-piv_x"');
     expect(block).toContain('oEditor.Rotate(');
     expect((block.match(/oEditor\.Move\(/g) || []).length).toBeGreaterThanOrEqual(2);
   });

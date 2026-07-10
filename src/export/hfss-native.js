@@ -23,6 +23,7 @@ import { shapeInstanceToRing } from '../geometry/rings.js';
 import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/racetrack.js';
 import { instanceChainOffsetExpr, chainOwnerForInstance, instanceFrameCenter } from '../scene/instance-positions.js';
 import { renameIdentInScene } from '../scene/rename-ident.js';
+import { simplifyExpr, degToRad } from '../scene/expr-simplify.js';
 import { twoLineOutputVariables } from '../scene/twoLine.js';
 import { generateQ3DCombinedBlock } from './q3d.js';
 import {
@@ -93,7 +94,13 @@ export function dedupeRingForHfss(pts, eps = 1e-3) {
 // UNITLESS (unit: '') — multiplying a deg-typed HFSS variable by 1deg
 // would produce deg², which HFSS rejects.
 export function hfssAngleDegExpr(expr) {
-  const s = String(expr ?? '0').trim();
+  // Simplify the (unitless) inner first: folds "(60)" → "60" so pure
+  // numerics take the literal branch, and drops AEDT-fatal unary plus
+  // (self-guarded — bails to the input on any doubt). No degToRad here:
+  // the inner is unitless BY CONTRACT (deg² guard above).
+  let s = String(expr ?? '0').trim();
+  const simp = simplifyExpr(s);
+  if (typeof simp === 'string' && simp.trim() !== '') s = simp.trim();
   if (/^-?\d+(?:\.\d+)?$/.test(s)) return `${s}deg`;
   return `(${s})*1deg`;
 }
@@ -1174,6 +1181,52 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   // any error message. Insert spaces around any '-' that sits between
   // two identifier characters before handing the string to HFSS.
   const spaceHyphens = (s) => String(s).replace(/(\w)-(\w)/g, '$1 - $2');
+  // ── AEDT expression sanitizer (THE emission choke point) ────────────
+  // AEDT's expression parser REJECTS unary plus: "(+(x))*sin(a)" fails with
+  // "Expected a value ... Instead found this: +(...)" — a real import
+  // failure: evalExpr accepts unary plus, so the canvas looked right while
+  // every emitted position failed to parse and the parts landed at garbage
+  // (cascading into Parasolid size-box errors, CoverLine failures, and
+  // "port line endpoints must lie on the port"). Pipeline:
+  //   degToRad     — "<n>deg" / "*1deg" → "*(pi/180)": valid in BOTH AEDT
+  //                  (unitless trig arg = radians) and evalExpr, so the
+  //                  simplifier can parse AND probe the deg-typed trig that
+  //                  rotated-parent snap chains bake into positions
+  //   simplifyExpr — parse → constant-fold → collect like terms: drops
+  //                  unary plus at parse, collapses "((0)) + (0)" noise,
+  //                  folds cos(180*pi/180) → -1; SELF-GUARDED (≥8 numeric
+  //                  probes) — on any doubt returns its input, so a bail
+  //                  can only fail to tidy, never corrupt geometry.
+  //                  um-bearing COMPOUNDS bail harmlessly: their leaves
+  //                  were already sanitized individually on the way in.
+  //   spaceHyphens — ident-ident hyphens spaced (bail path only; the
+  //                  simplifier's own output is already spaced)
+  // Cached — position expressions repeat heavily across sheet / move /
+  // boundary emission, and the probe guard costs ~10 evalExpr runs each.
+  // Backstop for simplifyExpr's bail path (um-bearing compounds, unknown
+  // tokens): unary plus is a NO-OP in every parser that feeds us, so
+  // stripping it textually is always value-preserving. A '+' is unary iff
+  // it follows an opening context (start, '(', ',', or another operator)
+  // — a binary '+' is always preceded by an operand (\w or ')'), and
+  // scientific-notation 'e+5' is preceded by 'e', outside the class.
+  const stripUnaryPlus = (s) => {
+    let out = String(s), prev;
+    do {
+      prev = out;
+      out = out.replace(/(^|[(,*/+\-])\s*\+(?=\s*[A-Za-z0-9_(.])/g, '$1');
+    } while (out !== prev);
+    return out;
+  };
+  const _sanCache = new Map();
+  const sanitizeLenExpr = (e) => {
+    const key = String(e ?? '0');
+    let v = _sanCache.get(key);
+    if (v === undefined) {
+      v = stripUnaryPlus(spaceHyphens(simplifyExpr(degToRad(key))));
+      _sanCache.set(key, v);
+    }
+    return v;
+  };
   // Parametric counterpart to `anchorLocal(name, w, h)` — used wherever
   // we need an HFSS-side expression for a named anchor's offset from a
   // part's center given parametric base dimensions (e.g. `'cps_feed_w'`,
@@ -1208,7 +1261,7 @@ export function generateHfssNative(scene, paramValues, options = {}) {
     return { xOff, yOff };
   };
   const exprWithUm = (expr) => {
-    const s = spaceHyphens(ascii(resolveSynthetics(String(expr ?? '0'))));
+    const s = sanitizeLenExpr(ascii(resolveSynthetics(String(expr ?? '0'))));
     if (/^[\d\s+\-*/.()]+$/.test(s)) {
       // Pure numeric: append "um" INSIDE the parens — `(0.6um)`, matching the
       // proven `(0um)` form used elsewhere. The unit MUST stay inside: `(0.6)um`
@@ -1275,7 +1328,10 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   // single unknown identifier and silently evaluates the whole
   // expression to 0.
   const formatVarValue = (p) => {
-    const expr = spaceHyphens(ascii(resolveSynthetics(String(p.expr ?? ''))));
+    // simplifyExpr (NOT degToRad — a param's own expr keeps its units
+    // untouched) drops AEDT-fatal unary plus and folds noise; the
+    // self-guard bails to the raw expr on anything it can't prove.
+    const expr = spaceHyphens(simplifyExpr(ascii(resolveSynthetics(String(p.expr ?? '')))));
     const unit = unitFor(p.unit);
     const isBareNumber = /^[\d\s+\-*/.()]+$/.test(expr);
     return expr + (unit && isBareNumber ? unit : '');
@@ -2660,14 +2716,19 @@ except Exception as e:
             // would parse as a single unknown identifier = 0 in HFSS.
             const tgtIsPath = tgtComp && PATH_KINDS.has(tgtComp.kind);
             const tgtFrame = tgtIsPath ? pathFrameExprs(tgtComp, paramValues) : null;
-            const sanE = (e) => spaceHyphens(ascii(resolveSynthetics(String(e))));
+            // sanitizeLenExpr each composed PIECE (not just the final
+            // point): a single um-tagged numeric anywhere in the
+            // composition makes the whole-point simplification at pushPt
+            // bail, so any AEDT-fatal noise (unary plus, deg trig) inside
+            // the raw parametricPos chain must die here, piecewise.
+            const sanE = (e) => sanitizeLenExpr(ascii(resolveSynthetics(String(e))));
             const tgtOffX = tgtFrame ? ` + (${sanE(tgtFrame.offXExpr)})` : '';
             const tgtOffY = tgtFrame ? ` + (${sanE(tgtFrame.offYExpr)})` : '';
             if (tgtPp && tgtPp.cxExpr && tgtPp.cyExpr) {
               const off = anchorOffsetParam(v.anchor, tgtPp.wExpr || '0', tgtPp.hExpr || '0', componentRotationExpr(tgtComp));
               if (chainOffset) {
-                curXExpr = `(${tgtPp.cxExpr})${tgtOffX} + (${off.xOff}) + (${chainOffset.dxExpr})`;
-                curYExpr = `(${tgtPp.cyExpr})${tgtOffY} + (${off.yOff}) + (${chainOffset.dyExpr})`;
+                curXExpr = `(${sanE(tgtPp.cxExpr)})${tgtOffX} + (${sanE(off.xOff)}) + (${sanE(chainOffset.dxExpr)})`;
+                curYExpr = `(${sanE(tgtPp.cyExpr)})${tgtOffY} + (${sanE(off.yOff)}) + (${sanE(chainOffset.dyExpr)})`;
               } else if (ownerInstanceIdx > 0) {
                 // Chain owner exists but transforms aren't all
                 // parametric-supported (mirror / rotate / duplicate_mirror).
@@ -2681,15 +2742,15 @@ except Exception as e:
                 if (inst && opBase) {
                   const ddx = inst.cx - (transformInstancesAll.find(ii => ii.compId === owner.id && ii.idx === 0)?.cx ?? 0);
                   const ddy = inst.cy - (transformInstancesAll.find(ii => ii.compId === owner.id && ii.idx === 0)?.cy ?? 0);
-                  curXExpr = `(${tgtPp.cxExpr})${tgtOffX} + (${off.xOff}) + (${ddx.toFixed(4)}um)`;
-                  curYExpr = `(${tgtPp.cyExpr})${tgtOffY} + (${off.yOff}) + (${ddy.toFixed(4)}um)`;
+                  curXExpr = `(${sanE(tgtPp.cxExpr)})${tgtOffX} + (${sanE(off.xOff)}) + (${ddx.toFixed(4)}um)`;
+                  curYExpr = `(${sanE(tgtPp.cyExpr)})${tgtOffY} + (${sanE(off.yOff)}) + (${ddy.toFixed(4)}um)`;
                 } else {
-                  curXExpr = `(${tgtPp.cxExpr})${tgtOffX} + (${off.xOff})`;
-                  curYExpr = `(${tgtPp.cyExpr})${tgtOffY} + (${off.yOff})`;
+                  curXExpr = `(${sanE(tgtPp.cxExpr)})${tgtOffX} + (${sanE(off.xOff)})`;
+                  curYExpr = `(${sanE(tgtPp.cyExpr)})${tgtOffY} + (${sanE(off.yOff)})`;
                 }
               } else {
-                curXExpr = `(${tgtPp.cxExpr})${tgtOffX} + (${off.xOff})`;
-                curYExpr = `(${tgtPp.cyExpr})${tgtOffY} + (${off.yOff})`;
+                curXExpr = `(${sanE(tgtPp.cxExpr)})${tgtOffX} + (${sanE(off.xOff)})`;
+                curYExpr = `(${sanE(tgtPp.cyExpr)})${tgtOffY} + (${sanE(off.yOff)})`;
               }
             } else if (tgtComp) {
               polyHasFrozenVertex = true;
@@ -2698,11 +2759,11 @@ except Exception as e:
               const th = typeof tgtComp.h === 'number' ? tgtComp.h : (evalExpr(tgtComp.h, paramValues) || 0);
               const off = anchorOffsetParam(v.anchor, `${tw}um`, `${th}um`, componentRotationExpr(tgtComp));
               if (chainOffset) {
-                curXExpr = `(${tgtComp.cx.toFixed(4)}um)${tgtOffX} + (${off.xOff}) + (${chainOffset.dxExpr})`;
-                curYExpr = `(${tgtComp.cy.toFixed(4)}um)${tgtOffY} + (${off.yOff}) + (${chainOffset.dyExpr})`;
+                curXExpr = `(${tgtComp.cx.toFixed(4)}um)${tgtOffX} + (${sanE(off.xOff)}) + (${sanE(chainOffset.dxExpr)})`;
+                curYExpr = `(${tgtComp.cy.toFixed(4)}um)${tgtOffY} + (${sanE(off.yOff)}) + (${sanE(chainOffset.dyExpr)})`;
               } else {
-                curXExpr = `(${tgtComp.cx.toFixed(4)}um)${tgtOffX} + (${off.xOff})`;
-                curYExpr = `(${tgtComp.cy.toFixed(4)}um)${tgtOffY} + (${off.yOff})`;
+                curXExpr = `(${tgtComp.cx.toFixed(4)}um)${tgtOffX} + (${sanE(off.xOff)})`;
+                curYExpr = `(${tgtComp.cy.toFixed(4)}um)${tgtOffY} + (${sanE(off.yOff)})`;
               }
             }
             vertExprs.push({ xExpr: curXExpr, yExpr: curYExpr });
@@ -2739,15 +2800,21 @@ except Exception as e:
             vertExprs.push({ xExpr: curXExpr, yExpr: curYExpr });
             vertMeta.push({ kind: 'arc', arc: { cenX, cenY, midX, midY, aDeg } });
           } else {
-            // `rel`: dx/dy expressions added to the previous vertex.
+            // `rel`: dx/dy expressions added to the previous vertex. A
+            // step that simplifies to exactly zero ("(0um)" — e.g. a
+            // radial-frame sin(180°) that folds away) is SKIPPED rather
+            // than appended: the stray um token would otherwise make the
+            // whole-point simplification at pushPt bail, leaving the
+            // long-form chain in the script.
             const dxExpr = exprWithUm(v?.dx ?? '0');
             const dyExpr = exprWithUm(v?.dy ?? '0');
+            const addLen = (base, t) => (t === '(0um)' || t === '(0)') ? `(${base})` : `(${base}) + (${t})`;
             if (i === 0) {
-              curXExpr = `(${baseCxExpr}) + (${dxExpr})`;
-              curYExpr = `(${baseCyExpr}) + (${dyExpr})`;
+              curXExpr = addLen(baseCxExpr, dxExpr);
+              curYExpr = addLen(baseCyExpr, dyExpr);
             } else {
-              curXExpr = `(${curXExpr}) + (${dxExpr})`;
-              curYExpr = `(${curYExpr}) + (${dyExpr})`;
+              curXExpr = addLen(curXExpr, dxExpr);
+              curYExpr = addLen(curYExpr, dyExpr);
             }
             vertExprs.push({ xExpr: curXExpr, yExpr: curYExpr });
             // A spline run needs an anchor vertex before it — a spline
@@ -2829,7 +2896,7 @@ except Exception as e:
             // fails with cant_extract_geom); the auto-close edge is then
             // zero-length/harmless.
             const pts = [...corners4, corners4[0]].map(p =>
-              `["NAME:PLPoint", "X:=", "${p.x}", "Y:=", "${p.y}", "Z:=", "${zBottomExpr}"]`
+              `["NAME:PLPoint", "X:=", "${sanitizeLenExpr(p.x)}", "Y:=", "${sanitizeLenExpr(p.y)}", "Z:=", "${zBottomExpr}"]`
             ).join(',\n          ');
             const segs = [0, 1, 2, 3].map(k =>
               `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", ${k}, "NoOfPoints:=", 2]`
@@ -3040,7 +3107,12 @@ except Exception as e:
         const ptRecords = [];
         const segRecords = [];
         const pushPt = (xExpr, yExpr) => {
-          ptRecords.push(`["NAME:PLPoint", "X:=", "${xExpr}", "Y:=", "${yExpr}", "Z:=", "${pathZExpr}"]`);
+          // Sanitize the FULL composed point expression at the write: the
+          // chain composes RAW parametricPos/anchor-offset strings (not
+          // exprWithUm-wrapped), so this is where unary plus / deg-typed
+          // trig must die — and where a um-free chain collapses to the
+          // compact linear form (whole-expression simplification).
+          ptRecords.push(`["NAME:PLPoint", "X:=", "${sanitizeLenExpr(xExpr)}", "Y:=", "${sanitizeLenExpr(yExpr)}", "Z:=", "${pathZExpr}"]`);
           return ptRecords.length - 1;
         };
         const lineSegRec = (startIdx) =>
@@ -3062,7 +3134,7 @@ except Exception as e:
               pushPt(meta.arc.midX, meta.arc.midY);
               const endIdx = pushPt(vertExprs[vi].xExpr, vertExprs[vi].yExpr);
               segRecords.push(
-                `["NAME:PLSegment", "SegmentType:=", "AngularArc", "StartIndex:=", ${startIdx}, "NoOfPoints:=", 3, "NoOfSegments:=", "0", "ArcAngle:=", "${meta.arc.aDeg}", "ArcCenterX:=", "${meta.arc.cenX}", "ArcCenterY:=", "${meta.arc.cenY}", "ArcCenterZ:=", "${pathZExpr}", "ArcPlane:=", "XY"]`
+                `["NAME:PLSegment", "SegmentType:=", "AngularArc", "StartIndex:=", ${startIdx}, "NoOfPoints:=", 3, "NoOfSegments:=", "0", "ArcAngle:=", "${meta.arc.aDeg}", "ArcCenterX:=", "${sanitizeLenExpr(meta.arc.cenX)}", "ArcCenterY:=", "${sanitizeLenExpr(meta.arc.cenY)}", "ArcCenterZ:=", "${pathZExpr}", "ArcPlane:=", "XY"]`
               );
               prevPtIdx = endIdx;
               vi++;
@@ -4315,8 +4387,8 @@ except Exception as e:
         const dxNum = evalExpr(t.dx ?? '0', paramValues);
         const dyNum = evalExpr(t.dy ?? '0', paramValues);
         if (!Number.isFinite(dxNum) || !Number.isFinite(dyNum)) continue;
-        const dxExpr = (typeof t.dx === 'string' && /[A-Za-z_]/.test(t.dx)) ? ascii(t.dx) : `${dxNum.toFixed(4)}um`;
-        const dyExpr = (typeof t.dy === 'string' && /[A-Za-z_]/.test(t.dy)) ? ascii(t.dy) : `${dyNum.toFixed(4)}um`;
+        const dxExpr = (typeof t.dx === 'string' && /[A-Za-z_]/.test(t.dx)) ? sanitizeLenExpr(ascii(t.dx)) : `${dxNum.toFixed(4)}um`;
+        const dyExpr = (typeof t.dy === 'string' && /[A-Za-z_]/.test(t.dy)) ? sanitizeLenExpr(ascii(t.dy)) : `${dyNum.toFixed(4)}um`;
         code += `try:
     oEditor.Move(
         ["NAME:Selections", "Selections:=", "${selStr}", "NewPartsModelFlag:=", "Model"],
@@ -4430,9 +4502,13 @@ except Exception as e:
           }
           // Negate the pivot for the pre-rotate translate. Wrapping in
           // parens keeps HFSS's parser from binding `-` to whatever
-          // identifier sits at the front of pivotXExpr.
-          const negPxExpr = `-(${pivotXExpr})`;
-          const negPyExpr = `-(${pivotYExpr})`;
+          // identifier sits at the front of pivotXExpr. sanitizeLenExpr
+          // both AEDT-proofs the composition (unary plus / deg trig from
+          // upstream chains) and collapses it to the compact linear form.
+          pivotXExpr = sanitizeLenExpr(pivotXExpr);
+          pivotYExpr = sanitizeLenExpr(pivotYExpr);
+          const negPxExpr = sanitizeLenExpr(`-(${pivotXExpr})`);
+          const negPyExpr = sanitizeLenExpr(`-(${pivotYExpr})`);
           // Translate-rotate-translate, emitted parametrically.
           code += `try:
     oEditor.Move(
@@ -4476,8 +4552,8 @@ except Exception as e:
         const dxNum = evalExpr(t.dx ?? '0', paramValues);
         const dyNum = evalExpr(t.dy ?? '0', paramValues);
         if (!Number.isFinite(dxNum) || !Number.isFinite(dyNum) || nNum < 1) continue;
-        const dxExpr = (typeof t.dx === 'string' && /[A-Za-z_]/.test(t.dx)) ? ascii(t.dx) : `${dxNum.toFixed(4)}um`;
-        const dyExpr = (typeof t.dy === 'string' && /[A-Za-z_]/.test(t.dy)) ? ascii(t.dy) : `${dyNum.toFixed(4)}um`;
+        const dxExpr = (typeof t.dx === 'string' && /[A-Za-z_]/.test(t.dx)) ? sanitizeLenExpr(ascii(t.dx)) : `${dxNum.toFixed(4)}um`;
+        const dyExpr = (typeof t.dy === 'string' && /[A-Za-z_]/.test(t.dy)) ? sanitizeLenExpr(ascii(t.dy)) : `${dyNum.toFixed(4)}um`;
         if (nNum > 500) {
           code += `# WARNING: repeat n=${nNum} creates ${nNum + 1} instances -- HFSS history will be very slow; consider reducing or flattening\n`;
           if (!warnedLargeRepeat) {
@@ -4585,15 +4661,15 @@ except Exception as e:
     oEditor.Move(
         ["NAME:Selections", "Selections:=", "${selStr}", "NewPartsModelFlag:=", "Model"],
         ["NAME:TranslateParameters",
-         "TranslateVectorX:=", "-(${curCxExpr})",
-         "TranslateVectorY:=", "-(${curCyExpr})",
+         "TranslateVectorX:=", "${sanitizeLenExpr(`-(${curCxExpr})`)}",
+         "TranslateVectorY:=", "${sanitizeLenExpr(`-(${curCyExpr})`)}",
          "TranslateVectorZ:=", "0um"])
 ${mirrorAboutOrigin}
     oEditor.Move(
         ["NAME:Selections", "Selections:=", "${selStr}", "NewPartsModelFlag:=", "Model"],
         ["NAME:TranslateParameters",
-         "TranslateVectorX:=", "(${curCxExpr})",
-         "TranslateVectorY:=", "(${curCyExpr})",
+         "TranslateVectorX:=", "${sanitizeLenExpr(`(${curCxExpr})`)}",
+         "TranslateVectorY:=", "${sanitizeLenExpr(`(${curCyExpr})`)}",
          "TranslateVectorZ:=", "0um"])
 except Exception as e:
     oDesktop.AddMessage("", "", 1, "Mirror failed for ${selStr}: " + str(e))
@@ -4629,10 +4705,10 @@ except Exception as e:
         const planeExpr = axis === 'x'
           ? `(${curCxExpr}) + (${offsetExpr})`
           : `(${curCyExpr}) + (${offsetExpr})`;
-        const tvx = axis === 'x' ? `-(${planeExpr})` : '0um';
-        const tvy = axis === 'y' ? `-(${planeExpr})` : '0um';
-        const tvxBack = axis === 'x' ? `(${planeExpr})` : '0um';
-        const tvyBack = axis === 'y' ? `(${planeExpr})` : '0um';
+        const tvx = axis === 'x' ? sanitizeLenExpr(`-(${planeExpr})`) : '0um';
+        const tvy = axis === 'y' ? sanitizeLenExpr(`-(${planeExpr})`) : '0um';
+        const tvxBack = axis === 'x' ? sanitizeLenExpr(`(${planeExpr})`) : '0um';
+        const tvyBack = axis === 'y' ? sanitizeLenExpr(`(${planeExpr})`) : '0um';
         // Predict the mirrored-copy names up front (HFSS's
         // next-available-suffix collision rule, e.g. `S_10` after a 10-clone
         // repeat already used `S_1..S_9`) so the post-mirror translate can

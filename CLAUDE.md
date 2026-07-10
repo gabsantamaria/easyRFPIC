@@ -1232,6 +1232,43 @@ Parallel structure to pyAEDT but emits raw `oEditor.*` COM calls wrapped in try/
 
 Non-rect shapes are emitted as a polygonal sheet via `CreatePolyline` + `SweepAlongVector` to thicken. Racetracks emit outer perimeter + inner perimeter + Subtract to leave a hollow band.
 
+**AEDT expression sanitization (`sanitizeLenExpr` — EVERY emitted length
+expr passes through it).** AEDT's expression parser REJECTS unary plus:
+`"(+(x))*sin(a)"` fails with "Expected a value … Instead found this:
++(…)" — a real shipped import failure (evalExpr accepts unary plus, so a
+scene with `+(w/2+g)` in a cxExpr looked right on canvas while every
+emitted position failed to parse, parts landed at garbage, and the wreck
+cascaded into Parasolid size-box errors, CoverLine failures, and "port
+line endpoints must lie on the port"). The sanitizer pipeline (cached,
+inside `generateHfssNative`): `degToRad` (canonical home now
+`expr-simplify.js`, re-exported by cross-section.js — `<n>deg`/`*1deg` →
+`*(pi/180)`, valid in BOTH AEDT and evalExpr) → `simplifyExpr` (drops
+unary plus at parse, folds `cos(180*pi/180)`, collapses `((0)) + (0)`
+noise into compact linear forms; SELF-GUARDED — bails to its input on
+any doubt, so um-bearing compounds pass through untouched) →
+`spaceHyphens` → `stripUnaryPlus` (syntactic backstop for bail paths; a
+`+` after start/`(`/`,`/operator is unary and value-free to remove).
+Choke points: `exprWithUm` (all rect/box/via/bridge positions + sizes),
+`formatVarValue` (set_var; simplify only, NO degToRad), `hfssAngleDegExpr`
+(inner simplify only — the inner is unitless by the deg² contract),
+`pushPt`/arc-record/`quadSheet` (polyline/polyshape point writes — the
+snap-vertex compositions use RAW parametricPos strings, so the pieces
+are sanitized via `sanE` AND the whole point again at the write, where a
+um-free chain collapses to the compact linear form), and every
+`emitTransformChainHfss` Move/pivot/mirror-plane vector interpolation.
+Rel vertex steps that simplify to exactly zero (`(0um)`) are SKIPPED —
+one stray um token makes the whole-point simplification bail.
+CONSEQUENCES for tests/consumers: emitted positions are LINEAR FORMS
+(`0.5*dyb2_Lw + dyb2_jx + 0.433012702*dyb2_nd`) — constant trig is
+FOLDED (don't assert on literal `cos(60*pi/180)`), and deg-typed trig
+inside POSITION exprs becomes `*(pi/180)`. Angle-TYPED fields
+(RotateAngle/ArcAngle) stay deg-typed — NEVER degToRad an angle field:
+`(45*pi/180)` as a bare RotateAngle would be read as 0.785 degrees.
+Simplification never introduces a bare additive constant that wasn't
+already bare in the original (unit-hazard-neutral). Guard:
+tests/hfss-expr-sanitize.test.js (incl. the verbatim AEDT-log expr and
+sweep-parity through the sanitized emission).
+
 Transform chain emission uses the same logic as pyAEDT (separate helper `emitTransformChainHfss`).
 
 `options.twoLine = { portIndices }` appends the 2-line-method εeff/α
@@ -1428,6 +1465,7 @@ sweep.
 - **Cluster siblings as alt-drag snap targets.** Exclude via `drag.clusterSet` at drag-init time.
 - **Anchor-pair switching during alt-drag.** Apply hysteresis via `stickThresh = worldThresh * 0.5`.
 - **Drag preview doesn't match drop position.** The drag preview and the commit logic must use the same shape-aware coordinate computation.
+- **evalExpr-valid ≠ AEDT-valid.** AEDT's expression parser rejects UNARY PLUS (`(+(x))` → hard parse error, part lands at garbage) and evalExpr silently zeroes deg-typed trig (`cos(120deg)`) — an expression can look perfect on canvas and destroy the HFSS import, or vice versa. Never emit a raw expression string into a COM call: route it through `sanitizeLenExpr` (length fields) or `hfssAngleDegExpr` (angle fields). See "AEDT expression sanitization" in the HFSS native section.
 
 ## Verification commands
 

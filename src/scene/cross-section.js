@@ -49,6 +49,7 @@ import { resolvePolylineVertices, tessellatePolylinePath, taperedBandQuads, poly
 import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/racetrack.js';
 import { computeNumericLayerZ } from './layer-z.js';
 import { effectiveConductorLayerId } from './conductor-binding.js';
+import { degToRad } from './expr-simplify.js';
 // The snap-DAG → parametric-position walker the HFSS export uses. Same
 // call-time import pattern as twoLine.js (hfss-native does not import this
 // module, so there is no cycle — and even if one appeared, every use is at
@@ -210,9 +211,10 @@ const stripUm = (s) => String(s ?? '').replace(/(\d|\))\s*um\b/g, '$1');
 // baked conductors it should have parametrized (a port snapped past a rotated
 // meander). `*1deg` -> `*(pi/180)`; a bare `<n>deg` -> `(<n>*pi/180)`. The
 // emitted expr uses the pi/180 form (valid in AEDT, and what the guard checked).
-export const degToRad = (s) => String(s ?? '')
-  .replace(/\*\s*1deg\b/g, '*(pi/180)')
-  .replace(/(\d+(?:\.\d+)?)\s*deg\b/g, '($1*pi/180)');
+// The implementation lives in expr-simplify.js (shared with the HFSS native
+// exporter's sanitizeLenExpr, which must not import this module — cycle);
+// re-exported here for existing consumers.
+export { degToRad };
 // stripUm + degToRad -- the canonical normalization for a parametric position
 // expr pulled from computeParametricPositions before it enters an interval /
 // edge expression (guarded by the round-trip check either way).

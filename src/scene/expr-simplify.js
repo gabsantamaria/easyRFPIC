@@ -29,6 +29,20 @@
 
 import { evalExpr, RESERVED_IDENTS } from './params.js';
 
+// ── HFSS deg-typed trig → radian form ───────────────────────────────────
+// `cos(120deg)` / `cos((rot)*1deg)` are AEDT-only forms: evalExpr can't score
+// them (silent 0) and this module's tokenizer rejects them (bail-to-original,
+// which would leave upstream noise — e.g. a unary plus — untouched). Rewriting
+// `*1deg` → `*(pi/180)` and `<n>deg` → `(<n>*pi/180)` yields an expression
+// valid in BOTH AEDT (unitless trig arg = radians) and evalExpr, so the
+// simplifier can parse, fold, and probe it. Canonical home is HERE (shared by
+// the Q2D cross-section derivation AND hfss-native's sanitizeLenExpr —
+// hfss-native must not import cross-section.js, which imports it back);
+// cross-section.js re-exports it for its existing consumers.
+export const degToRad = (s) => String(s ?? '')
+  .replace(/\*\s*1deg\b/g, '*(pi/180)')
+  .replace(/(\d+(?:\.\d+)?)\s*deg\b/g, '($1*pi/180)');
+
 // ── Numeric formatting ──────────────────────────────────────────────────
 // Same rounding/trim contract as q2d.js `dec` so simplified constants read
 // identically to the baked numerics elsewhere (round ~1e-9, no float noise,

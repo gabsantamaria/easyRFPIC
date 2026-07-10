@@ -202,10 +202,12 @@ describe('D6: rotation in the native HFSS export', () => {
     // way it's the child's parametric X placement expression.
     const xStart = block.match(/X(?:Start|Position):=", "([^"]+)"/)[1];
     // Parent's anchor offset must be wrapped in the rotation matrix:
-    // cos/sin of the rotation param, degree-typed.
+    // cos/sin of the rotation param. sanitizeLenExpr converts the
+    // deg-typed arg to the radian form "(tilt)*(pi/180)" — same value in
+    // AEDT (unitless trig arg = radians) AND scoreable by evalExpr.
     expect(xStart).toContain('cos(');
     expect(xStart).toContain('tilt');
-    expect(xStart).toContain('*1deg');
+    expect(xStart).toContain('*(pi/180)');
     // And still parametric in the parent's width.
     expect(xStart).toContain('cap_W');
     // Y side carries the sin term of the same matrix.
