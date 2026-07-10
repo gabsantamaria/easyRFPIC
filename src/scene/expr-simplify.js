@@ -39,9 +39,14 @@ import { evalExpr, RESERVED_IDENTS } from './params.js';
 // the Q2D cross-section derivation AND hfss-native's sanitizeLenExpr —
 // hfss-native must not import cross-section.js, which imports it back);
 // cross-section.js re-exports it for its existing consumers.
+// The bare-number form requires the digits NOT to be preceded by an
+// identifier character — without the lookbehind, a param NAMED like
+// "angle_30deg" would be corrupted into "angle_(30*pi/180)", and since
+// the corruption lands on BOTH sides of the numeric self-guard, no probe
+// can catch it.
 export const degToRad = (s) => String(s ?? '')
   .replace(/\*\s*1deg\b/g, '*(pi/180)')
-  .replace(/(\d+(?:\.\d+)?)\s*deg\b/g, '($1*pi/180)');
+  .replace(/(?<![A-Za-z0-9_.])(\d+(?:\.\d+)?)\s*deg\b/g, '($1*pi/180)');
 
 // ── Numeric formatting ──────────────────────────────────────────────────
 // Same rounding/trim contract as q2d.js `dec` so simplified constants read
