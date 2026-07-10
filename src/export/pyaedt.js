@@ -271,6 +271,32 @@ def build_wg(name, cx, cy, w, h):
       const ptsStr = ring.map(([x, y]) => `["${x.toFixed(3)}um", "${y.toFixed(3)}um", "${zOrigin}"]`).join(', ');
       code += `_${id}_sheet = hfss.modeler.create_polyline(points=[${ptsStr}], cover_surface=True, close_surface=True, name="${id}", material="${layerMat}")\n`;
       code += `hfss.modeler.thicken_sheet("${id}", thickness="${layerThk}")\n`;
+    } else if (shapeKind === 'gdsgroup') {
+      // Immutable imported GDS layout: one covered polyline sheet per
+      // packed ring (numeric local coords + the component's solved
+      // position), united into one body, then thickened. Static
+      // geometry — the HFSS-import idiom.
+      const zOrigin = c.layer === 'waveguide' ? '0' : 'h_wg';
+      const rings = (c.rings || []).filter(r => Array.isArray(r) && r.length >= 6);
+      if (rings.length === 0) {
+        code += `# ${c.id}: imported GDS layer group with no rings — skipped\n`;
+      } else {
+        code += `# ${c.id}: imported GDS layer group (${rings.length} ring(s), immutable numeric geometry)\n`;
+        const names = [];
+        rings.forEach((ring, k) => {
+          const name = k === 0 ? id : `${id}_r${k}`;
+          names.push(name);
+          const pts = [];
+          for (let i = 0; i < ring.length; i += 2) {
+            pts.push(`["${(c.cx + ring[i]).toFixed(4)}um", "${(c.cy + ring[i + 1]).toFixed(4)}um", "${zOrigin}"]`);
+          }
+          code += `hfss.modeler.create_polyline(points=[${pts.join(', ')}], cover_surface=True, close_surface=True, name="${name}", material="${layerMat}")\n`;
+        });
+        if (names.length > 1) {
+          code += `hfss.modeler.unite([${names.map(n => `"${n}"`).join(', ')}])\n`;
+        }
+        code += `hfss.modeler.thicken_sheet("${id}", thickness="${layerThk}")\n`;
+      }
     } else if (shapeKind === 'polyshape') {
       // Closed polygon-path: emit as a covered, closed CreatePolyline →
       // a 2-D filled sheet, then thicken to the layer's thickness for

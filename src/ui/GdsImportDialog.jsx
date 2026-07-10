@@ -48,6 +48,11 @@ export default function GdsImportDialog({ fileName, parsed, stack, alignCount = 
   }));
 
   const [keepCoords, setKeepCoords] = useState(false);
+  // Import mode: 'immutable' (default — one packed layer group per GDS
+  // layer, HFSS-import style: fast, compact, position-snappable, never
+  // vertex-editable) vs 'editable' (one component per shape — full
+  // vertex editing, but heavy on big dies).
+  const [mode, setMode] = useState('immutable');
 
   const totalIncluded = stats.filter(s => rows[s.key]?.include !== false);
   const totalShapes = totalIncluded.reduce((a, s) => a + s.shapes, 0);
@@ -144,6 +149,33 @@ export default function GdsImportDialog({ fileName, parsed, stack, alignCount = 
             </tbody>
           </table>
 
+          <div className="rounded border border-slate-700 px-2 py-1.5 space-y-1">
+            <p className="text-[9px] uppercase tracking-wider text-slate-500">Import as</p>
+            <label className="flex items-start gap-2 text-[11px] text-slate-200 cursor-pointer">
+              <input type="radio" name="gds-import-mode" className="mt-0.5"
+                checked={mode === 'immutable'} onChange={() => setMode('immutable')} />
+              <span>
+                <span className="text-slate-200">Immutable layout (recommended)</span>
+                <span className="block text-[10px] text-slate-500 leading-snug">
+                  One object per GDS layer, like HFSS's own GDS import: fast, compact
+                  (~10–50× smaller design file), draggable + snappable as a block —
+                  geometry itself is not editable.
+                </span>
+              </span>
+            </label>
+            <label className="flex items-start gap-2 text-[11px] text-slate-200 cursor-pointer">
+              <input type="radio" name="gds-import-mode" className="mt-0.5"
+                checked={mode === 'editable'} onChange={() => setMode('editable')} />
+              <span>
+                <span className="text-slate-200">Editable shapes</span>
+                <span className="block text-[10px] text-slate-500 leading-snug">
+                  One component per GDS shape with editable vertices. Heavy on real
+                  dies — use for small fragments you intend to modify.
+                </span>
+              </span>
+            </label>
+          </div>
+
           {alignCount > 0 ? (
             <p className="text-[10px] text-cyan-300 leading-snug">
               {alignCount} shape{alignCount === 1 ? '' : 's'} from this file {alignCount === 1 ? 'is' : 'are'} already
@@ -157,10 +189,11 @@ export default function GdsImportDialog({ fileName, parsed, stack, alignCount = 
             </label>
           )}
 
-          {totalVerts > 50000 && (
+          {totalVerts > 50000 && mode === 'editable' && (
             <p className="text-[10px] text-amber-400 leading-snug">
-              Large import: {totalShapes} shapes / {totalVerts.toLocaleString()} vertices — the canvas
-              and solver may get slow. Consider unchecking layers you don't need.
+              Large import: {totalShapes} shapes / {totalVerts.toLocaleString()} vertices as EDITABLE
+              components — the canvas and design file will get heavy. Consider the
+              immutable mode or unchecking layers.
             </p>
           )}
           {warnings.map((w, i) => (
@@ -177,7 +210,7 @@ export default function GdsImportDialog({ fileName, parsed, stack, alignCount = 
               Cancel
             </button>
             <button
-              onClick={() => onImport({ shapes: flat.shapes, mapping: rows, keepCoords, cellName })}
+              onClick={() => onImport({ shapes: flat.shapes, mapping: rows, keepCoords, cellName, mode })}
               disabled={totalShapes === 0}
               className="px-3 py-1 rounded text-xs font-medium disabled:opacity-40"
               style={{ background: '#06b6d4', color: '#0f172a' }}

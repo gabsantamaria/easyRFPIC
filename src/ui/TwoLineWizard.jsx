@@ -66,7 +66,9 @@ function TwoLineWizardInner({ onClose, scene, paramValues, onGenerate, onGenerat
   // boolean (they're parts of it, not standalone conductors). buildQ3DBody
   // expands a selected boolean into its operand sheets under one net.
   const conductorComps = useMemo(() => (scene.components || [])
-    .filter((c) => c.layer === 'electrode' && !c.consumedBy), [scene]);
+    // gdsgroup excluded: buildQ3DBody's ring expansion would fall back to
+    // the group's BOUNDING BOX (silently wrong electrostatics).
+    .filter((c) => c.layer === 'electrode' && !c.consumedBy && c.kind !== 'gdsgroup'), [scene]);
   // Restore last-picked conductors, filtered to those that still exist here.
   const [q3dPick, setQ3dPick] = useState(() => new Set(
     (prefs && Array.isArray(prefs.q3dIds) ? prefs.q3dIds : []).filter((id) => conductorComps.some((c) => c.id === id)),

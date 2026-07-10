@@ -217,13 +217,46 @@ export function parseGDS(bufferOrU8) {
   return { libName, umPerDbu, cells, warnings };
 }
 
-// Cells not referenced by any other cell — the import candidates.
+// METADATA cells — never design geometry. KLayout embeds a
+// `$$$CONTEXT_INFO$$$` cell that references EVERY PCell/library cell
+// once AT THE ORIGIN (identity placement) purely to record PCell
+// provenance. Treating it as a top cell (it is referenced by nothing)
+// flattened a phantom copy of every library bend/coupler stacked on one
+// point — the "starburst" artifact on a real KLayout/gdsfactory die.
+export const isGdsMetaCell = (name) => /^\$\$\$.*\$\$\$$/.test(name || '');
+
+// Top-cell candidates: cells not referenced by any other cell —
+// EXCLUDING metadata cells entirely (they are never candidates, and
+// their refs don't count as "referencing", so the REAL design top
+// surfaces from behind $$$CONTEXT_INFO$$$). Sorted by SUBTREE SHAPE
+// COUNT (descending): unused library variants referenced only by the
+// metadata cell also become unreferenced here, and the actual design
+// dwarfs them.
 export function topCellsOf(parsed) {
   const referenced = new Set();
-  for (const cell of Object.values(parsed.cells)) {
+  for (const [name, cell] of Object.entries(parsed.cells)) {
+    if (isGdsMetaCell(name)) continue; // metadata refs are provenance, not placement
     for (const r of cell.refs) referenced.add(r.cell);
   }
-  return Object.keys(parsed.cells).filter(n => !referenced.has(n));
+  const tops = Object.keys(parsed.cells).filter(n => !referenced.has(n) && !isGdsMetaCell(n));
+  // Memoized subtree shape count (ref-multiplied, capped so a huge AREF
+  // can't overflow — ranking only needs relative order).
+  const memo = new Map();
+  const countOf = (name, stack) => {
+    if (memo.has(name)) return memo.get(name);
+    const cell = parsed.cells[name];
+    if (!cell || stack.includes(name)) return 0;
+    let n = cell.shapes.length;
+    const nextStack = [...stack, name];
+    for (const r of cell.refs) {
+      const mult = r.kind === 'aref' ? Math.min((r.cols || 1) * (r.rows || 1), 10000) : 1;
+      n += mult * countOf(r.cell, nextStack);
+      if (n > 1e9) { n = 1e9; break; }
+    }
+    memo.set(name, n);
+    return n;
+  };
+  return tops.sort((a, b) => countOf(b, []) - countOf(a, []));
 }
 
 // ---------------------------------------------------------------------
@@ -480,6 +513,59 @@ const fmtUm = (v) => {
   return Object.is(r, -0) ? '0' : String(r);
 };
 
+// Dialog mapping target → component layer fields (shared by both import
+// modes).
+const targetFields = (target) => {
+  if (typeof target === 'string' && target.startsWith('cond:')) {
+    return { layer: 'electrode', conductorLayerId: target.slice(5) };
+  }
+  if (target === 'wg') return { layer: 'waveguide' };
+  return { layer: 'gdsundef' }; // 'undef' and anything unknown
+};
+
+// Consecutive-duplicate removal (zero-length rel steps break nothing
+// but bloat the chain) + COLLINEAR pruning: a mid-point within 1 nm of
+// the straight line between its neighbors (and travelling FORWARD —
+// spikes reverse direction and are kept) is redundant tessellation
+// noise; dropping it shrinks huge imported chains without moving any
+// edge by more than fab resolution. Vertex 0 (the component root) is
+// never pruned.
+const sanitize = (pts, closed) => {
+  const dedup = [];
+  for (const p of pts) {
+    const prev = dedup[dedup.length - 1];
+    if (prev && Math.abs(prev[0] - p[0]) < 1e-9 && Math.abs(prev[1] - p[1]) < 1e-9) continue;
+    dedup.push(p);
+  }
+  if (closed && dedup.length >= 2) {
+    const [fx, fy] = dedup[0];
+    const [lx, ly] = dedup[dedup.length - 1];
+    if (Math.abs(fx - lx) < 1e-9 && Math.abs(fy - ly) < 1e-9) dedup.pop();
+  }
+  if (dedup.length < 3) return dedup;
+  const COLLIN_TOL = 1e-3; // µm — 1 nm perpendicular deviation
+  const keep = [dedup[0]];
+  const last = () => keep[keep.length - 1];
+  for (let i = 1; i < dedup.length; i++) {
+    const isLast = i === dedup.length - 1;
+    // Next point after i (wraps to v0 for closed outlines so the
+    // closing edge prunes too; the open-chain end point always stays).
+    const nxt = isLast ? (closed ? dedup[0] : null) : dedup[i + 1];
+    if (nxt) {
+      const a = last(), b = dedup[i];
+      const abx = nxt[0] - a[0], aby = nxt[1] - a[1];
+      const len = Math.hypot(abx, aby);
+      if (len > 1e-9) {
+        const perp = Math.abs((b[0] - a[0]) * aby - (b[1] - a[1]) * abx) / len;
+        const forward = (b[0] - a[0]) * abx + (b[1] - a[1]) * aby;
+        if (perp < COLLIN_TOL && forward > 0 && forward < len * len) continue; // prune b
+      }
+    }
+    keep.push(dedup[i]);
+  }
+  return keep;
+};
+
 // ---------------------------------------------------------------------
 // gdsShapesToComponents: apply the dialog mapping and build components.
 //
@@ -523,57 +609,6 @@ export function gdsShapesToComponents(shapes, mapping, opts = {}) {
     dx = at.x - (minX + maxX) / 2;
     dy = at.y - (minY + maxY) / 2;
   }
-
-  const targetFields = (target) => {
-    if (typeof target === 'string' && target.startsWith('cond:')) {
-      return { layer: 'electrode', conductorLayerId: target.slice(5) };
-    }
-    if (target === 'wg') return { layer: 'waveguide' };
-    return { layer: 'gdsundef' }; // 'undef' and anything unknown
-  };
-
-  // Consecutive-duplicate removal (zero-length rel steps break nothing
-  // but bloat the chain) + COLLINEAR pruning: a mid-point within 1 nm of
-  // the straight line between its neighbors (and travelling FORWARD —
-  // spikes reverse direction and are kept) is redundant tessellation
-  // noise; dropping it shrinks huge imported chains without moving any
-  // edge by more than fab resolution. Vertex 0 (the component root) is
-  // never pruned.
-  const sanitize = (pts, closed) => {
-    const dedup = [];
-    for (const p of pts) {
-      const prev = dedup[dedup.length - 1];
-      if (prev && Math.abs(prev[0] - p[0]) < 1e-9 && Math.abs(prev[1] - p[1]) < 1e-9) continue;
-      dedup.push(p);
-    }
-    if (closed && dedup.length >= 2) {
-      const [fx, fy] = dedup[0];
-      const [lx, ly] = dedup[dedup.length - 1];
-      if (Math.abs(fx - lx) < 1e-9 && Math.abs(fy - ly) < 1e-9) dedup.pop();
-    }
-    if (dedup.length < 3) return dedup;
-    const COLLIN_TOL = 1e-3; // µm — 1 nm perpendicular deviation
-    const keep = [dedup[0]];
-    const last = () => keep[keep.length - 1];
-    for (let i = 1; i < dedup.length; i++) {
-      const isLast = i === dedup.length - 1;
-      // Next point after i (wraps to v0 for closed outlines so the
-      // closing edge prunes too; the open-chain end point always stays).
-      const nxt = isLast ? (closed ? dedup[0] : null) : dedup[i + 1];
-      if (nxt) {
-        const a = last(), b = dedup[i];
-        const abx = nxt[0] - a[0], aby = nxt[1] - a[1];
-        const len = Math.hypot(abx, aby);
-        if (len > 1e-9) {
-          const perp = Math.abs((b[0] - a[0]) * aby - (b[1] - a[1]) * abx) / len;
-          const forward = (b[0] - a[0]) * abx + (b[1] - a[1]) * aby;
-          if (perp < COLLIN_TOL && forward > 0 && forward < len * len) continue; // prune b
-        }
-      }
-      keep.push(dedup[i]);
-    }
-    return keep;
-  };
 
   const components = [];
   let k = 0, degenerate = 0;
@@ -650,5 +685,166 @@ export function gdsShapesToComponents(shapes, mapping, opts = {}) {
   if (degenerate > 0) {
     warnings.push({ code: 'degenerate', msg: `${degenerate} shape(s) skipped (too few distinct vertices).` });
   }
+  return { components, warnings };
+}
+
+// ---------------------------------------------------------------------
+// IMMUTABLE IMPORT MODE — gdsShapesToGroups.
+//
+// One `gdsgroup` component PER MAPPED GDS LAYER, holding the layer's
+// ENTIRE flattened geometry as PACKED numeric rings — the way an HFSS
+// "Import GDS" behaves: static geometry you position, snap to, and
+// export, but never vertex-edit. This is the scalable path for real
+// dies (the per-shape editable mode turned a 1.4 MB GDS into a 76 MB
+// design file; packed rings are ~10-20× smaller and render as ONE
+// <path> per layer).
+//
+// Component shape (rect-frame semantics — everything existing Just
+// Works):
+//   { id, kind: 'gdsgroup',
+//     layer / conductorLayerId (from the mapping target),
+//     cx, cy,          // numeric BBOX CENTER (the drag handle)
+//     w, h,            // NUMERIC literal strings (immutable dims) —
+//                      // anchors/snaps/selection frame flow through the
+//                      // standard rect-frame code paths untouched
+//     rings: [[x0,y0,x1,y1,...], ...],  // flat, LOCAL to (cx,cy),
+//                      // rounded to 1e-4 µm, CCW-normalized (nonzero
+//                      // fill = union overdraw, per GDS layer semantics)
+//     gdsSrc: { file, cell, layer, datatype, v0x, v0y } }
+//                      // v0x/v0y = ORIGINAL GDS coords of the center —
+//                      // same registration contract as editable mode
+//
+// PATH shapes flatten exactly like editable mode: open → pathToOutline
+// ring; closed-loop → band = OUTER + INNER offset rings (miter joins);
+// width-less paths are skipped with a warning (no 1-D geometry in a
+// packed group).
+const roundRing = (pts, cx, cy) => {
+  const flat = new Array(pts.length * 2);
+  for (let i = 0; i < pts.length; i++) {
+    flat[i * 2] = Math.round((pts[i][0] - cx) * 1e4) / 1e4;
+    flat[i * 2 + 1] = Math.round((pts[i][1] - cy) * 1e4) / 1e4;
+  }
+  return flat;
+};
+const ringSignedArea = (pts) => {
+  let a = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const [x1, y1] = pts[i];
+    const [x2, y2] = pts[(i + 1) % pts.length];
+    a += x1 * y2 - x2 * y1;
+  }
+  return a / 2;
+};
+
+export function gdsShapesToGroups(shapes, mapping, opts = {}) {
+  const { prefix = 'gds1', file = '', at = null, forcedOffset = null } = opts;
+  const warnings = [];
+  const included = shapes.filter(s => {
+    const m = mapping[`${s.layer}/${s.datatype}`];
+    return m && m.include !== false;
+  });
+
+  // Same one-translation-for-everything contract as editable mode.
+  let dx = 0, dy = 0;
+  if (forcedOffset && Number.isFinite(forcedOffset.dx) && Number.isFinite(forcedOffset.dy)) {
+    dx = forcedOffset.dx;
+    dy = forcedOffset.dy;
+  } else if (at && included.length > 0) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const s of included) {
+      for (const [x, y] of s.pts) {
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+    }
+    dx = at.x - (minX + maxX) / 2;
+    dy = at.y - (minY + maxY) / 2;
+  }
+
+  // Group shapes by (layer, datatype) and build each group's rings.
+  const byKey = new Map();
+  for (const s of included) {
+    const key = `${s.layer}/${s.datatype}`;
+    if (!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key).push(s);
+  }
+
+  const components = [];
+  let degenerate = 0, widthless = 0, loopK = 0;
+  for (const [key, group] of byKey) {
+    const m = mapping[key];
+    const [gLayer, gDt] = key.split('/').map(Number);
+    const rings = []; // world-µm point lists (converted to local at the end)
+    for (const s of group) {
+      const raw = s.pts.map(([x, y]) => [x + dx, y + dy]);
+      if (s.kind === 'path') {
+        const loop = raw.length >= 3
+          && Math.abs(raw[0][0] - raw[raw.length - 1][0]) < 1e-9
+          && Math.abs(raw[0][1] - raw[raw.length - 1][1]) < 1e-9;
+        if (!(s.widthUm > 0)) { widthless++; continue; }
+        if (loop) {
+          // A closed-loop path is an ANNULAR BAND — its inner offset ring
+          // is a HOLE, and the packed-rings model has no hole semantics
+          // (two independent fill rings imported the band as a SOLID DISK
+          // in EVERY consumer — a probe-confirmed adversarial-review
+          // find: a ring electrode became a dead short in HFSS/Q2D).
+          // Emit it as a separate CLOSED constant-width POLYLINE instead
+          // — exactly what editable mode does; every consumer renders /
+          // exports the band correctly today.
+          const pts = sanitize(raw.slice(0, -1), true);
+          if (pts.length >= 3) {
+            components.push({
+              id: `${prefix}_loop${++loopK}`,
+              kind: 'polyline',
+              cx: pts[0][0], cy: pts[0][1],
+              w: '0', h: '0',
+              width: fmtUm(s.widthUm), closed: true,
+              cutouts: [], transforms: [],
+              vertices: pts.map(([x, y], i) => (i === 0
+                ? { kind: 'rel', dx: '0', dy: '0' }
+                : { kind: 'rel', dx: fmtUm(x - pts[i - 1][0]), dy: fmtUm(y - pts[i - 1][1]) })),
+              label: `${prefix} loop L${key}`,
+              gdsSrc: { file, cell: s.cell || '', layer: gLayer, datatype: gDt, v0x: pts[0][0] - dx, v0y: pts[0][1] - dy },
+              ...targetFields(m.target),
+            });
+          } else degenerate++;
+        } else {
+          const outline = pathToOutline(raw, s.widthUm, s.pathtype);
+          if (outline) rings.push(outline); else degenerate++;
+        }
+      } else {
+        const ring = sanitize(raw, true);
+        if (ring.length >= 3) rings.push(ring); else degenerate++;
+      }
+    }
+    if (rings.length === 0) continue;
+    // Group bbox → center + numeric dims.
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const ring of rings) {
+      for (const [x, y] of ring) {
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+      }
+    }
+    const cx = Math.round(((minX + maxX) / 2) * 1e4) / 1e4;
+    const cy = Math.round(((minY + maxY) / 2) * 1e4) / 1e4;
+    // CCW-normalize (nonzero fill = union overdraw), pack local+rounded.
+    const packed = rings.map(ring => roundRing(ringSignedArea(ring) < 0 ? [...ring].reverse() : ring, cx, cy));
+    const nVerts = packed.reduce((a, r) => a + r.length / 2, 0);
+    components.push({
+      id: `${prefix}_L${gLayer}_${gDt}`,
+      kind: 'gdsgroup',
+      cx, cy,
+      w: fmtUm(Math.max(maxX - minX, 1e-4)),
+      h: fmtUm(Math.max(maxY - minY, 1e-4)),
+      rings: packed,
+      cutouts: [], transforms: [],
+      label: `${file || 'gds'} L${key} (${rings.length} shapes, ${nVerts} pts)`,
+      gdsSrc: { file, cell: group[0].cell || '', layer: gLayer, datatype: gDt, v0x: cx - dx, v0y: cy - dy },
+      ...targetFields(m.target),
+    });
+  }
+  if (degenerate > 0) warnings.push({ code: 'degenerate', msg: `${degenerate} shape(s) skipped (too few distinct vertices).` });
+  if (widthless > 0) warnings.push({ code: 'widthless-paths', msg: `${widthless} width-less path(s) skipped in immutable mode (no 1-D geometry in a packed layer group).` });
   return { components, warnings };
 }

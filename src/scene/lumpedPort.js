@@ -25,6 +25,14 @@ const TOL = 0.05;
 
 // Returns the resolved (w, h, cx, cy) of a primitive or boolean instance.
 function instExtent(inst, paramValues) {
+  // Immutable imported GDS layouts are ONE component whose bbox spans the
+  // whole imported layer — treating that bbox as metal produced FALSE
+  // port-flanker matches at bbox edges where the layer is empty (and a
+  // port INSIDE the bbox can never match an edge anyway). The packed
+  // rings aren't edge-testable here, so imported groups don't participate
+  // in port adjacency: draw editable feed rects on top for port regions
+  // (documented in CLAUDE.md's GDS-import section).
+  if (inst.kind === 'gdsgroup') return null;
   const w = Number.isFinite(inst.w) ? inst.w : evalExpr(inst.w, paramValues);
   const h = Number.isFinite(inst.h) ? inst.h : evalExpr(inst.h, paramValues);
   if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return null;

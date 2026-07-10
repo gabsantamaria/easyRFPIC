@@ -644,3 +644,229 @@ describe('HFSS export integration', () => {
     expect(solids.some(s => s.compId === 'gds1_1' || s.selectId === 'gds1_1')).toBe(true);
   });
 });
+
+describe('KLayout $$$CONTEXT_INFO$$$ metadata cells (phantom-starburst fix)', async () => {
+  const { isGdsMetaCell } = await import('../src/gds/gds-import.js');
+
+  it('meta cells are never top candidates and their refs do not count', () => {
+    expect(isGdsMetaCell('$$$CONTEXT_INFO$$$')).toBe(true);
+    expect(isGdsMetaCell('TOP')).toBe(false);
+    // CTX references BOTH the real top and a library cell at origin —
+    // the real top must still surface as THE top candidate.
+    const buf = cat(
+      libHeader(),
+      bgnstr('LIB_BEND'), boundary(2, 0, [[0, 0], [1000, 0], [1000, 1000], [0, 0]]), rec(R.ENDSTR, 0x00),
+      bgnstr('REALTOP'),
+      boundary(2, 0, [[50000, 0], [60000, 0], [60000, 5000], [50000, 0]]),
+      cat(rec(R.SREF, 0x00), asciiRec(R.SNAME, 'LIB_BEND'), rec(R.XY, 0x03, int4(70000, 0)), rec(R.ENDEL, 0x00)),
+      rec(R.ENDSTR, 0x00),
+      bgnstr('$$$CONTEXT_INFO$$$'),
+      cat(rec(R.SREF, 0x00), asciiRec(R.SNAME, 'REALTOP'), rec(R.XY, 0x03, int4(0, 0)), rec(R.ENDEL, 0x00)),
+      cat(rec(R.SREF, 0x00), asciiRec(R.SNAME, 'LIB_BEND'), rec(R.XY, 0x03, int4(0, 0)), rec(R.ENDEL, 0x00)),
+      rec(R.ENDSTR, 0x00),
+      rec(R.ENDLIB, 0x00),
+    );
+    const parsed = parseGDS(buf);
+    const tops = topCellsOf(parsed);
+    expect(tops[0]).toBe('REALTOP');            // ranked first, meta excluded
+    expect(tops).not.toContain('$$$CONTEXT_INFO$$$');
+    const { shapes } = flattenGDSCell(parsed, tops[0]);
+    // REALTOP = its own shape + ONE placed LIB_BEND — NOT the phantom
+    // origin copy the context refs would have added.
+    expect(shapes.length).toBe(2);
+    expect(shapes.every(s => s.pts.every(([x]) => x >= 45))).toBe(true); // nothing at the origin
+  });
+});
+
+describe('immutable import mode (gdsShapesToGroups)', async () => {
+  const { gdsShapesToGroups } = await import('../src/gds/gds-import.js');
+  const shapes = [
+    { kind: 'boundary', layer: 1, datatype: 0, cell: 'T', widthUm: 0, pts: [[0, 0], [10, 0], [10, 5], [0, 5]] },
+    { kind: 'boundary', layer: 1, datatype: 0, cell: 'T', widthUm: 0, pts: [[20, 0], [30, 0], [30, 5], [20, 5]] },
+    { kind: 'boundary', layer: 2, datatype: 0, cell: 'T', widthUm: 0, pts: [[0, 50], [4, 50], [4, 54], [0, 54]] },
+  ];
+  const mapping = {
+    '1/0': { include: true, target: 'cond:l_cond' },
+    '2/0': { include: true, target: 'undef' },
+  };
+
+  it('packs ONE component per GDS layer with local CCW rings and numeric dims', () => {
+    const { components } = gdsShapesToGroups(shapes, mapping, { prefix: 'g', file: 'a.gds' });
+    expect(components.length).toBe(2);
+    const g1 = components.find(c => c.gdsSrc.layer === 1);
+    expect(g1.kind).toBe('gdsgroup');
+    expect(g1.layer).toBe('electrode');
+    expect(g1.conductorLayerId).toBe('l_cond');
+    expect(g1.rings.length).toBe(2);
+    // bbox center of L1: x [0,30] y [0,5] -> (15, 2.5); dims numeric strings
+    expect(g1.cx).toBeCloseTo(15, 9);
+    expect(g1.cy).toBeCloseTo(2.5, 9);
+    expect(g1.w).toBe('30');
+    expect(g1.h).toBe('5');
+    // rings LOCAL to center: first rect spans x [-15, -5]
+    const xs = g1.rings[0].filter((_, i) => i % 2 === 0);
+    expect(Math.min(...xs)).toBeCloseTo(-15, 9);
+    expect(Math.max(...xs)).toBeCloseTo(-5, 9);
+    // CCW normalization: shoelace of ring 0 is positive
+    let area = 0;
+    const r0 = g1.rings[0];
+    for (let i = 0; i < r0.length; i += 2) {
+      const x1 = r0[i], y1 = r0[i + 1];
+      const x2 = r0[(i + 2) % r0.length], y2 = r0[(i + 3) % r0.length];
+      area += x1 * y2 - x2 * y1;
+    }
+    expect(area).toBeGreaterThan(0);
+    const g2 = components.find(c => c.gdsSrc.layer === 2);
+    expect(g2.layer).toBe('gdsundef');
+    expect(isNonModelComponent(g2)).toBe(true);
+  });
+
+  it('registration contract holds: cx − v0x = the shared import translation', () => {
+    const { components } = gdsShapesToGroups(shapes, mapping, { prefix: 'g', at: { x: 100, y: -50 } });
+    for (const c of components) {
+      expect(c.cx - c.gdsSrc.v0x).toBeCloseTo(components[0].cx - components[0].gdsSrc.v0x, 9);
+    }
+    // forcedOffset wins (same math as editable mode)
+    const B = gdsShapesToGroups(shapes, mapping, { prefix: 'h', forcedOffset: { dx: 7, dy: 9 } }).components;
+    expect(B[0].cx - B[0].gdsSrc.v0x).toBeCloseTo(7, 9);
+    expect(B[0].cy - B[0].gdsSrc.v0y).toBeCloseTo(9, 9);
+  });
+
+  it('solves with rect-frame semantics (anchors on the numeric bbox)', () => {
+    const { components } = gdsShapesToGroups(shapes, mapping, { prefix: 'g' });
+    const sc = normalizeScene({ params: {}, components, snaps: [], mirrors: [], groups: [], booleans: [] });
+    expect(sc.components.find(c => c.kind === 'gdsgroup').rings).toBeTruthy(); // normalize passthrough
+    const solved = solveLayout(sc.components, sc.snaps, {});
+    const g1 = solved.find(c => c.id === 'g_L1_0');
+    const ne = anchorWorld(g1, 'NE', {});
+    expect(ne.x).toBeCloseTo(30, 6);
+    expect(ne.y).toBeCloseTo(5, 6);
+  });
+
+  it('a rect snapped to a gdsgroup anchor stays parametric through HFSS', () => {
+    const { components } = gdsShapesToGroups(shapes, mapping, { prefix: 'g' });
+    const base = normalizeScene(makeDefaultScene());
+    const sc = normalizeScene({
+      ...base,
+      params: { ...base.params, ggap: { expr: '2.5', unit: 'µm', desc: 'gap' } },
+      components: [...base.components, ...components,
+        { id: 'probe2', kind: 'rect', layer: 'electrode', conductorLayerId: 'l_cond', cx: 0, cy: 0, w: '5', h: '5', cutouts: [], transforms: [] }],
+      snaps: [...base.snaps,
+        { id: 's_g', from: { compId: 'g_L1_0', anchor: 'E' }, to: { compId: 'probe2', anchor: 'W' }, dx: 'ggap', dy: '0' }],
+    });
+    const pv = resolveParams(sc.params).values;
+    const solved = solveLayout(sc.components, sc.snaps, pv);
+    const probe = solved.find(c => c.id === 'probe2');
+    expect(probe.cx).toBeCloseTo(30 + 2.5 + 2.5, 4);
+    const script = generateHfssNative(sc, pv, {});
+    expect(script).toContain('g_L1_0');           // group emitted
+    expect(script).toContain('set_var("ggap"');   // snap param live
+    expect(script).toContain('TranslateParameters'); // parametric Move idiom
+    // Sweep parity on the canvas side
+    const pv2 = resolveParams({ ...sc.params, ggap: { ...sc.params.ggap, expr: '8' } }).values;
+    const probe2 = solveLayout(sc.components, sc.snaps, pv2).find(c => c.id === 'probe2');
+    expect(probe2.cx).toBeCloseTo(30 + 8 + 2.5, 4);
+  });
+
+  it('closed-loop paths become SEPARATE closed polylines — the band keeps its hole', () => {
+    // A ring electrode drawn as a closed-loop PATH: packing its band as
+    // two fill rings imported it as a SOLID DISK in every consumer
+    // (probe-confirmed adversarial-review find). In immutable mode it now
+    // emits as a closed constant-width polyline alongside the group —
+    // exactly editable mode's (correct) treatment.
+    const withLoop = [
+      ...shapes,
+      { kind: 'path', layer: 1, datatype: 0, cell: 'T', widthUm: 2, pathtype: 1,
+        pts: [[50, 0], [70, 0], [70, 20], [50, 20], [50, 0]] },
+    ];
+    const { components } = gdsShapesToGroups(withLoop, mapping, { prefix: 'g' });
+    const loop = components.find(c => c.kind === 'polyline');
+    expect(loop).toBeTruthy();
+    expect(loop.closed).toBe(true);
+    expect(loop.width).toBe('2');
+    expect(loop.vertices.length).toBe(4);
+    expect(loop.layer).toBe('electrode'); // mapping target applied
+    // The layer group still packs the two rects only.
+    const g1 = components.find(c => c.kind === 'gdsgroup' && c.gdsSrc.layer === 1);
+    expect(g1.rings.length).toBe(2);
+  });
+
+  it('mirror instances reflect the packed rings in scene3d/GDS (canvas-HFSS parity)', async () => {
+    const { buildScene3D } = await import('../src/scene/scene3d.js');
+    // Asymmetric group + duplicate_mirror: the replica's rings must be
+    // REFLECTED (HFSS emits a real DuplicateMirror for the united part —
+    // the numeric consumers must agree).
+    const { components } = gdsShapesToGroups(
+      [{ kind: 'boundary', layer: 1, datatype: 0, cell: 'T', widthUm: 0, pts: [[0, 0], [10, 0], [10, 2], [0, 2]] }],
+      { '1/0': { include: true, target: 'cond:l_cond' } }, { prefix: 'gm' });
+    const gm = {
+      ...components[0],
+      transforms: [{ id: 't1', kind: 'duplicate_mirror', enabled: true, axis: 'x', dx: '20', dy: '0' }],
+    };
+    const base = normalizeScene(makeDefaultScene());
+    const sc = normalizeScene({ ...base, components: [...base.components, gm] });
+    const pv = resolveParams(sc.params).values;
+    const { solids } = buildScene3D(sc, pv);
+    const gs = solids.filter(s => s.compId === 'gm_L1_0');
+    expect(gs.length).toBe(2); // base + mirrored replica
+    // Base ring x-span [0,10]; whatever the mirror line, the REPLICA must
+    // be a reflection: its ring's x-extent equals the base's extent and
+    // its orientation flips (signed area negates without scale fix; with
+    // the fix both are valid polygons but the x-order of the first two
+    // points reverses). Robust check: replica ring != base ring translated.
+    const spanOf = (ring) => {
+      const xs = ring.map(p => p[0]);
+      return [Math.min(...xs), Math.max(...xs)];
+    };
+    const [b0, b1] = spanOf(gs[0].ring);
+    const [r0, r1] = spanOf(gs[1].ring);
+    expect(+(b1 - b0).toFixed(6)).toBeCloseTo(+(r1 - r0).toFixed(6), 6);
+    // The base shape's LEFT edge is at local -5 (asymmetric would be
+    // needed for a stronger check) — assert the replica x-span mirrors
+    // about the duplicate_mirror line rather than being a pure translate:
+    // for axis mirrors expandTransforms sets scaleX=-1, so the local +x
+    // side lands on the replica's -x side. Compare point 0's x offset.
+    const baseP0 = gs[0].ring[0][0] - (b0 + b1) / 2;
+    const replP0 = gs[1].ring[0][0] - (r0 + r1) / 2;
+    expect(replP0).toBeCloseTo(-baseP0, 6);
+  });
+
+  it('3-D viewer emits one solid per packed ring', async () => {
+    const { buildScene3D } = await import('../src/scene/scene3d.js');
+    const { components } = gdsShapesToGroups(shapes, mapping, { prefix: 'g' });
+    const base = normalizeScene(makeDefaultScene());
+    const sc = normalizeScene({ ...base, components: [...base.components, ...components] });
+    const pv = resolveParams(sc.params).values;
+    const { solids } = buildScene3D(sc, pv);
+    const gSolids = solids.filter(s => s.compId === 'g_L1_0');
+    expect(gSolids.length).toBe(2); // one per ring
+    expect(gSolids[0].kind).toBe('extrude');
+    // undef group skipped
+    expect(solids.some(s => s.compId === 'g_L2_0')).toBe(false);
+  });
+
+  it('cross-section slices the REAL rings, not the bbox', async () => {
+    const { buildCrossSection } = await import('../src/scene/cross-section.js');
+    const { components } = gdsShapesToGroups(shapes, mapping, { prefix: 'g' });
+    const base = normalizeScene(makeDefaultScene());
+    const sc = normalizeScene({
+      ...base,
+      components: [
+        ...base.components.filter(c => c.layer !== 'electrode' && c.layer !== 'port' && c.layer !== 'waveguide'),
+        ...components,
+        { id: 'secA', kind: 'polyline', layer: 'section', cx: -5, cy: 2.5, w: '0', h: '0', width: '0',
+          vertices: [{ kind: 'rel', dx: '0', dy: '0' }, { kind: 'rel', dx: '45', dy: '0' }], cutouts: [], transforms: [] },
+      ],
+    });
+    const pv = resolveParams(sc.params).values;
+    const cross = buildCrossSection(sc, pv, 'secA');
+    expect(cross.ok).toBe(true);
+    const cond = cross.conductors.find(c => c.id.startsWith('g_L1_0'));
+    expect(cond).toBeTruthy();
+    // The group has TWO rects with a 10 µm gap — the slice must show TWO
+    // intervals (a bbox fallback would show one 30 µm slab).
+    expect(cond.intervals.length).toBe(2);
+    const spans = cond.intervals.map(iv => +(iv.t1 - iv.t0).toFixed(3)).sort();
+    expect(spans).toEqual([10, 10]);
+  });
+});

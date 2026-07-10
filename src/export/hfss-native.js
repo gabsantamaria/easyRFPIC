@@ -2429,6 +2429,142 @@ except Exception as e:
       // for zero-thickness sheets. The result is a single HFSS object
       // whose width, thickness, path, and vertex bindings ALL re-evaluate
       // under HFSS-side variable sweeps — no hardcoded coordinates.
+      // ── IMMUTABLE IMPORTED GDS LAYOUT (kind 'gdsgroup') ──────────────
+      // One packed layer group from the GDS import's immutable mode: the
+      // HFSS-import idiom — STATIC ring geometry, parametric POSITION.
+      // Each ring is a covered closed CreatePolyline at NUMERIC LOCAL
+      // coordinates (relative to the group center); all rings Unite into
+      // one part; solid mode sweeps up by the layer thickness (sheet mode
+      // joins the impedance boundary); then ONE oEditor.Move by the
+      // group's parametric snap-chain position — so the whole imported
+      // layout tracks HFSS-side sweeps of anything feeding its snap
+      // chain, while the ring geometry itself stays baked (immutable by
+      // design, exactly like File → Import GDS in HFSS).
+      if (shapeKind === 'gdsgroup') {
+        const ringsG = (c.rings || []).filter(r => Array.isArray(r) && r.length >= 6);
+        if (ringsG.length === 0) {
+          code += `# ${c.id}: imported GDS layer group with no rings — skipped\n`;
+          continue;
+        }
+        const isSheetG = (Math.abs(zSize) < 1e-9);
+        const posXExpr = ppShape ? exprWithUm(ppShape.cxExpr) : numUm(cx.toFixed(4));
+        const posYExpr = ppShape ? exprWithUm(ppShape.cyExpr) : numUm(cy.toFixed(4));
+        const solveInsideG = c.layer === 'waveguide' ? 'True' : 'False';
+        const partNamesG = [];
+        ringsG.forEach((ring, k) => {
+          const name = k === 0 ? id : `${id}__r${k}`;
+          partNamesG.push(name);
+          const nPts = ring.length / 2;
+          const pts = [];
+          for (let i = 0; i < ring.length; i += 2) {
+            pts.push(`["NAME:PLPoint", "X:=", "${ring[i].toFixed(4)}um", "Y:=", "${ring[i + 1].toFixed(4)}um", "Z:=", "${zBottomExpr}"]`);
+          }
+          pts.push(`["NAME:PLPoint", "X:=", "${ring[0].toFixed(4)}um", "Y:=", "${ring[1].toFixed(4)}um", "Z:=", "${zBottomExpr}"]`);
+          const segs = [];
+          for (let k2 = 0; k2 < nPts; k2++) {
+            segs.push(`["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", ${k2}, "NoOfPoints:=", 2]`);
+          }
+          code += `try:
+    _delete_geom_if_exists("${name}")
+    oEditor.CreatePolyline(
+        ["NAME:PolylineParameters",
+         "IsPolylineCovered:=", True,
+         "IsPolylineClosed:=", True,
+         ["NAME:PolylinePoints",
+          ${pts.join(',\n          ')}],
+         ["NAME:PolylineSegments",
+          ${segs.join(',\n          ')}],
+         ["NAME:PolylineXSection",
+          "XSectionType:=", "None",
+          "XSectionOrient:=", "Auto",
+          "XSectionWidth:=", "0um",
+          "XSectionTopWidth:=", "0um",
+          "XSectionHeight:=", "0um",
+          "XSectionNumSegments:=", "0",
+          "XSectionBendType:=", "Corner"]],
+        ["NAME:Attributes",
+         "Name:=", "${name}",
+         "Flags:=", "",
+         "Color:=", "(218 165 32)",
+         "Transparency:=", 0.0,
+         "PartCoordinateSystem:=", "Global",
+         "MaterialValue:=", "\\"${ascii(materialName)}\\"",
+         "SolveInside:=", ${solveInsideG}])
+except Exception as e:
+    try:
+        oDesktop.AddMessage("", "", 1, "Failed to build imported ring ${name}: " + str(e))
+    except:
+        pass
+`;
+        });
+        // Solid mode: thicken EVERY ring (solids unite robustly;
+        // coincident-edge SHEET unions can fail — see below).
+        if (!isSheetG) {
+          code += `try:
+    oEditor.SweepAlongVector(
+        ["NAME:Selections", "Selections:=", "${partNamesG.join(',')}", "NewPartsModelFlag:=", "Model"],
+        ["NAME:VectorSweepParameters",
+         "DraftAngle:=", "0deg", "DraftType:=", "Round",
+         "CheckFaceFaceIntersection:=", False,
+         "SweepVectorX:=", "0um",
+         "SweepVectorY:=", "0um",
+         "SweepVectorZ:=", "${zSizeExpr}"])
+except Exception as e:
+    try:
+        oDesktop.AddMessage("", "", 1, "Failed to thicken imported layout ${id}: " + str(e))
+    except:
+        pass
+`;
+        }
+        // ONE parametric Move of ALL ring parts to the group's solved /
+        // snap-chain position — BEFORE any Unite, so a failed boolean can
+        // never leave stray __r<k> parts stranded at the local origin
+        // (adversarial-review find).
+        code += `try:
+    oEditor.Move(
+        ["NAME:Selections", "Selections:=", "${partNamesG.join(',')}", "NewPartsModelFlag:=", "Model"],
+        ["NAME:TranslateParameters",
+         "TranslateVectorX:=", "${posXExpr}",
+         "TranslateVectorY:=", "${posYExpr}",
+         "TranslateVectorZ:=", "0um"])
+except Exception as e:
+    try:
+        oDesktop.AddMessage("", "", 1, "Failed to position imported layout ${id}: " + str(e))
+    except:
+        pass
+`;
+        // SOLID mode: Unite the positioned solids into one part (survivor
+        // keeps ring 0's name = id). SHEET mode: NO Unite — abutting GDS
+        // metal shares edges and coincident-edge sheet unions are exactly
+        // the failure the taper branch documents; instead EVERY ring sheet
+        // joins the impedance boundary individually (the boundary takes a
+        // list — one part is not required).
+        if (!isSheetG && partNamesG.length > 1) {
+          code += `try:
+    oEditor.Unite(
+        ["NAME:Selections", "Selections:=", "${partNamesG.join(',')}"],
+        ["NAME:UniteParameters", "KeepOriginals:=", False])
+except Exception as e:
+    try:
+        oDesktop.AddMessage("", "", 1, "Unite of imported layout ${id} failed (parts remain correctly positioned; unite manually if needed): " + str(e))
+    except:
+        pass
+`;
+        }
+        if (c.layer === 'electrode') emittedElecNames.push(id);
+        else if (c.layer === 'waveguide') emittedWgNames.push(id);
+        if (isSheetG && c.layer === 'electrode') {
+          for (const nm of partNamesG) registerSheet(nm, c);
+        }
+        if (ppShape) notePara(c.id, 'pos (imported ring geometry is static by design)');
+        else noteFrozen(c.id, 'gdsgroup base position (no parametric snap chain)');
+        noteCaveat(c.id, `imported GDS layout: ${ringsG.length} static ring(s) (HFSS-import idiom — geometry immutable, position ${ppShape ? 'parametric' : 'baked'})`);
+        if (isSheetG && (c.transforms || []).some(t => t.enabled !== false)) {
+          noteCaveat(c.id, 'transform chain on a SHEET-mode imported layout applies to ring 0 only — verify in HFSS or use solid conductors');
+        }
+        continue;
+      }
+
       if (shapeKind === 'polyline' || shapeKind === 'polyshape') {
         const isPolyshape = shapeKind === 'polyshape';
         const widthExprUm = isPolyshape ? '0um' : exprWithUm(c.width ?? '0');

@@ -236,6 +236,24 @@ export function buildScene3D(rawScene, paramValues) {
   // Returns [{ ring, holes }] — most shapes yield one entry; polylines can
   // yield several (tapered per-segment quads).
   const footprintRings = (c, inst) => {
+    if (c.kind === 'gdsgroup') {
+      // Immutable imported layout: one solid per packed ring (rings are
+      // LOCAL to the component center; instance rotation applied here).
+      const radG = ((inst.rotation || 0) * Math.PI) / 180;
+      const caG = Math.cos(radG), saG = Math.sin(radG);
+      const gsx = inst.scaleX ?? 1, gsy = inst.scaleY ?? 1; // mirror chains
+      const out = [];
+      for (const flat of (c.rings || [])) {
+        if (!Array.isArray(flat) || flat.length < 6) continue;
+        const ring = [];
+        for (let i = 0; i < flat.length; i += 2) {
+          const lx = flat[i] * gsx, ly = flat[i + 1] * gsy; // scale FIRST (rings.js order)
+          ring.push([inst.cx + lx * caG - ly * saG, inst.cy + lx * saG + ly * caG]);
+        }
+        out.push({ ring, holes: [] });
+      }
+      return out;
+    }
     if (c.kind === 'polyline') {
       const w = Number.isFinite(inst.width) ? inst.width : 0;
       if (!(w > 0)) {

@@ -886,9 +886,51 @@ through `downloadFile` as `<exportFileBase()>_q2d.py` /
 
 ## GDS import
 
-Binary GDS-II upload → per-layer mapping dialog → independent canvas
-shapes (background right-click → "Import GDS here…"; the import is
-centered at the click point unless "keep original GDS coordinates").
+Binary GDS-II upload → per-layer mapping dialog → canvas geometry
+(background right-click → "Import GDS here…"; the import is centered at
+the click point unless "keep original GDS coordinates"). TWO import
+modes (dialog radio):
+
+- **IMMUTABLE (default — the HFSS-import idiom)**: ONE `gdsgroup`
+  component PER MAPPED GDS LAYER. Rect-frame semantics — `cx/cy` =
+  numeric bbox CENTER, `w/h` = NUMERIC literal strings — so anchors,
+  snaps (both sides, parametric in HFSS via the normal chain), selection
+  frame, drag, and alignment all flow through existing rect code paths
+  untouched. Geometry lives in `rings`: packed flat `[x,y,...]` arrays
+  LOCAL to the center, rounded to 1e-4 µm, CCW-normalized (nonzero fill
+  = per-GDS union semantics). ~40× smaller design files than editable
+  mode on a real die (1.4 MB GDS → 1.8 MB scene vs 76 MB) and renders as
+  ONE memoized `<path>` per layer (`gdsGroupPathD`, WeakMap on the
+  immutable rings; instance mirror/rotate compose into the `<g>`
+  transform). Consumers: canvas render + dashed no-resize frame, gds.js
+  (BOUNDARY per ring), scene3d + cross-section `footprintRings` (REAL
+  rings, never the bbox; instance scale applied FIRST — rings.js order —
+  then rotation: the 4 numeric consumers must mirror exactly like the
+  HFSS transform chain does, a probe-confirmed review find), pyaedt
+  (covered sheets + unite + thicken), hfss-native (numeric LOCAL ring
+  sheets → thicken (solid) → ONE parametric `oEditor.Move` of ALL parts
+  BEFORE any Unite (a failed Unite must never strand `__r<k>` parts at
+  the local origin) → solid-mode Unite; SHEET mode never Unites —
+  coincident-edge sheet unions fail — and registers EVERY ring in the
+  impedance boundary). CLOSED-LOOP paths are emitted as separate closed
+  constant-width POLYLINES, never packed (two fill rings turned an
+  annular band into a SOLID DISK in every consumer — dead short).
+  Exclusions: boolean operand (reject), Q3D/two-line conductor picker,
+  lumped-port adjacency (`instExtent` returns null — the layer-spanning
+  bbox produced false flanker matches; DRAW EDITABLE FEED RECTS over the
+  import for port regions), Q2D warns when a group is crossed in
+  multiple disjoint islands (one role would short them into one net).
+  Inspector: read-only stats + the GDS-import re-assign block.
+- **EDITABLE**: one vertex-editable component per shape (the original
+  mode; heavy on real dies — use for fragments you intend to modify).
+
+**KLayout metadata cells**: `$$$CONTEXT_INFO$$$` (PCell provenance)
+references every library cell once AT THE ORIGIN — treating it as a top
+cell imported a phantom copy of every bend stacked on one point (the
+"starburst"). `isGdsMetaCell` excludes `$$$...$$$` cells from top-cell
+candidacy AND from the referenced-set, so the REAL top surfaces;
+`topCellsOf` ranks candidates by memoized subtree shape count
+(unused library variants rank below the actual design).
 
 - **`src/gds/gds-import.js`** (pure; tests/gds-import.test.js):
   `parseGDS(bytes)` (record stream, REAL8 excess-64 decode — exact

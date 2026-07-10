@@ -1120,6 +1120,27 @@ function EditableSnapDims({ svgRef, viewport, snaps, solved, transformInstances,
 // resolved world point per vertex spec (resolvePolylineVertices), computed by
 // the caller so this matches the on-canvas vertex handles exactly. Arc/snap
 // vertices have no dx/dy and are skipped. Mounted with key=comp id.
+// Immutable imported GDS layout (kind 'gdsgroup') — LOCAL-coordinate
+// path string, memoized on the rings array (immutable by contract, so
+// WeakMap identity caching is exact): drags re-render only the parent
+// <g transform>, never this string.
+const GDS_GROUP_D_CACHE = new WeakMap();
+export function gdsGroupPathD(rings) {
+  if (!Array.isArray(rings)) return '';
+  const hit = GDS_GROUP_D_CACHE.get(rings);
+  if (hit) return hit;
+  const parts = [];
+  for (const ring of rings) {
+    if (!Array.isArray(ring) || ring.length < 6) continue;
+    let s = `M ${ring[0]} ${-ring[1]}`;
+    for (let i = 2; i < ring.length; i += 2) s += ` L ${ring[i]} ${-ring[i + 1]}`;
+    parts.push(s + ' Z');
+  }
+  const d = parts.join(' ');
+  GDS_GROUP_D_CACHE.set(rings, d);
+  return d;
+}
+
 // Imported-GDS dim budget: a complex imported shape can carry thousands
 // of vertices — rendering a Δx/Δy field pair + arrows per segment buried
 // the canvas and froze the UI. For shapes with gdsSrc provenance, dims
@@ -4629,7 +4650,29 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   opacity: instOpacity,
                   style: { cursor: 'move' },
                 };
-                if (shapeKind === 'circle') {
+                if (shapeKind === 'gdsgroup') {
+                  // Immutable imported GDS layout: ONE <path> with a
+                  // subpath per packed ring. The d string is built in
+                  // LOCAL coordinates and memoized on the (immutable)
+                  // rings array — drags only update the <g> transform,
+                  // never rebuild the potentially-100k-point string.
+                  // Instance mirror (scaleX/scaleY from mirror /
+                  // duplicate_mirror chains) composes into the transform:
+                  // screen = translate·rotate(−θ)·scale — the y-flip
+                  // conjugation leaves the diagonal scale unchanged, so
+                  // the cached LOCAL d stays valid for every instance.
+                  const d = gdsGroupPathD(c.rings);
+                  const gsx = inst.scaleX ?? 1;
+                  const gsy = inst.scaleY ?? 1;
+                  const xf = `translate(${inst.cx}, ${-inst.cy})`
+                    + (inst.rotation ? ` rotate(${-inst.rotation})` : '')
+                    + ((gsx !== 1 || gsy !== 1) ? ` scale(${gsx}, ${gsy})` : '');
+                  shapeElement = (
+                    <g transform={xf}>
+                      <path d={d} fillRule="nonzero" {...dataCompProps} vectorEffect="non-scaling-stroke" />
+                    </g>
+                  );
+                } else if (shapeKind === 'circle') {
                   shapeElement = (
                     <circle
                       cx={inst.cx} cy={-inst.cy}
@@ -5209,7 +5252,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   dims to reshape), so corner handles would both mislead and
                   corrupt (the resize commit would overwrite the '0' w/h
                   placeholders and shift vertex 0 by half the drag). */}
-              {isPrimary && isPathKindComp && (
+              {isPrimary && (isPathKindComp || c.kind === 'gdsgroup') && (
                 <rect
                   x={fr.cx - fr.w / 2} y={-(fr.cy + fr.h / 2)}
                   width={fr.w} height={fr.h}
@@ -5221,8 +5264,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
               {/* Resize handles (only on primary selected). Rotation-aware:
                   handles sit on the ROTATED shape's corners/edges (matching
                   the anchor dots); the drag math projects the pointer into
-                  the shape's local frame (see the 'resize' branch). */}
-              {isPrimary && !isPathKindComp && ANCHORS.filter(a => a !== 'C').map(a => {
+                  the shape's local frame (see the 'resize' branch).
+                  'gdsgroup' is IMMUTABLE imported layout — dashed frame
+                  only, no resize (dragging a handle would corrupt the
+                  packed rings' numeric w/h). */}
+              {isPrimary && !isPathKindComp && c.kind !== 'gdsgroup' && ANCHORS.filter(a => a !== 'C').map(a => {
                 const local = anchorLocalRotated(a, w, h, compRotationDeg(c, paramValues));
                 const ax = c.cx + local.x;
                 const ay = -(c.cy + local.y);

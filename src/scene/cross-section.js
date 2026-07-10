@@ -385,6 +385,25 @@ export function buildCrossSection(rawScene, paramValues, sectionCompId, opts = {
 
   // ── Footprint rings per instance (world coords) — scene3d's dispatch ──
   const footprintRings = (c, inst) => {
+    if (c.kind === 'gdsgroup') {
+      // Immutable imported layout: slice the REAL packed rings (falling
+      // to the generic bbox ring would slice a solid rectangle where the
+      // actual layer has gaps). Numeric geometry → numeric intervals.
+      const radG = ((inst.rotation || 0) * Math.PI) / 180;
+      const caG = Math.cos(radG), saG = Math.sin(radG);
+      const gsx = inst.scaleX ?? 1, gsy = inst.scaleY ?? 1; // mirror chains
+      const out = [];
+      for (const flat of (c.rings || [])) {
+        if (!Array.isArray(flat) || flat.length < 6) continue;
+        const ring = [];
+        for (let i = 0; i < flat.length; i += 2) {
+          const lx = flat[i] * gsx, ly = flat[i + 1] * gsy; // scale FIRST (rings.js order)
+          ring.push([inst.cx + lx * caG - ly * saG, inst.cy + lx * saG + ly * caG]);
+        }
+        out.push({ ring, holes: [] });
+      }
+      return out;
+    }
     if (c.kind === 'polyline') {
       const w = Number.isFinite(inst.width) ? inst.width : 0;
       if (!(w > 0)) {
@@ -1387,7 +1406,21 @@ export function buildCrossSection(rawScene, paramValues, sectionCompId, opts = {
       continue;
     }
     if (c.layer === 'waveguide') { handleWaveguide(c); continue; }
-    if (c.layer === 'electrode') { handleConductor(c); continue; }
+    if (c.layer === 'electrode') {
+      handleConductor(c);
+      // Q2D role assignment is PER CONDUCTOR ENTRY — an imported layer
+      // group crossed in several disjoint islands gets ONE signal/ground
+      // role for ALL of them (they'd short into one net). Warn loudly so
+      // the user re-imports the relevant metal as editable shapes (or
+      // draws feed rects) when islands need distinct roles.
+      if (c.kind === 'gdsgroup') {
+        const entry = conductors.find(cd => cd.id === c.id);
+        if (entry && entry.intervals && entry.intervals.length > 1) {
+          warn('gdsgroup-multi-island', `${c.id}: imported GDS layer crossed in ${entry.intervals.length} disjoint islands — Q2D assigns ONE role to all of them (they short into one net). Split roles need editable shapes.`);
+        }
+      }
+      continue;
+    }
     warn('unknown-layer', `${c.id}: layer "${c.layer}" has no cross-section mapping — skipped.`);
   }
 

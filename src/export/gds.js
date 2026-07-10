@@ -244,6 +244,29 @@ export function generateGDS(scene, paramValues) {
       // HFSS all describe the SAME band. Quads are computed at the base
       // pose and remapped into each instance's frame (translate / scale /
       // rotate), mirroring the polyshape path below.
+      if (c.kind === 'gdsgroup') {
+        // Immutable imported layout: packed numeric rings LOCAL to the
+        // component center — one BOUNDARY per ring, translated to the
+        // instance position (+ instance rotation about the center).
+        const radG = (inst.rotation || 0) * Math.PI / 180;
+        const caG = Math.cos(radG), saG = Math.sin(radG);
+        const gsx = inst.scaleX ?? 1, gsy = inst.scaleY ?? 1; // mirror chains
+        for (const ring of (c.rings || [])) {
+          if (!Array.isArray(ring) || ring.length < 6) continue;
+          writeNoData(BOUNDARY);
+          writeInt2(LAYER, [layer]);
+          writeInt2(DATATYPE, [0]);
+          const xys = [];
+          for (let i = 0; i < ring.length; i += 2) {
+            const lx = ring[i] * gsx, ly = ring[i + 1] * gsy; // scale FIRST (rings.js order)
+            xys.push(toNm(inst.cx + lx * caG - ly * saG), toNm(inst.cy + lx * saG + ly * caG));
+          }
+          xys.push(xys[0], xys[1]); // close
+          writeInt4(XY, xys);
+          writeNoData(ENDEL);
+        }
+        continue;
+      }
       if (c.kind === 'polyline' && polylineIsTapered(c)) {
         const { quads } = taperedBandQuads(c, byIdSolved, paramValues);
         const rad0 = (inst.rotation || 0) * Math.PI / 180;

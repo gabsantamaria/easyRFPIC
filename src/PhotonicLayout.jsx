@@ -91,7 +91,7 @@ import { SettingsPanel } from './ui/SettingsPanel.jsx';
 import { DEFAULT_SETTINGS, loadSettings, saveSettings, hydrateSettings, buildSettingsExport, parseSettingsImport } from './ui/settings.js';
 import { getUiPref, setUiPrefs, hydrateUiPrefs } from './ui/ui-prefs.js';
 import { loadSetupDefaults, saveSetupDefaults } from './ui/setupDefaults.js';
-import { parseGDS, gdsShapesToComponents, suggestGdsPrefix } from './gds/gds-import.js';
+import { parseGDS, gdsShapesToComponents, gdsShapesToGroups, suggestGdsPrefix } from './gds/gds-import.js';
 
 // GDS import dialog — lazy like the other heavy dialogs; mounted only
 // while an upload is pending.
@@ -3146,7 +3146,7 @@ export default function App() {
     const anchor = candidates.find(c => !scene.snaps.some(s => s.to.compId === c.id)) || candidates[0];
     return { dx: anchor.cx - anchor.gdsSrc.v0x, dy: anchor.cy - anchor.gdsSrc.v0y, count: candidates.length };
   };
-  const applyGdsImport = async ({ shapes, mapping, keepCoords }) => {
+  const applyGdsImport = async ({ shapes, mapping, keepCoords, mode }) => {
     const imp = gdsImport;
     setGdsImport(null);
     if (!imp) return;
@@ -3160,7 +3160,11 @@ export default function App() {
     const at = keepCoords
       ? null
       : (imp.at || { x: viewport.x, y: viewport.y }); // drop point, else viewport center
-    const { components: newComps, warnings } = gdsShapesToComponents(shapes, mapping, {
+    // 'immutable' (default): one packed gdsgroup per GDS layer — the
+    // HFSS-import idiom (fast + compact). 'editable': one vertex-editable
+    // component per shape.
+    const build = mode === 'editable' ? gdsShapesToComponents : gdsShapesToGroups;
+    const { components: newComps, warnings } = build(shapes, mapping, {
       prefix, file: imp.fileName, at, forcedOffset: reg ? { dx: reg.dx, dy: reg.dy } : null,
     });
     if (newComps.length === 0) {
@@ -5432,6 +5436,14 @@ export default function App() {
     const undefOperand = ids.find(id => scene.components.find(cc => cc.id === id)?.layer === 'gdsundef');
     if (undefOperand) {
       alertDialog(`"${undefOperand}" is an unassigned GDS import — assign it a canvas layer in the Inspector (GDS import block) before using it in a boolean, or the exported boolean would silently lose this operand.`, 'Cannot combine');
+      return;
+    }
+    // Immutable imported layouts are rigid blocks — the exporters' boolean
+    // paths assume ring-composable primitives, and an immutable operand
+    // couldn't honor the parametric union-bbox machinery anyway.
+    const groupOperand = ids.find(id => scene.components.find(cc => cc.id === id)?.kind === 'gdsgroup');
+    if (groupOperand) {
+      alertDialog(`"${groupOperand}" is an immutable imported GDS layout — it cannot participate in boolean operations. Re-import the layer as "Editable shapes" if you need boolean edits.`, 'Cannot combine');
       return;
     }
     // Compute the centroid of operand bboxes from the SOLVED scene so the
@@ -8579,7 +8591,7 @@ export default function App() {
                     block below owns layer assignment for imported shapes —
                     including the only path back to <undefined> and the
                     conductor binding the generic select can't set. */}
-                {selected.kind !== 'bridge' && selected.layer !== 'section' && selected.layer !== 'gdsundef' && (
+                {selected.kind !== 'bridge' && selected.kind !== 'gdsgroup' && selected.layer !== 'section' && selected.layer !== 'gdsundef' && (
                 <div>
                   <label className="text-[10px] uppercase tracking-wider text-slate-500">Layer</label>
                   <select value={selected.layer} onChange={(e) => updateComp(selected.id, { layer: e.target.value })} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs text-slate-100 outline-none">
@@ -9187,6 +9199,21 @@ export default function App() {
                             </select>
                           </div>
                         </>
+                      );
+                    }
+                    if (shapeKind === 'gdsgroup') {
+                      // Immutable imported layout: read-only stats — the
+                      // packed rings are never editable (re-import as
+                      // "Editable shapes" for vertex editing).
+                      const nR = (selected.rings || []).length;
+                      const nV = (selected.rings || []).reduce((a, r) => a + (Array.isArray(r) ? r.length / 2 : 0), 0);
+                      return (
+                        <div className="text-[11px] text-slate-400 leading-snug">
+                          <span className="text-slate-300">Immutable imported layout</span> — {nR} shape{nR === 1 ? '' : 's'}, {nV.toLocaleString()} vertices,
+                          {' '}{Number(selected.w).toFixed(1)} × {Number(selected.h).toFixed(1)} µm.
+                          Drag / snap it as one block; the geometry itself is not editable
+                          (re-import as "Editable shapes" to modify).
+                        </div>
                       );
                     }
                     // Default: rectangle.
