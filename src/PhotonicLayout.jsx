@@ -11,6 +11,7 @@ import { resolvePolylineVertices, polylineIsTapered, synthArc90 } from './geomet
 import { expandTransforms } from './scene/transforms.js';
 import { detectPortIntegrationLine } from './scene/lumpedPort.js';
 import { solveLayout, applyMirrors, resolveBooleanBboxes, validateSnapGraph, getLastSolveDiagnostics } from './scene/solver.js';
+import { isPosExprActive, translateWithPosExprs } from './scene/posexpr.js';
 import { generateGDS, viaGdsLayerMap } from './export/gds.js';
 import { generatePyAEDT } from './export/pyaedt.js';
 import { generateHfssNative } from './export/hfss-native.js';
@@ -2215,8 +2216,11 @@ export default function App() {
   // Arrow-key nudge (C4): translate the selection by (dx, dy) — the same
   // numeric cx/cy update a drag-commit applies. Boolean clusters co-move
   // (collectNudgeCluster mirrors the canvas cluster-drag expansion);
-  // snap-bound / cxExpr-bound components get re-solved back onto their
-  // constraint on the next solve, which matches drag semantics.
+  // snap-bound components get re-solved back onto their constraint on the
+  // next solve (the snap wins — matches drag semantics). An ACTIVE
+  // cxExpr/cyExpr root instead FOLDS the nudge into the expression
+  // (translateWithPosExprs — same as drag), so expression-positioned
+  // parts actually move and stay parametric.
   const nudgeSelected = useCallback((dx, dy) => {
     if (selectedIds.size === 0) return;
     updateScene(prev => {
@@ -2225,7 +2229,7 @@ export default function App() {
       return {
         ...prev,
         components: prev.components.map(c => moveSet.has(c.id)
-          ? { ...c, cx: c.cx + dx, cy: c.cy + dy }
+          ? translateWithPosExprs(c, c, dx, dy, isPosExprActive(c, prev.snaps))
           : c),
       };
     });

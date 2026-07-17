@@ -56,10 +56,20 @@ scene = {
   cxExpr?, cyExpr? }
                // OPTIONAL parametric root position (µm expression strings).
                // Applied by the solver on UNSNAPPED roots only — the exprs
-               // overwrite cx/cy on EVERY solve (a numeric drag is overwritten
-               // on the next solve, same UX as snap-bound parts). Snap-bound
-               // components ignore them (the snap wins); booleans never apply
-               // them. Non-finite evaluation keeps the numeric cx/cy and
+               // overwrite cx/cy on EVERY solve. Snap-bound components ignore
+               // them (the snap wins); booleans never apply them. DRAG/NUDGE
+               // on an ACTIVE posExpr root FOLDS the delta into the exprs
+               // (src/scene/posexpr.js: foldPosExprDelta merges into ONE
+               // depth-0 trailing constant — no residue accumulation, a
+               // cancelling drag restores the pristine expr; isPosExprActive
+               // mirrors the solver gate; translateWithPosExprs is the shared
+               // move primitive used by Canvas coMovers live-drag AND
+               // nudgeSelected). The part lands where dropped and STAYS
+               // PARAMETRIC (param sweeps still move it; the exporter um-tags
+               // the folded constant). Without this, an expression-positioned
+               // assembly (the 30-root double-Y balun) was immovable by
+               // mouse — the solver re-pinned it every frame. Guard:
+               // tests/posexpr-drag.test.js. Non-finite evaluation keeps the numeric cx/cy and
                // surfaces a 'nan-pos-expr' solve diagnostic. HFSS native COM
                // export keeps them LIVE (rootPosExpr — the whole downstream
                // snap chain inherits the referenced params); pyAEDT bakes them

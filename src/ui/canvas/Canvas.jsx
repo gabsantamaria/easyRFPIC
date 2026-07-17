@@ -20,6 +20,7 @@ import { instanceFrameCenter } from '../../scene/instance-positions.js';
 import { effectiveConductorLayerId } from '../../scene/conductor-binding.js';
 import { evalExpr } from '../../scene/params.js';
 import { solveLayout, applyMirrors, resolveBooleanBboxes } from '../../scene/solver.js';
+import { isPosExprActive, translateWithPosExprs } from '../../scene/posexpr.js';
 import { expandTransforms } from '../../scene/transforms.js';
 import { detectPortIntegrationLine } from '../../scene/lumpedPort.js';
 import { shapeInstanceToRing, clampCornerRadius, remapPointsToInstance } from '../../geometry/rings.js';
@@ -2494,7 +2495,17 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       const coMovers = [];
       for (const cid of expandedRoots) {
         const c = solved.find(cc => cc.id === cid);
-        if (c) coMovers.push({ id: cid, startCx: c.cx, startCy: c.cy });
+        if (!c) continue;
+        // ACTIVE cxExpr/cyExpr root (solver re-applies the exprs every
+        // solve): capture the drag-start exprs so each live frame can
+        // FOLD the delta into them — without this the part springs back
+        // and an expression-positioned assembly is immovable by mouse.
+        const raw = compById[cid] || c;
+        const exprActive = isPosExprActive(raw, scene.snaps);
+        coMovers.push({
+          id: cid, startCx: c.cx, startCy: c.cy,
+          ...(exprActive ? { posExprActive: true, startCxExpr: raw.cxExpr, startCyExpr: raw.cyExpr } : {}),
+        });
       }
       // Build the "do-not-snap-to-self" set: every co-mover plus every
       // boolean (recursively up the consumedBy chain) that contains them.
@@ -2956,7 +2967,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                 ...prev,
                 components: prev.components.map(c => {
                   const m = moversById[c.id];
-                  if (m) return { ...c, cx: m.startCx + tdx, cy: m.startCy + tdy };
+                  if (m) return translateWithPosExprs(c, { cx: m.startCx, cy: m.startCy, cxExpr: m.startCxExpr, cyExpr: m.startCyExpr }, tdx, tdy, m.posExprActive);
                   return c;
                 })
               }));
@@ -3031,7 +3042,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           ...prev,
           components: prev.components.map(c => {
             const m = moversById[c.id];
-            if (m) return { ...c, cx: m.startCx + tdx, cy: m.startCy + tdy };
+            if (m) return translateWithPosExprs(c, { cx: m.startCx, cy: m.startCy, cxExpr: m.startCxExpr, cyExpr: m.startCyExpr }, tdx, tdy, m.posExprActive);
             return c;
           })
         }));
