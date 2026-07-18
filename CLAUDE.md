@@ -260,7 +260,16 @@ snap-to-instance branch and every numeric exporter placed members at
 un-translated poses (real shipped bug). EVERY subset call site now
 passes the full pool (solver, hfss-native, scene3d, gds, gdsfactory,
 q3d, cross-section — guard: tests/group-pivot-context.test.js). If you
-add a new `expandTransforms([c], …)` call, pass the pool.
+add a new `expandTransforms([c], …)` call, pass the pool. The pool must
+also be the RIGHT one: the solver's snap-to-instance branch passes the
+IN-SOLVE working clones (`Object.values(byId)`) — the raw pre-solve
+array has STALE cx/cy for snap/cxExpr-positioned siblings, so the group
+centroid (and every snapped child) lands wrong (adversarial-review find,
+guarded by the stale-sibling test). q3d likewise pools `solved`, not the
+flattened replicas (flattenReplicas keeps the `group` tag on baked-offset
+copies — pooling them shifts the centroid). `instantiateCell` PREFIXES
+`c.group` like every other identifier, else two cell instances (or
+2-line lineA/lineB) merge into ONE centroid pool.
 - `displace` shifts each instance
 - `rotate` rotates instances about the chosen pivot (with cx/cy update for non-'C' pivots)
 - `repeat` MULTIPLIES the instance list by N+1 (or N if !includeOriginal)
@@ -341,6 +350,14 @@ dots/alt-drag candidacy (cross-group snapping is a feature). ⌘A inside
 isolation selects members only. View-state only — never serialized,
 exports untouched. Shift-click = ADDITIVE whole-group select; Cmd-click
 still toggles single comps (partial selections stay possible).
+Review-hardened details: group MEMBERSHIP absorbs `consumedBy` ancestry
+(a boolean whose operands are grouped IS a member — else clicking the
+boolean bypassed group semantics); the click-through-to-covered-shape
+walk is SKIPPED while the whole group is selected (it redirected the
+second click off the group) and filtered to members inside isolation;
+Alt-drag (parametric snap creation) NEVER co-moves the selection — it
+drags the clicked component alone, so an alt-drag from a selected group
+can still target a snap.
 
 **Snap discoverability aids** (Canvas render):
 - **Alt-held anchor guides**: while Option/Alt is held (and not in add/ruler/snap-mode), faint amber dots show the 9 snap anchors of every instance INCLUDING repeat replicas (sourced from `transformInstances`, viewport-culled, `pointerEvents:none`), so the user can see where an Alt-drag will land. They vanish on Alt release; the dragged cluster's own anchors are skipped.

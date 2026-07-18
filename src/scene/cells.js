@@ -238,6 +238,14 @@ export function instantiateCell(def, prefix, overrides = {}, atX = 0, atY = 0) {
         v && v.kind === 'snap' && idMap[v.compId] ? { ...v, compId: idMap[v.compId] } : v
       );
     }
+    // Remap the GROUP TAG per instance: c.group drives the rotate/mirror
+    // pivot 'group' centroid (siblings found by tag). Left verbatim, two
+    // instances of the same cell — including the 2-line wizard's
+    // lineA_/lineB_ stamps — would share ONE tag and every consumer
+    // (canvas, solver, exporters) would compute a MERGED centroid across
+    // both instances, bending each instance's group-rotated members away
+    // from the drawn design (adversarial-review find).
+    if (next.group) next.group = `${prefix}_${next.group}`;
     next.cellInstance = { cell: def.name, inst: prefix };
     return next;
   });

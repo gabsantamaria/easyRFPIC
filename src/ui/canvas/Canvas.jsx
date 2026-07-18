@@ -1435,10 +1435,26 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
   const groupsInfo = useMemo(() => {
     const groupOfComp = {}; // compId -> { name, members:Set }
     const groups = [];
+    const compById = new Map(scene.components.map(c => [c.id, c]));
     for (const g of (scene.groups || [])) {
       const members = new Set(g.memberIds || []);
       for (const c of scene.components) if (c.group === g.name) members.add(c.id);
       if (members.size === 0) continue;
+      // Resolve consumedBy: a boolean whose operands are members IS a
+      // member — the cluster's rendered geometry carries the BOOLEAN's
+      // data-comp-id, so click/whole-group-drag/isolation/dimming must
+      // recognize it (CLAUDE.md conductor-binding bug pattern: every
+      // consumer resolves through the consumedBy chain). Walk each
+      // member's consumedBy ancestry and absorb the booleans.
+      for (const m of [...members]) {
+        let cur = compById.get(m);
+        const seen = new Set();
+        while (cur && cur.consumedBy && !seen.has(cur.consumedBy)) {
+          seen.add(cur.consumedBy);
+          members.add(cur.consumedBy);
+          cur = compById.get(cur.consumedBy);
+        }
+      }
       const entry = { id: g.id, name: g.name, members };
       groups.push(entry);
       for (const m of members) groupOfComp[m] = entry;
@@ -2403,11 +2419,23 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       // unselected component. That lets you build a multi-selection in
       // the natural visual order (e.g. large, then small for a subtract)
       // even when the small one is fully covered by the large one's bbox.
-      if (selectedIds.has(id) && typeof document !== 'undefined' && typeof document.elementsFromPoint === 'function') {
+      // Click-through for stacked overlap — but NEVER (a) redirect to a
+      // shape locked outside the active group isolation (dimmed shapes
+      // keep pointer events for their snap dots; a redirect would make
+      // the isolated member silently un-draggable wherever it overlaps
+      // outside geometry), or (b) redirect OFF a member of a fully-
+      // selected group (re-clicking the group to drag it is the primary
+      // gesture — the walk would grab whatever sits underneath instead).
+      const grpOfClickedEarly = groupsInfo.groupOfComp[id];
+      const wholeGroupSelected = !!grpOfClickedEarly
+        && [...grpOfClickedEarly.members].every(m => selectedIds.has(m));
+      if (selectedIds.has(id) && !wholeGroupSelected
+        && typeof document !== 'undefined' && typeof document.elementsFromPoint === 'function') {
         const stack = document.elementsFromPoint(e.clientX, e.clientY);
         for (const el of stack) {
           const cid = el?.dataset?.compId;
-          if (cid && cid !== id && !selectedIds.has(cid)) {
+          if (cid && cid !== id && !selectedIds.has(cid)
+            && (!isoMembers || isoMembers.has(cid))) {
             id = cid;
             break;
           }
@@ -2497,7 +2525,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       // This also gives fully-selected GROUPS (Shift-click / SHAPES panel)
       // co-drag for free. Each added root goes through the same boolean
       // expansion below, so mixed selections behave like their parts.
-      if (selectedIds.has(id) && selectedIds.size > 1) {
+      // (Alt-drag = parametric snap creation for the CLICKED component
+      // alone: co-moving the selection would drag the whole group along,
+      // poison clusterSet with every member (no intra-group snap targets),
+      // and desync the alt preview from the committed single-comp snap.)
+      if (!e.altKey && selectedIds.has(id) && selectedIds.size > 1) {
         for (const sid of selectedIds) {
           coMoverIds.add(findSnapRoot(sid));
         }

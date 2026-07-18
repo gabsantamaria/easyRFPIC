@@ -448,7 +448,7 @@ export function solveLayout(components, snaps, paramValues) {
           cy: fromComp.cy,
           w: Number.isFinite(fw) ? fw : 0,
           h: Number.isFinite(fh) ? fh : 0,
-        }], workingPV, components); // full pool: pivot 'group' needs the siblings
+        }], workingPV, Object.values(byId)); // pool = the WORKING CLONES: pivot 'group' centroids must see in-solve sibling positions (the raw `components` array keeps stale pre-solve cx/cy for snap/cxExpr-positioned siblings — a probe-confirmed ~1000 um wrong centroid)
         const inst = insts.find(i => i.idx === fromIdxRaw);
         if (inst && Number.isFinite(inst.cx) && Number.isFinite(inst.cy)) {
           const lp = anchorLocalInstance(

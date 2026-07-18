@@ -98,3 +98,67 @@ describe('expandTransforms group-pivot pool', () => {
     expect(found).toBe(true);
   });
 });
+
+describe('adversarial-review regressions', () => {
+  it('solver centroid uses IN-SOLVE sibling positions (not stale raw cx/cy)', () => {
+    // Sibling B is snap-positioned: raw cx/cy is garbage (999,999); the
+    // solver moves it to (10,0)-ish. The group centroid for A's rotate
+    // must use the SOLVED B, or the snapped child C lands ~1000 um off
+    // (the critical review find: raw `components` passed as the pool).
+    const scene = normalizeScene({
+      params: {},
+      components: [
+        { transforms: [{ id: 't', kind: 'rotate', enabled: true, angle: '90', pivot: 'group' }], id: 'A', kind: 'rect', layer: 'electrode', cx: 100, cy: 50, w: '40', h: '20', cutouts: [], group: 'g1' },
+        { transforms: [{ id: 't', kind: 'rotate', enabled: true, angle: '90', pivot: 'group' }], id: 'B', kind: 'rect', layer: 'electrode', cx: 999, cy: 999, w: '40', h: '20', cutouts: [], group: 'g1' },
+        { transforms: [], id: 'Rf', kind: 'rect', layer: 'electrode', cx: 10, cy: 0, w: '20', h: '20', cutouts: [] },
+        { transforms: [], id: 'C', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: '10', h: '10', cutouts: [] },
+      ],
+      snaps: [
+        { id: 's1', from: { compId: 'Rf', anchor: 'C' }, to: { compId: 'B', anchor: 'C' }, dx: '0', dy: '0' },
+        { id: 's2', from: { compId: 'A', anchor: 'SE', instanceIdx: 0 }, to: { compId: 'C', anchor: 'NW' }, dx: '0', dy: '0' },
+      ],
+      groups: [{ id: 'grp1', name: 'g1', memberIds: ['A', 'B'], aliases: {} }],
+    });
+    const pv = resolveParams(scene.params).values;
+    const solved = solveLayout(scene.components, scene.snaps, pv);
+    const byId = Object.fromEntries(solved.map(c => [c.id, c]));
+    const insts = expandTransforms(solved, pv);       // canvas truth (solved pool)
+    const A = resolveInstanceAnchorNumeric('A', 'SE', 0, byId, insts, pv);
+    const C = solved.find(c => c.id === 'C');
+    expect(C.cx - 5).toBeCloseTo(A.x, 5);
+    expect(C.cy + 5).toBeCloseTo(A.y, 5);
+  });
+
+  it('instantiateCell remaps the group tag per instance (no merged centroids)', async () => {
+    const { makeCellFromSelection, instantiateCell } = await import('../src/scene/cells.js');
+    const scene = normalizeScene({
+      params: {},
+      components: [
+        { transforms: [{ id: 't', kind: 'rotate', enabled: true, angle: '90', pivot: 'group' }], id: 'A', kind: 'rect', layer: 'electrode', cx: 0, cy: 0, w: '40', h: '20', cutouts: [], group: 'g1' },
+        { transforms: [{ id: 't', kind: 'rotate', enabled: true, angle: '90', pivot: 'group' }], id: 'B', kind: 'rect', layer: 'electrode', cx: 100, cy: 0, w: '40', h: '20', cutouts: [], group: 'g1' },
+      ],
+      snaps: [],
+      groups: [{ id: 'grp1', name: 'g1', memberIds: ['A', 'B'], aliases: {} }],
+    });
+    const def = makeCellFromSelection(scene, new Set(['A', 'B']), 'cellX').def
+      || makeCellFromSelection(scene, new Set(['A', 'B']), 'cellX');
+    const i1 = instantiateCell(def, 'u1', {}, 0, 0);
+    const i2 = instantiateCell(def, 'u2', {}, 500, 0);
+    for (const c of i1.components) expect(c.group).toBe('u1_g1');
+    for (const c of i2.components) expect(c.group).toBe('u2_g1');
+    // Two instances expanded together: each rotates about ITS OWN centroid.
+    const all = [...i1.components, ...i2.components];
+    const pv = {};
+    const insts = expandTransforms(all, pv);
+    const a1 = insts.find(i => i.compId === 'u1_A' && i.idx === 0);
+    const a2 = insts.find(i => i.compId === 'u2_A' && i.idx === 0);
+    const c1 = all.filter(c => c.group === 'u1_g1');
+    const gx1 = (c1[0].cx + c1[1].cx) / 2, gy1 = (c1[0].cy + c1[1].cy) / 2;
+    // u1_A rotated 90 about u1's centroid only:
+    const src = all.find(c => c.id === 'u1_A');
+    const ex = gx1 - (src.cy - gy1), ey = gy1 + (src.cx - gx1);
+    expect(a1.cx).toBeCloseTo(ex, 6);
+    expect(a1.cy).toBeCloseTo(ey, 6);
+    expect(Math.hypot(a1.cx - a2.cx, a1.cy - a2.cy)).toBeGreaterThan(100); // instances independent
+  });
+});
