@@ -7,7 +7,7 @@ import { reRootSnaps } from './scene/reroot.js';
 import { renameIdentInScene } from './scene/rename-ident.js';
 import { parseAnchor } from './scene/anchors.js';
 import { rectInstanceToRing, shapeInstanceToRing } from './geometry/rings.js';
-import { resolvePolylineVertices, polylineIsTapered, synthArc90 } from './geometry/polyline.js';
+import { resolvePolylineVertices, polylineIsTapered, synthArc90, ringSelfIntersects } from './geometry/polyline.js';
 import { expandTransforms } from './scene/transforms.js';
 import { detectPortIntegrationLine } from './scene/lumpedPort.js';
 import { solveLayout, applyMirrors, resolveBooleanBboxes, validateSnapGraph, getLastSolveDiagnostics } from './scene/solver.js';
@@ -5179,6 +5179,29 @@ export default function App() {
         out.push({ kind: 'bad-dims', snapId: null, compId: c.id, message: `"${c.id}" has degenerate size (w="${c.w}" → ${w}, h="${c.h}" → ${h}) — anchors and exports will misbehave` });
       }
     }
+    // 4b) Self-intersecting CLOSED paths (polyshape / closed polyline):
+    //     AEDT's Parasolid kernel hard-rejects them on CreatePolyline
+    //     (PK_ERROR_crossing_edge) and the part silently vanishes from
+    //     the model + its boundary assignment fails. A parametric outline
+    //     can go degenerate under a retune (the V2 balun node's side
+    //     length goes negative when node_size < CPW_W/3) while looking
+    //     fine on canvas — flag it HERE, before export. Solve lazily,
+    //     only when closed path comps exist.
+    try {
+      const closedPaths = (scene.components || []).filter(c =>
+        (c.kind === 'polyshape' || (c.kind === 'polyline' && c.closed)) && (c.vertices || []).length >= 4);
+      if (closedPaths.length > 0) {
+        const solvedSI = solveLayout(scene.components, scene.snaps, paramValues);
+        const byIdSI = Object.fromEntries(solvedSI.map(cc => [cc.id, cc]));
+        for (const c of closedPaths) {
+          const ring = resolvePolylineVertices(byIdSI[c.id] || c, byIdSI, paramValues)
+            .filter(pt => pt.every(Number.isFinite));
+          if (ring.length >= 4 && ringSelfIntersects(ring)) {
+            out.push({ kind: 'self-intersecting-path', snapId: null, compId: c.id, message: `"${c.id}" outline SELF-INTERSECTS at the current parameter values — HFSS/Parasolid will reject it (PK_ERROR_crossing_edge) and the part will be missing from the model. Fix the geometry or the parameter values (e.g. the balun node needs node_size >= CPW_W/3).` });
+          }
+        }
+      }
+    } catch { /* never block render on a validator bug */ }
     // 5) Conductor-layer binding health for electrode/port components.
     //    Mirrors the Inspector's binding-picker states: STALE (bound id
     //    deleted or no longer role='conductor') always flags; UNBOUND

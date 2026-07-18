@@ -560,3 +560,32 @@ export function isValidVertex(v) {
   // Default kind is 'rel' (dx/dy can be strings or numbers).
   return true;
 }
+
+// ── Closed-ring self-intersection test ──────────────────────────────────
+// TRUE when any two NON-adjacent edges of the closed ring properly cross.
+// This is the exact geometry AEDT's Parasolid kernel rejects on
+// CreatePolyline with PK_ERROR_crossing_edge — a real shipped failure: a
+// parametric hexagon node whose side length went NEGATIVE under a param
+// retune (node_size < CPW_W/3) drew an invisible ~1 um bowtie on canvas
+// and killed the HFSS import. Surfaced via sceneIssues + an export
+// warning so the constraint violation is visible BEFORE AEDT sees it.
+// O(n^2) over ring edges — rings here are small (hand-drawn polyshapes).
+export function ringSelfIntersects(pts) {
+  const n = (pts || []).length;
+  if (n < 4) return false; // a triangle cannot self-intersect
+  const cross = (p, q, r) => (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
+  const properX = (a, b, c, d) => {
+    const d1 = cross(c, d, a), d2 = cross(c, d, b), d3 = cross(a, b, c), d4 = cross(a, b, d);
+    return ((d1 > 1e-9 && d2 < -1e-9) || (d1 < -1e-9 && d2 > 1e-9))
+      && ((d3 > 1e-9 && d4 < -1e-9) || (d3 < -1e-9 && d4 > 1e-9));
+  };
+  for (let i = 0; i < n; i++) {
+    const a = pts[i], b = pts[(i + 1) % n];
+    for (let j = i + 1; j < n; j++) {
+      // Skip adjacent edges (they share a vertex; only PROPER crossings count).
+      if (j === i || (j + 1) % n === i || (i + 1) % n === j) continue;
+      if (properX(a, b, pts[j], pts[(j + 1) % n])) return true;
+    }
+  }
+  return false;
+}

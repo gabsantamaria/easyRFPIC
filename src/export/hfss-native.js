@@ -20,6 +20,7 @@ import { expandTransforms } from '../scene/transforms.js';
 import { detectPortIntegrationLine } from '../scene/lumpedPort.js';
 import { migrateStackCoplanarGroups, isNonModelComponent } from '../scene/schema.js';
 import { shapeInstanceToRing } from '../geometry/rings.js';
+import { ringSelfIntersects } from '../geometry/polyline.js';
 import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/racetrack.js';
 import { instanceChainOffsetExpr, chainOwnerForInstance, instanceFrameCenter } from '../scene/instance-positions.js';
 import { renameIdentInScene } from '../scene/rename-ident.js';
@@ -3262,6 +3263,21 @@ except Exception as e:
         const colorPl = isPortSheet ? '(255 100 100)' : '(218 165 32)';
         const transPl = isPortSheet ? '0.5' : '0.0';
         const solveInside = c.layer === 'waveguide' || isPortSheet ? 'True' : 'False';
+        // Self-intersecting CLOSED outline: Parasolid hard-fails the
+        // CreatePolyline (PK_ERROR_crossing_edge) and the part vanishes
+        // from the model (its boundary assignment then also fails). Warn
+        // loudly in the script + safety report — the geometry itself is
+        // the bug (e.g. the balun node with node_size < CPW_W/3).
+        if (polyClosed) {
+          const siVerts = resolvePolylineVertices(c, byIdSolved, paramValues)
+            .filter(pt => pt.every(Number.isFinite));
+          if (siVerts.length >= 4 && ringSelfIntersects(siVerts)) {
+            code += `# WARNING: ${c.id} outline SELF-INTERSECTS at export values - Parasolid will reject\n`;
+            code += `# this CreatePolyline (PK_ERROR_crossing_edge) and the part will be MISSING.\n`;
+            code += `# Fix the geometry/params (balun node: keep node_size >= CPW_W/3).\n`;
+            noteCaveat(c.id, 'outline SELF-INTERSECTS at export values - AEDT will reject the CreatePolyline (PK_ERROR_crossing_edge); fix geometry/params before solving');
+          }
+        }
         const headerLabel = isPolyshape
           ? `${c.id}: polygon-path (parametric closed 2-D sheet${isSheet ? '' : ' + thicken'})`
           : `${c.id}: polyline trace (parametric vertices + XSection sweep)`;
