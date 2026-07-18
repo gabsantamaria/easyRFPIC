@@ -809,7 +809,7 @@ export function computeParametricPositions(components, snaps, paramValues = {}, 
           cx: parent.cx, cy: parent.cy,
           w: Number.isFinite(fw) ? fw : 0,
           h: Number.isFinite(fh) ? fh : 0,
-        }], paramValues);
+        }], paramValues, components); // full pool: pivot 'group' needs the siblings
         const inst = insts.find(i => i.idx === fromIdxRaw);
         const off = instanceChainOffsetExpr(owner, fromIdxRaw, {
           paramValues, exprWithUm: dimExprStr,
@@ -2456,7 +2456,7 @@ except Exception as e:
       // Build the perimeter ring at the base position. expandTransforms
       // is used so the instance carries the shape-specific numeric
       // parameters (r, rx/ry, n) and any rotation from transforms.
-      const insts = expandTransforms([c], paramValues);
+      const insts = expandTransforms([c], paramValues, solved);
       const baseInst = insts[0];
       if (!baseInst) continue;
       const ring = shapeInstanceToRing(baseInst);
@@ -4188,7 +4188,7 @@ except Exception as e:
           // track parameter sweeps for those clones; re-export
           // after sweeping if you need the CS to follow.
           noteFrozen(c.id, 'waveguide relative-CS clones (rotate/mirror chain - CS origins baked numerically)');
-          const insts = expandTransforms([c], paramValues);
+          const insts = expandTransforms([c], paramValues, solved);
           for (const inst of insts) {
             if (inst.idx === 0) continue;
             const sx = inst.scaleX ?? 1;

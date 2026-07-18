@@ -465,7 +465,7 @@ export function generateGdsfactory(scene, paramValues, options = {}) {
     }
     // Racetrack: tessellate at export time, emit as numeric polygon.
     if (kind === 'racetrack') {
-      const insts = expandTransforms([c], paramValues);
+      const insts = expandTransforms([c], paramValues, solved);
       const base = insts[0];
       if (!base) return `${indent}# ${c.id}: empty racetrack instance\n`;
       const R = Number.isFinite(base.R) ? base.R : 100;
@@ -521,7 +521,7 @@ export function generateGdsfactory(scene, paramValues, options = {}) {
     // instance. The base instance (idx=0) uses the parametric base
     // position; clones (idx>0) use numeric (since their compound
     // transform math doesn't survive parameter sweeps cleanly).
-    const insts = expandTransforms([c], paramValues);
+    const insts = expandTransforms([c], paramValues, solved);
     let firstParametricEmitted = false;
     for (const inst of insts) {
       if (!firstParametricEmitted && inst.idx === 0) {
@@ -571,7 +571,7 @@ export function generateGdsfactory(scene, paramValues, options = {}) {
         // Emit on the BOOLEAN's resolved layer so the merged shape's
         // material is correct. expandTransforms covers any repeat
         // on the operand itself.
-        const insts = expandTransforms([op], paramValues);
+        const insts = expandTransforms([op], paramValues, solved);
         let firstDone = false;
         for (const inst of insts) {
           if (!firstDone && inst.idx === 0) {

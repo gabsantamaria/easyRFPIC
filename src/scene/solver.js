@@ -448,7 +448,7 @@ export function solveLayout(components, snaps, paramValues) {
           cy: fromComp.cy,
           w: Number.isFinite(fw) ? fw : 0,
           h: Number.isFinite(fh) ? fh : 0,
-        }], workingPV);
+        }], workingPV, components); // full pool: pivot 'group' needs the siblings
         const inst = insts.find(i => i.idx === fromIdxRaw);
         if (inst && Number.isFinite(inst.cx) && Number.isFinite(inst.cy)) {
           const lp = anchorLocalInstance(
@@ -695,7 +695,7 @@ export function resolveBooleanBboxes(solved, paramValues) {
       return out;
     }
     // Primitive: union AABB across all transform instances.
-    const insts = expandTransforms([c], paramValues);
+    const insts = expandTransforms([c], paramValues, solved);
     if (insts.length === 0) return null;
     // Path kinds: inst.cx/cy is the chain-transformed VERTEX 0, not the
     // bbox center — take the instance frame center (the displayBbox
@@ -819,7 +819,7 @@ export function resolveBooleanBboxes(solved, paramValues) {
       // the pre-transform centroid. Storing the post-transform bbox in a
       // separate field keeps both consumers correct.
       if (c.transforms && c.transforms.some(t => t && t.enabled !== false)) {
-        const insts = expandTransforms([c], paramValues);
+        const insts = expandTransforms([c], paramValues, solved);
         if (insts.length > 0) {
           const baseW = c.w, baseH = c.h;
           let pMinX = Infinity, pMaxX = -Infinity, pMinY = Infinity, pMaxY = -Infinity;

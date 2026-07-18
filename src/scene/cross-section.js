@@ -507,7 +507,7 @@ export function buildCrossSection(rawScene, paramValues, sectionCompId, opts = {
       // One cluster xform per boolean transform-instance (repeat replicas
       // of a whole meander cluster land at their instance positions —
       // scene3d's emitComponent contract).
-      const bInsts = expandTransforms([c], pv);
+      const bInsts = expandTransforms([c], pv, solved);
       for (const bInst of bInsts) {
         const dx = bInst.cx - c.cx;
         const dy = bInst.cy - c.cy;
@@ -539,7 +539,7 @@ export function buildCrossSection(rawScene, paramValues, sectionCompId, opts = {
       return total;
     }
     let out = [];
-    for (const inst of expandTransforms([c], pv)) {
+    for (const inst of expandTransforms([c], pv, solved)) {
       out = unionIntervals([...out, ...instanceIntervals(c, inst, xfs)]);
     }
     return out;
@@ -1253,7 +1253,7 @@ export function buildCrossSection(rawScene, paramValues, sectionCompId, opts = {
     let slabIvs = [];
     let botIvs = [];
     let topIvs = [];
-    for (const inst of expandTransforms([c], pv)) {
+    for (const inst of expandTransforms([c], pv, solved)) {
       const guideAxis = inst.w >= inst.h ? 'x' : 'y';
       // Rect of the given PERPENDICULAR width along the guide axis, in the
       // instance's frame (rotation / mirror baked by the ring builder).
@@ -1327,7 +1327,7 @@ export function buildCrossSection(rawScene, paramValues, sectionCompId, opts = {
     const wgOwn = translationOffsetsWorld(c.transforms);
     const zi = layerZInner[wgLayer && wgLayer.id];
     if (parametricOn && pp && pp[c.id] && zi && wgOwn.pure) {
-      const insts = expandTransforms([c], pv);
+      const insts = expandTransforms([c], pv, solved);
       // All instances must be unrotated / unmirrored (translation replicas of
       // one rib) - the perpendicular-cut symmetry (center ± half) only holds
       // then. A rotated / mirrored guide falls back to baked numerics.

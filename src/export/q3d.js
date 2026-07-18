@@ -262,7 +262,7 @@ ${sweepFn}("${name}", "q3d_cond_thk")  # thin conductor: sweep up by thickness`;
         } else {
           const bnds = {}; // replicaKey -> {lo, hi} along the mirror axis
           for (const p of mine) {
-            const inst0 = expandTransforms([p], pv)[0];
+            const inst0 = expandTransforms([p], pv, flat)[0];
             if (!inst0 || !Number.isFinite(inst0.w) || inst0.w <= 0) continue;
             const r0 = shapeInstanceToRing(inst0);
             if (!r0 || r0.length < 3) continue;
@@ -276,7 +276,7 @@ ${sweepFn}("${name}", "q3d_cond_thk")  # thin conductor: sweep up by thickness`;
         }
       }
       mine.forEach((p, k) => {
-        const inst = expandTransforms([p], pv)[0];
+        const inst = expandTransforms([p], pv, flat)[0];
         if (!inst || !Number.isFinite(inst.w) || inst.w <= 0) return;
         let ring = shapeInstanceToRing(inst);
         if (!ring || ring.length < 3) return;
@@ -293,7 +293,7 @@ ${sweepFn}("${name}", "q3d_cond_thk")  # thin conductor: sweep up by thickness`;
       finalizeConductor(cid, compObjs);
       continue;
     }
-    const insts = expandTransforms([c], pv);
+    const insts = expandTransforms([c], pv, solved);
     for (const inst of insts) {
       const w = Math.abs(inst.w), h = Math.abs(inst.h);
       if (Number.isFinite(w) && w > 0) lineLengthUm = Math.max(lineLengthUm, w, h);

@@ -344,7 +344,7 @@ export function buildScene3D(rawScene, paramValues) {
       const zv = evalExpr(c.zOffset, pv);
       if (Number.isFinite(zv)) zOff = zv;
     }
-    const insts = expandTransforms([c], pv);
+    const insts = expandTransforms([c], pv, solved);
 
     for (const inst of insts) {
       const instSolidIds = [];
@@ -592,7 +592,7 @@ export function buildScene3D(rawScene, paramValues) {
     // Boolean transform chain: one cluster xform per boolean instance
     // (resolveBooleanBboxes wrote numeric w/h + the operand-bbox centroid
     // into the solved record, so expandTransforms works on it directly).
-    const bInsts = expandTransforms([c], pv);
+    const bInsts = expandTransforms([c], pv, solved);
     for (const bInst of bInsts) {
       const dx = bInst.cx - c.cx;
       const dy = bInst.cy - c.cy;

@@ -593,6 +593,17 @@ export default function App() {
   // 'cond:<stackLayerId>' (see src/ui/canvas/layer-visibility.js).
   // CANVAS-ONLY: solver + every export always see the full scene.
   const [hiddenLayerKeys, setHiddenLayerKeys] = useState(() => new Set());
+  // Illustrator-style GROUP ISOLATION: the id of the group being edited
+  // (double-click a member to enter). While set, the canvas dims
+  // non-members and members become individually editable; a plain click
+  // on a member OUTSIDE isolation selects the whole group instead.
+  // View-state only — never stored in the scene, never in exports.
+  const [groupEditId, setGroupEditId] = useState(null);
+  useEffect(() => {
+    if (groupEditId && !(scene.groups || []).some(g => g.id === groupEditId)) {
+      setGroupEditId(null);
+    }
+  }, [groupEditId, scene.groups]);
   // Ids hidden under the current keys (shared empty set when none — Canvas
   // uses referential equality to keep the no-hide path byte-identical).
   const hiddenCompIds = useMemo(
@@ -2268,7 +2279,12 @@ export default function App() {
         // live inside their boolean cluster; hidden-layer components can't
         // be selected — an invisible selection could be deleted blind).
         e.preventDefault();
-        const all = scene.components.filter(c => !c.consumedBy && !hiddenCompIds.has(c.id)).map(c => c.id);
+        // Inside group isolation, "all" means the group's members only.
+        const isoG = groupEditId ? (scene.groups || []).find(g => g.id === groupEditId) : null;
+        const isoSet = isoG ? groupMembersOf(isoG, scene.components) : null;
+        const all = scene.components
+          .filter(c => !c.consumedBy && !hiddenCompIds.has(c.id) && (!isoSet || isoSet.has(c.id)))
+          .map(c => c.id);
         if (all.length > 0) setSelection({ ids: new Set(all), primary: all[all.length - 1] });
       } else if (e.key === 'Escape') {
         // Progressive dismissal — but only when no canvas tool is active
@@ -2290,6 +2306,11 @@ export default function App() {
           if (filterVisible && (paramSearchOpen || paramSearch.trim())) {
             setParamSearch('');
             setParamSearchOpen(false);
+          } else if (groupEditId) {
+            // Group isolation is the innermost editing context — exit it
+            // before clearing the selection (Illustrator semantics).
+            setGroupEditId(null);
+            setSelection({ ids: new Set(), primary: null });
           } else if (selectedIds.size > 0) {
             setSelection({ ids: new Set(), primary: null });
           }
@@ -2311,7 +2332,7 @@ export default function App() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [fitToView, zoomToSelection, nudgeSelected, selectedIds, gridSize, scene.components, setSelection, addMode, rulerMode, snapMode, hiddenCompIds, paramSearch, paramSearchOpen, activePanel, panelLayout.leftCollapsed]);
+  }, [fitToView, zoomToSelection, nudgeSelected, selectedIds, gridSize, scene.components, scene.groups, groupEditId, setSelection, addMode, rulerMode, snapMode, hiddenCompIds, paramSearch, paramSearchOpen, activePanel, panelLayout.leftCollapsed]);
 
   // Refs so handlers always see the latest functions
   const undoRef = useRef(null);
@@ -8280,6 +8301,8 @@ export default function App() {
             setViewport={setViewport}
             snapMode={snapMode}
             setSnapMode={setSnapMode}
+            groupEditId={groupEditId}
+            onGroupEditChange={setGroupEditId}
             gridSize={gridSize}
             gridSnapEnabled={gridSnapEnabled}
             showGrid={showGrid}
@@ -8314,6 +8337,19 @@ export default function App() {
           )}
           {/* Hidden-layer indicator: a "blank" canvas must be self-explaining.
               One click restores everything. */}
+          {groupEditId && (() => {
+            const g = (scene.groups || []).find(gg => gg.id === groupEditId);
+            return (
+              <button
+                onClick={() => setGroupEditId(null)}
+                className="absolute top-2 left-1/2 -translate-x-1/2 z-20 px-3 py-1 rounded-full text-[11px] font-medium shadow"
+                style={{ background: '#7c3aed', color: '#fff' }}
+                title="Group isolation: members are individually editable; everything else is dimmed and locked. Click (or Esc / double-click outside) to exit."
+              >
+                editing group “{g ? g.name : '?'}” — click to exit
+              </button>
+            );
+          })()}
           {hiddenLayerKeys.size > 0 && (
             <button
               onClick={() => setHiddenLayerKeys(new Set())}

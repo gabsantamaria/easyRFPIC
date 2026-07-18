@@ -1285,7 +1285,7 @@ function EditablePolyDims({ svgRef, viewport, cSel, verts, params, updateScene, 
 // =========================================================================
 // CANVAS
 // =========================================================================
-export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelection, viewport, setViewport, snapMode, setSnapMode, gridSize, gridSnapEnabled, showGrid = true, paramValues, addParam, updateParamExpr, rulerMode, setRulerMode, rulerMeasurements, setRulerMeasurements, rulerInProgress, setRulerInProgress, rulerSnapPoint, setRulerSnapPoint, alertDialog, setInteractionStatus, showDimensions, editDims = false, commitExpr = null, renameParam = null, addMode, setAddMode, commitDragAdd, onComponentContextMenu, onBackgroundContextMenu, onHoverWorld = null, onSvgElement, flashAnchor = null, canvasTheme = DEFAULT_CANVAS_THEME, hiddenLayerKeys = EMPTY_HIDDEN_SET }) {
+export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelection, viewport, setViewport, snapMode, setSnapMode, gridSize, gridSnapEnabled, showGrid = true, paramValues, addParam, updateParamExpr, rulerMode, setRulerMode, rulerMeasurements, setRulerMeasurements, rulerInProgress, setRulerInProgress, rulerSnapPoint, setRulerSnapPoint, alertDialog, setInteractionStatus, showDimensions, editDims = false, commitExpr = null, renameParam = null, addMode, setAddMode, commitDragAdd, onComponentContextMenu, onBackgroundContextMenu, onHoverWorld = null, onSvgElement, flashAnchor = null, canvasTheme = DEFAULT_CANVAS_THEME, hiddenLayerKeys = EMPTY_HIDDEN_SET, groupEditId = null, onGroupEditChange = null }) {
   // Drop a single committed ruler measurement by id.
   const deleteRuler = (id) => setRulerMeasurements((prev) => prev.filter((m) => m.id !== id));
   const svgRef = useRef(null);
@@ -1320,6 +1320,33 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
   // and the `typeof c.w === 'string' ? evalExpr(...) : c.w` sites it
   // replaces (solved primitives carry expression strings; solved booleans
   // carry numerics written by resolveBooleanBboxes).
+  // Comp ids whose transform chain MOVED the base instance (idx 0) away
+  // from the raw pose (rotate about a non-'C' pivot — e.g. pivot:'group' —
+  // displace, duplicate_mirror). For these, BASE-frame snap dots/edges are
+  // PHANTOMS: they sit where no geometry renders, and a snap committed on
+  // them resolves at the un-transformed anchor (the "snap button shows
+  // unrotated anchors" bug on a grouped+rotated balun). Snap mode
+  // suppresses the base dots for them and offers ONLY the instance dots
+  // (which carry from.instanceIdx — solver + HFSS resolve those at the
+  // rendered pose). ONE source of truth: the instance-dot gate and the
+  // base-dot suppression both read this set.
+  const movedBaseIds = useMemo(() => {
+    const out = new Set();
+    const byId = new Map(solved.map(c => [c.id, c]));
+    for (const inst of transformInstances) {
+      if (inst.idx !== 0) continue;
+      const oc = byId.get(inst.compId);
+      if (!oc) continue;
+      const baseRot = compRotationDeg(oc, paramValues);
+      if (Math.abs(inst.cx - oc.cx) > 1e-9 || Math.abs(inst.cy - oc.cy) > 1e-9
+        || Math.abs((inst.rotation || 0) - baseRot) > 1e-9
+        || (inst.scaleX ?? 1) !== 1 || (inst.scaleY ?? 1) !== 1) {
+        out.add(inst.compId);
+      }
+    }
+    return out;
+  }, [transformInstances, solved, paramValues]);
+
   const dimsByCompId = useMemo(() => {
     const m = {};
     for (const c of solved) {
@@ -1418,6 +1445,24 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     }
     return { groups, groupOfComp };
   }, [scene.groups, scene.components]);
+  // GROUP ISOLATION (Illustrator-style): the member set of the group
+  // being edited, or null. While active: non-members render dimmed and
+  // are NOT clickable/selectable (snap-anchor DOTS on them stay live —
+  // cross-group snapping is explicitly supported); members behave as
+  // plain individual shapes. Outside isolation, a plain click on any
+  // member selects (and drags) the WHOLE group.
+  const isoMembers = useMemo(() => {
+    if (!groupEditId) return null;
+    const g = groupsInfo.groups.find(gg => gg.id === groupEditId);
+    return g ? g.members : null;
+  }, [groupEditId, groupsInfo]);
+
+  const primaryGroupLocked = useMemo(() => {
+    if (!selectedId) return false;
+    const g = groupsInfo.groupOfComp[selectedId];
+    return !!(g && g.id !== groupEditId);
+  }, [selectedId, groupsInfo, groupEditId]);
+
   const activeGroups = useMemo(() => {
     if (!selectedIds || selectedIds.size === 0) return [];
     return groupsInfo.groups.filter(g => {
@@ -2384,18 +2429,31 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         return;
       }
 
-      // Shift-click a grouped component: select the WHOLE group. Plain click
-      // stays precise (single member — this app's convention); the violet
-      // composite outline confirms the group selection. Shift is free here:
-      // Cmd toggles, Alt is parametric snap-drag; Shift range-select exists
-      // only in the SHAPES panel.
-      if (e.shiftKey) {
-        const grp = groupsInfo.groupOfComp[id];
-        if (grp) {
-          setSelection({ ids: new Set(grp.members), primary: id });
-          return;
-        }
+      // GROUP semantics (Illustrator-style):
+      //  - In ISOLATION: clicks on NON-members are inert (the dimmed
+      //    outside world is locked — double-click the background or Esc
+      //    to exit); clicks on members fall through to the normal
+      //    single-component behavior below.
+      //  - Outside isolation: a plain click on any group member selects
+      //    the WHOLE group (and the drag init below co-moves it) — enter
+      //    isolation by double-clicking to edit constituents.
+      //  - Shift-click keeps the historical whole-group select (now
+      //    ADDITIVE with an existing selection).
+      const grpClicked = groupsInfo.groupOfComp[id];
+      if (isoMembers && !isoMembers.has(id)) {
+        // Locked outside world: swallow the click (no selection change —
+        // matches Illustrator, where outside art is inert in isolation).
+        return;
       }
+      if (e.shiftKey && grpClicked && !isoMembers) {
+        setSelection({ ids: new Set([...selectedIds, ...grpClicked.members]), primary: id });
+        return;
+      }
+      // Plain click on a grouped member OUTSIDE isolation: whole-group
+      // selection + whole-group drag (the coMover assembly below expands
+      // groupClickMembers, so click-and-drag moves the group in ONE
+      // gesture without needing a pre-existing selection).
+      const groupClickMembers = (!isoMembers && grpClicked && !e.altKey) ? grpClicked.members : null;
 
       // Find root of snap chain for the clicked component.
       const findSnapRoot = (startId) => {
@@ -2442,6 +2500,14 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       if (selectedIds.has(id) && selectedIds.size > 1) {
         for (const sid of selectedIds) {
           coMoverIds.add(findSnapRoot(sid));
+        }
+      }
+      // Whole-group click: every member's snap-root co-moves (same
+      // expansion the multi-selection branch does — the group IS the
+      // selection for this gesture).
+      if (groupClickMembers) {
+        for (const mid of groupClickMembers) {
+          coMoverIds.add(findSnapRoot(mid));
         }
       }
       // Walk consumedBy upward to the topmost containing boolean (if any).
@@ -2560,8 +2626,12 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         ? compRotationDeg(solved.find(cc => cc.id === id), paramValues)
         : 0;
       if (rootComp || coMovers.length > 0) {
-        // If already in selection, drag it; otherwise replace selection with this one
-        if (!selectedIds.has(id)) {
+        // If already in selection, drag it; otherwise replace selection with
+        // this one. A whole-group click selects ALL members (the coMovers
+        // already carry them, so the visual selection matches the drag).
+        if (groupClickMembers) {
+          setSelection({ ids: new Set(groupClickMembers), primary: id });
+        } else if (!selectedIds.has(id)) {
           setSelection({ ids: new Set([id]), primary: id });
         } else {
           setSelection({ ids: selectedIds, primary: id });
@@ -3245,7 +3315,8 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           const cx1 = fr.cx - fr.w / 2, cx2 = fr.cx + fr.w / 2;
           const cy1 = fr.cy - fr.h / 2, cy2 = fr.cy + fr.h / 2;
           return cx2 >= x1 && cx1 <= x2 && cy2 >= y1 && cy1 <= y2;
-        }).map(c => c.id);
+        }).filter(c => !isoMembers || isoMembers.has(c.id)) // isolation: outside world is locked
+          .map(c => c.id);
         const newIds = marquee.additive ? new Set([...selectedIds, ...hits]) : new Set(hits);
         setSelection({ ids: newIds, primary: hits.length > 0 ? hits[hits.length - 1] : null });
       }
@@ -3730,6 +3801,31 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           e.stopPropagation();
           e.preventDefault();
           return;
+        }
+        // GROUP ISOLATION (Illustrator-style):
+        //  - double-click a member of a NON-isolated group -> enter
+        //    isolation for that group (select just the clicked member);
+        //  - double-click the background (or a locked outside shape)
+        //    while isolated -> exit isolation.
+        // A member of the CURRENTLY isolated group falls through to the
+        // normal double-click behaviors (polyline segment split).
+        if (!addMode && !rulerMode && snapMode !== 'creating' && onGroupEditChange) {
+          const dcId = e.target?.dataset?.compId || null;
+          const dcGrp = dcId ? groupsInfo.groupOfComp[dcId] : null;
+          if (dcGrp && dcGrp.id !== groupEditId) {
+            onGroupEditChange(dcGrp.id);
+            setSelection({ ids: new Set([dcId]), primary: dcId });
+            e.stopPropagation();
+            e.preventDefault();
+            return;
+          }
+          if (groupEditId && (!dcId || (isoMembers && !isoMembers.has(dcId)))) {
+            onGroupEditChange(null);
+            setSelection({ ids: new Set(), primary: null });
+            e.stopPropagation();
+            e.preventDefault();
+            return;
+          }
         }
         // C3: double-click on a SEGMENT of the primary-selected polyline /
         // polyshape inserts a rel-numeric vertex at the click point
@@ -4323,7 +4419,11 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           // is bound.
           const style = styleForComponent(b);
           const fill = style.fill;
-          const fillOpacity = style.opacity;
+          // Group isolation: everything OUTSIDE the edited group renders
+          // washed-out (Illustrator's dimmed context). Purely visual —
+          // solver/export/snap targeting all still see the full scene.
+          const isoDimB = isoMembers && !isoMembers.has(b.id) ? 0.16 : 1;
+          const fillOpacity = style.opacity * isoDimB;
           const accent = b.op === 'union' ? '#10b981'
             : b.op === 'intersect' ? '#22d3ee'
             : '#f59e0b';
@@ -4490,14 +4590,10 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           const irot = inst.rotation || 0;
           const isx = inst.scaleX ?? 1;
           const isy = inst.scaleY ?? 1;
-          if (inst.idx === 0) {
-            const baseRot = compRotationDeg(oc, paramValues);
-            const moved = Math.abs(inst.cx - oc.cx) > 1e-9
-              || Math.abs(inst.cy - oc.cy) > 1e-9
-              || Math.abs(irot - baseRot) > 1e-9
-              || isx !== 1 || isy !== 1;
-            if (!moved) continue;
-          }
+          // Shared movedBaseIds gate: unmoved bases already have their
+          // base-frame dots; moved bases get instance dots INSTEAD (the
+          // base dots are suppressed below via the same set).
+          if (inst.idx === 0 && !movedBaseIds.has(inst.compId)) continue;
           // Path kinds: dots about the instance FRAME center (transformed
           // displayBbox center — inst.cx/cy is the transformed vertex 0).
           // The viewport cull tests the SAME point the dots draw at — a
@@ -4638,7 +4734,8 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                 // Non-base instances render slightly muted so the base
                 // primitive still reads as the "primary" geometry the user
                 // can drag.
-                const instOpacity = isBase ? style.opacity : (style.opacity * 0.85);
+                const isoDim = isoMembers && !isoMembers.has(c.id) ? 0.16 : 1;
+                const instOpacity = (isBase ? style.opacity : (style.opacity * 0.85)) * isoDim;
                 const rotAttr = inst.rotation ? `rotate(${-inst.rotation} ${inst.cx} ${-inst.cy})` : undefined;
                 // Pick the right SVG primitive for this shape. Rect uses
                 // <rect> for crisp axis-aligned edges; everything else uses
@@ -5279,7 +5376,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   'gdsgroup' is IMMUTABLE imported layout — dashed frame
                   only, no resize (dragging a handle would corrupt the
                   packed rings' numeric w/h). */}
-              {isPrimary && !isPathKindComp && c.kind !== 'gdsgroup' && ANCHORS.filter(a => a !== 'C').map(a => {
+              {isPrimary && !primaryGroupLocked && !isPathKindComp && c.kind !== 'gdsgroup' && ANCHORS.filter(a => a !== 'C').map(a => {
                 const local = anchorLocalRotated(a, w, h, compRotationDeg(c, paramValues));
                 const ax = c.cx + local.x;
                 const ay = -(c.cy + local.y);
@@ -5308,7 +5405,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                   Rotation-aware: strips, t-projection, and the hover dot
                   all live in the shape's LOCAL frame so they trace the
                   rotated shape's actual edges. */}
-              {snapMode === 'creating' && (() => {
+              {snapMode === 'creating' && !movedBaseIds.has(c.id) && (() => {
                 const edgeStrokeW = Math.max(hr * 0.8, 1);
                 const rotE = compRotationDeg(c, paramValues);
                 const radE = rotE * Math.PI / 180;
@@ -5401,9 +5498,12 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
               {/* Snap-mode anchors. Rotation-aware: dots sit on the
                   ROTATED shape's actual corners/edges so what you click
                   is what the solver snaps to. */}
-              {snapMode === 'creating' && ANCHORS.map(a => {
+              {snapMode === 'creating' && !movedBaseIds.has(c.id) && ANCHORS.map(a => {
                 // FRAME anchors (displayBbox for path kinds) — the dot must
-                // sit where anchorWorld resolves the committed snap.
+                // sit where anchorWorld resolves the committed snap. A comp
+                // whose chain MOVED the base renders NO base dots — its
+                // clickable anchors are the instance dots (with
+                // instanceIdx), drawn where the geometry actually is.
                 const local = anchorLocalRotated(a, fr.w, fr.h, compRotationDeg(c, paramValues));
                 const ax = fr.cx + local.x;
                 const ay = -(fr.cy + local.y);
@@ -5715,7 +5815,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
               field that edits the component's w/h directly, auto-creating any
               new params referenced.
           Distinct cyan accent vs the violet read-only `showDimensions`. */}
-      {editDims && !rulerMode && (() => {
+      {editDims && !rulerMode && !primaryGroupLocked && (() => {
         const cSel = solved.find(cc => cc.id === selectedId);
         if (!cSel) return null;
         if (cSel.kind === 'rect') {
@@ -6677,7 +6777,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           top of the shapes and stop mousedown propagation so they never
           fight the component-drag hit area. Alt+click deletes a vertex;
           double-click on a segment (handled on the SVG) inserts one. */}
-      {!addMode && !rulerMode && snapMode !== 'creating' && (() => {
+      {!addMode && !rulerMode && snapMode !== 'creating' && !primaryGroupLocked && (() => {
         const cSel = solved.find(cc => cc.id === selectedId);
         if (!cSel || (cSel.kind !== 'polyline' && cSel.kind !== 'polyshape')) return null;
         const cEff = (vertexDrag && vertexDrag.compId === cSel.id && vertexDrag.preview)

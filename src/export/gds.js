@@ -223,7 +223,7 @@ export function generateGDS(scene, paramValues) {
   const byIdSolved = Object.fromEntries(solvedAll.map(c => [c.id, c]));
   for (const c of solved) {
     if (c.kind === 'boolean') continue; // booleans don't have GDS geometry of their own
-    const insts = expandTransforms([c], paramValues);
+    const insts = expandTransforms([c], paramValues, solvedAll);
     for (const inst of insts) {
       const w = inst.w, h = inst.h;
       if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) continue;

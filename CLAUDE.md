@@ -249,7 +249,18 @@ Each component has a `transforms` array — an ordered list of operations applie
 { id, kind: 'repeat', enabled, n, dx, dy, includeOriginal }
 ```
 
-`expandTransforms` walks the chain in order:
+`expandTransforms(components, paramValues, allComponents?)` walks the
+chain in order. THE POOL ARG IS LOAD-BEARING: the rotate/mirror pivot
+'group' resolves its centroid from sibling comps (`c.group` tag) in the
+FIRST argument — a subset call (`expandTransforms([c], pv)`) without the
+third arg silently degrades pivot:'group' to rotate-about-own-center
+(position unchanged!). The canvas always expanded the full solved array,
+so a grouped+rotated design LOOKED right while the solver's
+snap-to-instance branch and every numeric exporter placed members at
+un-translated poses (real shipped bug). EVERY subset call site now
+passes the full pool (solver, hfss-native, scene3d, gds, gdsfactory,
+q3d, cross-section — guard: tests/group-pivot-context.test.js). If you
+add a new `expandTransforms([c], …)` call, pass the pool.
 - `displace` shifts each instance
 - `rotate` rotates instances about the chosen pivot (with cx/cy update for non-'C' pivots)
 - `repeat` MULTIPLIES the instance list by N+1 (or N if !includeOriginal)
@@ -303,6 +314,33 @@ transform, other param expr) or a capture-corrected sibling forces the
 per-offset `-(...)` wrap (the old single-pass version could double-negate a
 shared param or silently flip a KEPT snap's sign). Cycle edges + disconnected
 subgraphs are left untouched.
+
+**Snap-mode anchors on transform-MOVED bases** (`movedBaseIds`,
+Canvas.jsx): a comp whose chain moves instance 0 away from the raw pose
+(rotate about a non-'C' pivot — e.g. pivot:'group' — displace,
+duplicate_mirror) renders NO base-frame snap dots/edge strips in snap
+mode — those were PHANTOMS at the un-transformed pose ("snap button
+shows unrotated anchors" on a grouped+rotated balun) and a snap
+committed on them resolves at the un-transformed anchor. Only the
+INSTANCE dots (carrying from.instanceIdx, incl. idx 0) render, drawn on
+the rendered geometry; solver + HFSS resolve those at the instance pose.
+ONE source of truth: the same `movedBaseIds` memo gates the instance-dot
+offering and the base-dot suppression.
+
+**GROUPS — Illustrator-style interaction** (`groupEditId` state in
+PhotonicLayout, threaded into Canvas): plain-click on any member selects
+(and click-drags) the WHOLE group; constituents are locked (resize/
+vertex handles + editable dims suppressed via `primaryGroupLocked`;
+the Inspector remains the deliberate expert path). DOUBLE-CLICK a member
+→ group ISOLATION: non-members render dimmed (opacity ×0.16) and are
+click-inert (mousedown swallowed; marquee filtered to members), members
+edit as plain individual shapes; exit via Esc (FIRST step in the global
+Esc chain), double-click outside, or the violet pill. Snap TARGETING is
+never gated by grouping: dimmed outside shapes keep their snap-anchor
+dots/alt-drag candidacy (cross-group snapping is a feature). ⌘A inside
+isolation selects members only. View-state only — never serialized,
+exports untouched. Shift-click = ADDITIVE whole-group select; Cmd-click
+still toggles single comps (partial selections stay possible).
 
 **Snap discoverability aids** (Canvas render):
 - **Alt-held anchor guides**: while Option/Alt is held (and not in add/ruler/snap-mode), faint amber dots show the 9 snap anchors of every instance INCLUDING repeat replicas (sourced from `transformInstances`, viewport-culled, `pointerEvents:none`), so the user can see where an Alt-drag will land. They vanish on Alt release; the dragged cluster's own anchors are skipped.

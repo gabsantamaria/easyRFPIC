@@ -37,7 +37,16 @@
 import { evalExpr } from './params.js';
 import { anchorLocal } from './anchors.js';
 
-export function expandTransforms(components, paramValues) {
+// `allComponents` (optional): the FULL component pool for resolving the
+// rotate pivot 'group' centroid. Many consumers expand a SINGLE component
+// (`expandTransforms([c], pv)`) — without the pool, the sibling lookup
+// collapses to the component itself and a pivot:'group' rotation silently
+// degrades to rotate-about-own-center (position unchanged!). The canvas
+// always expanded the full solved array, so a grouped+rotated design
+// LOOKED right while the solver's snap-to-instance branch and every
+// numeric exporter placed members at un-translated poses. Defaults to
+// `components` (full-array callers unchanged).
+export function expandTransforms(components, paramValues, allComponents) {
   const instances = [];
   for (const c of components) {
     const w = evalExpr(c.w, paramValues);
@@ -174,7 +183,8 @@ export function expandTransforms(components, paramValues) {
           // are propagated the cluster moves as one rigid body. We skip
           // consumed operands (they live inside booleans and shouldn't
           // pull the centroid sideways).
-          const members = components.filter(cc => cc.group === c.group && !cc.consumedBy);
+          const pool = allComponents || components;
+          const members = pool.filter(cc => cc.group === c.group && !cc.consumedBy);
           if (members.length >= 1) {
             let gx = 0, gy = 0;
             for (const m of members) { gx += m.cx; gy += m.cy; }
