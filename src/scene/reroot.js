@@ -49,7 +49,9 @@
 // the kept snap.)
 import { resolveParams, evalExpr, tokenizeIdents } from './params.js';
 import { solveLayout } from './solver.js';
-import { anchorLocalRotated, anchorWorld, compRotationDeg, PATH_KINDS } from './anchors.js';
+import { anchorLocalRotated, anchorLocalInstance, anchorWorld, compRotationDeg, PATH_KINDS } from './anchors.js';
+import { expandTransforms } from './transforms.js';
+import { instanceFrameCenter } from './instance-positions.js';
 
 const BARE_PARAM_RE = /^[A-Za-z_][\w]*$/;
 
@@ -62,8 +64,46 @@ export function reRootSnaps(scene, rootId) {
   // Where the SOLVER pins a snap's CHILD: path kinds by their vertex-0
   // root (cx, cy); everything else by the (rotation-aware) anchor on the
   // solved bbox — mirrors solveLayout's toLocal exactly.
-  const childPoint = (comp, anchor) => {
+  // Moved-base probe (solver twin, POSITION-only): a chain that moves
+  // instance 0 (rotate pivot:'group'/non-'C', displace, duplicate_mirror)
+  // makes the solver pin the RENDERED anchor for this comp as a snap
+  // CHILD — the re-rooted offset must be captured against that point or
+  // the assembly teleports on make-root (adversarial-review find).
+  const chainMoved = (comp) => {
+    if (!comp || !(comp.transforms || []).some(t => t && t.enabled !== false)) return false;
+    const w = typeof comp.w === 'number' ? comp.w : evalExpr(comp.w, pv);
+    const h = typeof comp.h === 'number' ? comp.h : evalExpr(comp.h, pv);
+    const insts = expandTransforms([{
+      ...comp,
+      w: Number.isFinite(w) ? w : 0,
+      h: Number.isFinite(h) ? h : 0,
+    }], pv, solved);
+    const i0 = insts.find(i => i.idx === 0);
+    if (!i0 || !Number.isFinite(i0.cx) || !Number.isFinite(i0.cy)) return false;
+    return Math.abs(i0.cx - comp.cx) > 1e-9 || Math.abs(i0.cy - comp.cy) > 1e-9;
+  };
+  const childPoint = (comp, anchor, parentComp = null) => {
     if (!comp) return null;
+    // Rendered instance-0 point for moved-base children — EXCEPT when the
+    // new snap is intra-group (legacy base placement in the solver) or
+    // the child is a boolean (cluster-shift branch, base semantics).
+    const parentInGroup = !!comp.group && parentComp && parentComp.group === comp.group;
+    if (comp.kind !== 'boolean' && !parentInGroup && chainMoved(comp)) {
+      const w = typeof comp.w === 'number' ? comp.w : evalExpr(comp.w, pv);
+      const h = typeof comp.h === 'number' ? comp.h : evalExpr(comp.h, pv);
+      const insts = expandTransforms([{
+        ...comp,
+        w: Number.isFinite(w) ? w : 0,
+        h: Number.isFinite(h) ? h : 0,
+      }], pv, solved);
+      const i0 = insts.find(i => i.idx === 0);
+      if (i0 && Number.isFinite(i0.cx) && Number.isFinite(i0.cy)) {
+        if (PATH_KINDS.has(comp.kind)) return { x: i0.cx, y: i0.cy };
+        const lp = anchorLocalInstance(anchor, i0.w, i0.h, i0.rotation || 0, i0.scaleX ?? 1, i0.scaleY ?? 1);
+        const fc = instanceFrameCenter(comp, i0);
+        return { x: fc.cx + lp.x, y: fc.cy + lp.y };
+      }
+    }
     if (PATH_KINDS.has(comp.kind)) return { x: comp.cx, y: comp.cy };
     const w = typeof comp.w === 'number' ? comp.w : evalExpr(comp.w, pv);
     const h = typeof comp.h === 'number' ? comp.h : evalExpr(comp.h, pv);
@@ -117,9 +157,10 @@ export function reRootSnaps(scene, rootId) {
     const involvesPath = (oldParent && PATH_KINDS.has(oldParent.kind))
       || (oldChild && PATH_KINDS.has(oldChild.kind));
     let plan = { dx: { mode: 'sym' }, dy: { mode: 'sym' } };
-    if ((involvesPath || hadIdx) && oldParent && oldChild) {
+    const movedEnds = chainMoved(oldParent) || chainMoved(oldChild);
+    if ((involvesPath || hadIdx || movedEnds) && oldParent && oldChild) {
       const pA = anchorWorld(oldChild, s.to.anchor, pv); // new parent anchor (frame-aware)
-      const cP = childPoint(oldParent, s.from.anchor);   // new child pin point
+      const cP = childPoint(oldParent, s.from.anchor, oldChild); // new child pin point
       if (pA && cP && [pA.x, pA.y, cP.x, cP.y].every(Number.isFinite)) {
         const axis = (cap, oldVal) => {
           const corr = Number.isFinite(oldVal) ? cap + oldVal : null;

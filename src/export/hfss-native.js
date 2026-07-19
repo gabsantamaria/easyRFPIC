@@ -112,6 +112,63 @@ export function hfssAngleDegExpr(expr) {
 // class rotation (matching expandTransforms' seeding); booleans and
 // path-like kinds return null.
 const HFSS_ROTATABLE_KINDS = new Set(['rect', 'circle', 'ellipse', 'polygon', 'bridge']);
+// Numeric-guard twin for HFSS expression strings: converts deg forms to
+// evalExpr-safe radians (degToRad) and strips the um tags (evalExpr has no
+// units — everything in this app is µm, so dropping the tag preserves the
+// value). Used by round-trip guards that score a composed HFSS expr
+// against a solver numeric before trusting it in an emission.
+// Module-scope twins of generateHfssNative's spaceHyphens/umTagBareTerms
+// (those are closures out of computeParametricPositions' reach). Used by
+// the group-rigid piece sanitizer below; bodies identical by contract.
+const spaceHyphensM = (s) => String(s).replace(/(\w)-(\w)/g, (m, a, b, off, str) =>
+  (/[eE]/.test(a) && /\d/.test(str[off - 1] ?? '') && /\d/.test(b)) ? m : `${a} - ${b}`);
+const umTagBareTermsM = (s) => {
+  const str = String(s);
+  const NUMRE = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
+  if (NUMRE.test(str.trim())) return str;
+  let out = '', depth = 0, termStart = 0;
+  const flush = (end) => {
+    const term = str.slice(termStart, end);
+    const t = term.trim();
+    out += NUMRE.test(t) ? term.replace(t, `(${t}*1um)`) : term;
+  };
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+    if (ch === '(') depth++;
+    else if (ch === ')') depth--;
+    else if ((ch === '+' || ch === '-') && depth === 0 && i > termStart) {
+      const prev = str.slice(termStart, i).trimEnd();
+      const last = prev[prev.length - 1];
+      if (last && /[\w)]/.test(last) && !/\d[eE]$/.test(prev)) {
+        flush(i);
+        out += ch;
+        termStart = i + 1;
+      }
+    }
+  }
+  flush(str.length);
+  return out;
+};
+// Group-rigid PIECE sanitizer: a composed δ/centroid expression mixes
+// um-tagged frozen literals with um-FREE user posExprs — the um tokens
+// make the final-emission simplifier BAIL, so inner bare constants
+// (e.g. a folded drag offset "+ 173.5463") would reach AEDT untagged and
+// resolve in METERS (adversarial-review find, probe-confirmed on the
+// balun fixture). Each um-free piece is therefore flattened + um-tagged
+// INDIVIDUALLY before composition; um-bearing pieces pass through (their
+// own pieces were sanitized when built).
+const sanRigidPiece = (e) => {
+  const str = String(e ?? '0');
+  if (/\d\s*um\b|\)\s*um\b|\*\s*1um\b/.test(str)) return str;
+  return umTagBareTermsM(stripUnaryPlus(spaceHyphensM(simplifyExpr(degToRad(str)))));
+};
+
+export function stripUnitsForGuard(e) {
+  return degToRad(String(e ?? '0'))
+    .replace(/\*\s*1um\b/g, '')
+    .replace(/([\d.)])\s*um\b/g, '$1');
+}
+
 export function componentRotationExpr(c) {
   if (!c || c.rotation == null) return null;
   if (!HFSS_ROTATABLE_KINDS.has(c.kind || 'rect')) return null;
@@ -545,6 +602,179 @@ export function computeParametricPositions(components, snaps, paramValues = {}, 
     };
   };
 
+  // ── GROUP-RIGID SNAP (grouped child with an enabled transform chain) ──
+  // The solver gives a snap whose child is a transformed group member
+  // RIGID-ASSEMBLY semantics: every member ends at natural + δ, where δ
+  // translates the whole group so the child's RENDERED (chain-applied)
+  // anchor lands on the parent anchor + offsets. The export mirrors that
+  // decomposition: δ is derived once per group — PARAMETRICALLY when the
+  // chain is a single rotate pivot:'group' (δ = target − Cn − R·(natC + a
+  // − Cn), orientation trig baked at export values), else as a frozen
+  // numeric — and every free member emits (natural) + (δ). Naturals come
+  // from the member posExprs (cxExpr/cyExpr); members without one emit
+  // (solved − δ) as a frozen natural. Without this, the child was emitted
+  // at the BASE-frame formula (parent + d − toOff) — the same wrong pose
+  // the solver bug produced on canvas — and posExpr members were emitted
+  // at naturals WITHOUT δ (assembly split in HFSS).
+  const groupRigidCache = new Map();
+  const noteRigid = (id, detail) => {
+    if (outMeta) (outMeta.groupRigid = outMeta.groupRigid || []).push({ id, detail });
+  };
+  // POSITION-only moved-base probe — the solver's twin (keep IDENTICAL):
+  // orientation-only chains (rotate pivot 'C', in-place mirror) keep
+  // instance-0 AT the base pose and stay on the legacy path.
+  const chainMovesBase = (cc) => {
+    if (!(cc.transforms || []).some(t => t && t.enabled !== false)) return false;
+    const bw = evalExpr(String(cc.w ?? '0'), paramValues);
+    const bh = evalExpr(String(cc.h ?? '0'), paramValues);
+    const mInsts = expandTransforms([{
+      ...cc,
+      w: Number.isFinite(bw) ? bw : 0,
+      h: Number.isFinite(bh) ? bh : 0,
+    }], paramValues, components);
+    const i0 = mInsts.find(i => i.idx === 0);
+    if (!i0 || !Number.isFinite(i0.cx) || !Number.isFinite(i0.cy)) return false;
+    return Math.abs(i0.cx - cc.cx) > 1e-9 || Math.abs(i0.cy - cc.cy) > 1e-9;
+  };
+  // Synthetic-position references: at emission, resolveSynthetics inlines
+  // _comp_<id>_cx/cy as that component's emitted position expr — inside a
+  // rigid group that expr is "(natural) + (grp_rigid_<g>_dx)", so a δ
+  // definition (or a member natural) that references a member synthetic
+  // becomes CIRCULAR (AEDT rejects cyclic variables) or double-counts δ
+  // (adversarial-review finds). Anything synthetic-bearing is excluded
+  // from naturals / forces the frozen-numeric δ.
+  const hasSynthRef = (str) => /_comp_[A-Za-z0-9_]+_(cx|cy|w|h)/.test(String(str ?? ''));
+  // Collision-free HFSS variable base per group: raw sanitization mapped
+  // "g 1" and "g-1" to the SAME name (the by-name dedupe then silently
+  // dropped the second group's δ) and could case-collide with user params
+  // (adversarial-review find). Case-insensitive registry, deterministic
+  // across both computeParametricPositions calls (allocation keyed on the
+  // ORIGINAL group string, iteration in component order).
+  const rigidVarBaseByGroup = new Map();
+  const rigidVarTakenLC = new Set(Object.keys(paramValues || {}).map(n => String(n).toLowerCase()));
+  const rigidVarBase = (groupName) => {
+    if (rigidVarBaseByGroup.has(groupName)) return rigidVarBaseByGroup.get(groupName);
+    const san = `grp_rigid_${String(groupName).replace(/[^A-Za-z0-9_]/g, '_')}`;
+    let name = san, k = 2;
+    while (rigidVarTakenLC.has(name.toLowerCase())) name = `${san}_${k++}`;
+    rigidVarTakenLC.add(name.toLowerCase());
+    rigidVarBaseByGroup.set(groupName, name);
+    return name;
+  };
+  const rigidChildSnapByGroup = new Map();
+  for (const cc of components) {
+    if (!cc.group || rigidChildSnapByGroup.has(cc.group)) continue;
+    const sn = incomingSnap.get(cc.id);
+    if (!sn || !(cc.transforms || []).some(t => t && t.enabled !== false)) continue;
+    // SAME GATE AS THE SOLVER: rigid semantics only when the chain MOVES
+    // the child's instance-0 base AND the snap parent is OUTSIDE the
+    // group (intra-group snaps keep legacy per-member placement — the
+    // IDC repeat-chain pattern).
+    const par = byId[sn.from.compId];
+    if (par && par.group === cc.group) continue;
+    if (chainMovesBase(cc)) rigidChildSnapByGroup.set(cc.group, sn);
+  }
+  const groupRigidBase = (groupName) => {
+    if (groupRigidCache.has(groupName)) return groupRigidCache.get(groupName);
+    let info = null;
+    const childSnap = rigidChildSnapByGroup.get(groupName);
+    if (childSnap) {
+      const child = byId[childSnap.to.compId];
+      const members = components.filter(cc => cc.group === groupName);
+      // δ numeric: any free member (or the child) with valid posExprs has
+      // solved = eval(expr) + δ exactly (the solver re-pins naturals each
+      // solve), so the first such member yields δ.
+      let deltaNum = null;
+      for (const m of members) {
+        if (m.kind === 'boolean' || m.consumedBy) continue;
+        if (incomingSnap.has(m.id) && m.id !== child.id) continue;
+        const ex = m.cxExpr != null ? String(m.cxExpr).trim() : '';
+        const ey = m.cyExpr != null ? String(m.cyExpr).trim() : '';
+        if (!ex || !ey || hasSynthRef(ex) || hasSynthRef(ey)) continue;
+        const nx = evalExpr(ex, paramValues);
+        const ny = evalExpr(ey, paramValues);
+        if (Number.isFinite(nx) && Number.isFinite(ny) && Number.isFinite(m.cx) && Number.isFinite(m.cy)) {
+          deltaNum = { x: m.cx - nx, y: m.cy - ny };
+          break;
+        }
+      }
+      // Natural position exprs (HFSS form + evalExpr guard twin) for a
+      // member: live posExpr when valid, else the frozen (solved − δ).
+      const natFor = (m) => {
+        const mk = (axis) => {
+          const expr = axis === 'x' ? m.cxExpr : m.cyExpr;
+          const sE = expr != null ? String(expr).trim() : '';
+          if (sE && !hasSynthRef(sE) && Number.isFinite(evalExpr(sE, paramValues))) {
+            // sanRigidPiece: flatten + um-tag the piece's inner bare
+            // constants NOW — inside the composed δ/pivot the um mix
+            // makes the final simplifier bail, and a bare folded-drag
+            // constant ("+ 173.5463") would resolve in METERS in AEDT.
+            const h = /^-?\d+(?:\.\d+)?$/.test(sE) ? `${sE}um` : `(${sanRigidPiece(sE)})`;
+            return { h, g: `(${sE})` };
+          }
+          const solvedV = axis === 'x' ? m.cx : m.cy;
+          const natV = (Number.isFinite(solvedV) ? solvedV : 0) - (deltaNum ? (axis === 'x' ? deltaNum.x : deltaNum.y) : 0);
+          return { h: `${natV.toFixed(6)}um`, g: `${natV.toFixed(6)}` };
+        };
+        const x = mk('x'); const y = mk('y');
+        return { xH: x.h, xG: x.g, yH: y.h, yG: y.g };
+      };
+      // Parametric-δ eligibility: single enabled rotate pivot:'group'
+      // with a finite numeric angle; no boolean/consumed members (their
+      // emission paths don't take the member δ-add); ancestry of the
+      // snap parent must not route through the group (circular).
+      const enabledTs = (child.transforms || []).filter(t => t && t.enabled !== false);
+      let eligible = enabledTs.length === 1 && enabledTs[0].kind === 'rotate' && enabledTs[0].pivot === 'group'
+        && members.every(m => m.kind !== 'boolean' && !m.consumedBy);
+      let angleRad = 0;
+      if (eligible) {
+        const aNum = evalExpr(String(enabledTs[0].angle ?? '0'), paramValues);
+        if (Number.isFinite(aNum)) angleRad = aNum * Math.PI / 180; else eligible = false;
+      }
+      if (eligible) {
+        // parent-ancestry walk: a chain through the group would recurse
+        const seenAnc = new Set();
+        let cur = childSnap.from.compId;
+        while (cur && !seenAnc.has(cur)) {
+          seenAnc.add(cur);
+          const anc = byId[cur];
+          if (anc && anc.group === groupName) { eligible = false; break; }
+          const up = incomingSnap.get(cur);
+          cur = up ? up.from.compId : null;
+        }
+      }
+      // Centroid naturals over non-consumed members (the pivot pool).
+      let cn = null;
+      if (eligible && deltaNum) {
+        const pool = members.filter(m => !m.consumedBy);
+        if (pool.length > 0) {
+          const nats = pool.map(m => natFor(m));
+          cn = {
+            xH: `(${nats.map(n => `(${n.xH})`).join(' + ')})/${pool.length}`,
+            yH: `(${nats.map(n => `(${n.yH})`).join(' + ')})/${pool.length}`,
+          };
+        } else eligible = false;
+      }
+      info = { childId: child.id, childSnap, deltaNum, natFor, eligible: eligible && !!deltaNum, angleRad, cn, deltaExprs: null };
+    }
+    groupRigidCache.set(groupName, info);
+    return info;
+  };
+  const RIGID_TOL = (v) => 1e-4 * Math.max(1, Math.abs(v));
+  // δ exprs for a MEMBER emission: reuse the child's (resolving the child
+  // first when needed); a resolution cycle or guard failure freezes δ at
+  // the exact solver numeric (geometry exact at export values).
+  const groupRigidDelta = (groupName) => {
+    const info = groupRigidBase(groupName);
+    if (!info || !info.deltaNum) return null;
+    if (info.deltaExprs) return info.deltaExprs;
+    if (!visiting.has(info.childId)) resolve(info.childId);
+    if (info.deltaExprs) return info.deltaExprs;
+    info.deltaExprs = { dx: `${info.deltaNum.x.toFixed(6)}um`, dy: `${info.deltaNum.y.toFixed(6)}um`, frozen: true };
+    noteRigid(info.childId, `group "${groupName}": rigid-snap shift baked numerically (child chain unresolvable parametrically) - re-export after sweeping params that move the assembly`);
+    return info.deltaExprs;
+  };
+
   const resolve = (compId) => {
     if (positions[compId]) return positions[compId];
     if (visiting.has(compId)) {
@@ -684,6 +914,21 @@ export function computeParametricPositions(components, snaps, paramValues = {}, 
         result = { cxExpr: `(${bbFree.cxNatExpr})`, cyExpr: `(${bbFree.cyNatExpr})`, wExpr: dims.wExpr, hExpr: dims.hExpr };
       } else {
         result = { cxExpr: rootPosExpr(c, 'x'), cyExpr: rootPosExpr(c, 'y'), wExpr: dims.wExpr, hExpr: dims.hExpr };
+      }
+      // GROUP-RIGID MEMBER: a free member of a rigidly-snapped group ends
+      // at natural + δ in the solver — emit exactly that. posExpr
+      // members' rootPosExpr is the NATURAL (excludes δ), and no-posExpr
+      // members' solved literal INCLUDES δ — natFor() normalizes both to
+      // a natural, so the δ term is added exactly once.
+      if (c.group && c.kind !== 'boolean' && !c.consumedBy) {
+        const gr = groupRigidBase(c.group);
+        if (gr && gr.childId !== compId && gr.deltaNum) {
+          const dE = groupRigidDelta(c.group);
+          if (dE) {
+            const nat = gr.natFor(c);
+            result = { ...result, cxExpr: `(${nat.xH}) + (${dE.dx})`, cyExpr: `(${nat.yH}) + (${dE.dy})` };
+          }
+        }
       }
       positions[compId] = result;
       visiting.delete(compId);
@@ -862,6 +1107,103 @@ export function computeParametricPositions(components, snaps, paramValues = {}, 
         }
       }
     }
+    // UNGROUPED MOVED-BASE CHILD: the solver places the RENDERED
+    // instance-0 anchor on the target (base = target − chain offset), so
+    // the legacy `parent + d − toOff` formula is off by the chain offset
+    // — a probe showed a 50 µm canvas↔HFSS disagreement for a displace
+    // chain (adversarial-review find). Bake the solved pose (exact at
+    // export values) + caveat; the transform chain then reproduces the
+    // rendered geometry exactly.
+    if (!c.group && c.kind !== 'boolean' && chainMovesBase(c)) {
+      const bx = Number.isFinite(c.cx) ? c.cx : 0;
+      const by = Number.isFinite(c.cy) ? c.cy : 0;
+      noteRigid(compId, `ungrouped moved-base snap child baked at its solved pose (the canvas pins the RENDERED chain anchor to the snap target) - re-export after sweeps that move it`);
+      const bakedU = { cxExpr: `${bx.toFixed(6)}um`, cyExpr: `${by.toFixed(6)}um`, wExpr: cDims.wExpr, hExpr: cDims.hExpr };
+      positions[compId] = bakedU;
+      visiting.delete(compId);
+      return bakedU;
+    }
+    // GROUP-RIGID CHILD: emit (natural + δ) instead of the base-frame
+    // formula — the solver pins the RENDERED chain-applied anchor to the
+    // target and translates the whole group, so `parent + d − toOff`
+    // (the base-frame pose) is simply the wrong position for this child.
+    const rigidInfo = c.group ? groupRigidBase(c.group) : null;
+    if (rigidInfo && rigidInfo.childId === compId) {
+      const targetX = fromTermX
+        ? `(${fromTermX}) + (${snap.dx})`
+        : `(${parentPos.cxExpr})${pFrameOffX}${instDx ? ` + (${instDx})` : ''} + (${fromOff.xOff}) + (${snap.dx})`;
+      const targetY = fromTermY
+        ? `(${fromTermY}) + (${snap.dy})`
+        : `(${parentPos.cyExpr})${pFrameOffY}${instDy ? ` + (${instDy})` : ''} + (${fromOff.yOff}) + (${snap.dy})`;
+      let result;
+      if (!rigidInfo.deltaNum) {
+        // No member natural to decompose against — bake the child at its
+        // solved pose (exact at export values).
+        const bx = Number.isFinite(c.cx) ? c.cx : 0;
+        const by = Number.isFinite(c.cy) ? c.cy : 0;
+        noteRigid(compId, `group "${c.group}": child baked at solved position (no member posExprs to derive the rigid shift from)`);
+        result = { cxExpr: `${bx.toFixed(6)}um`, cyExpr: `${by.toFixed(6)}um`, wExpr: cDims.wExpr, hExpr: cDims.hExpr };
+      } else {
+        const nat = rigidInfo.natFor(c);
+        if (!rigidInfo.deltaExprs && rigidInfo.eligible) {
+          // δ = target − (Cn + R·(natC + a − Cn)); orientation trig baked.
+          const aOff = PATH_KINDS.has(c.kind)
+            ? { xOff: '0', yOff: '0' }
+            : anchorOffsetExpr(snap.to.anchor, cDims.wExpr, cDims.hExpr, componentRotationExpr(c));
+          const caS = Math.cos(rigidInfo.angleRad).toFixed(9);
+          const saS = Math.sin(rigidInfo.angleRad).toFixed(9);
+          const relX = `((${nat.xH}) + (${aOff.xOff})) - (${rigidInfo.cn.xH})`;
+          const relY = `((${nat.yH}) + (${aOff.yOff})) - (${rigidInfo.cn.yH})`;
+          const aNatX = `(${rigidInfo.cn.xH}) + ${caS}*(${relX}) - ${saS}*(${relY})`;
+          const aNatY = `(${rigidInfo.cn.yH}) + ${saS}*(${relX}) + ${caS}*(${relY})`;
+          const dxE = `(${targetX}) - (${aNatX})`;
+          const dyE = `(${targetY}) - (${aNatY})`;
+          const gx = evalExpr(stripUnitsForGuard(dxE), paramValues);
+          const gy = evalExpr(stripUnitsForGuard(dyE), paramValues);
+          if (!hasSynthRef(dxE) && !hasSynthRef(dyE)
+              && Number.isFinite(gx) && Number.isFinite(gy)
+              && Math.abs(gx - rigidInfo.deltaNum.x) <= RIGID_TOL(rigidInfo.deltaNum.x)
+              && Math.abs(gy - rigidInfo.deltaNum.y) <= RIGID_TOL(rigidInfo.deltaNum.y)) {
+            // VARIABLE INDIRECTION: the full δ expr embeds the 
+            // group-centroid sum (N member naturals, ×3) — inlining it
+            // into every member position and then averaging THOSE into a
+            // pivot expr blew a real export up to 60 MB. With outMeta the
+            // caller emits ONE `set_var(grp_rigid_<g>_dx, <δ>)` and every
+            // consumer references the variable name (tiny, and visible /
+            // tunable in the AEDT variable list). Meta-less callers
+            // (guard-only contexts) keep the inline form.
+            if (outMeta) {
+              const vbase = rigidVarBase(c.group);
+              (outMeta.rigidVars = outMeta.rigidVars || []).push(
+                { name: `${vbase}_dx`, expr: dxE, num: rigidInfo.deltaNum.x },
+                { name: `${vbase}_dy`, expr: dyE, num: rigidInfo.deltaNum.y },
+              );
+              rigidInfo.deltaExprs = { dx: `${vbase}_dx`, dy: `${vbase}_dy`, frozen: false };
+            } else {
+              // Meta-less caller (twoLine flattenReplicas guard context):
+              // the inline δ embeds N member naturals ×3 — 30 kB per
+              // position on the real balun (adversarial-review find).
+              // Frozen numerics are exact at flatten-time params and pass
+              // that caller's own round-trip guard.
+              rigidInfo.deltaExprs = { dx: `${rigidInfo.deltaNum.x.toFixed(6)}um`, dy: `${rigidInfo.deltaNum.y.toFixed(6)}um`, frozen: true };
+            }
+            noteRigid(compId, `group "${c.group}": rigid snap emitted PARAMETRICALLY (δ = parent anchor − rendered natural anchor; rotation trig baked at ${(rigidInfo.angleRad * 180 / Math.PI).toFixed(1)} deg)`);
+          }
+        }
+        if (!rigidInfo.deltaExprs) {
+          rigidInfo.deltaExprs = { dx: `${rigidInfo.deltaNum.x.toFixed(6)}um`, dy: `${rigidInfo.deltaNum.y.toFixed(6)}um`, frozen: true };
+          noteRigid(compId, `group "${c.group}": rigid-snap shift baked numerically (guard mismatch or non-eligible chain) - re-export after sweeps that move the assembly`);
+        }
+        result = {
+          cxExpr: `(${nat.xH}) + (${rigidInfo.deltaExprs.dx})`,
+          cyExpr: `(${nat.yH}) + (${rigidInfo.deltaExprs.dy})`,
+          wExpr: cDims.wExpr, hExpr: cDims.hExpr,
+        };
+      }
+      positions[compId] = result;
+      visiting.delete(compId);
+      return result;
+    }
     // Solver: toComp.cx = fromAnchorWorld.x + dx - toAnchor.local.x
     //                  = (parent.cx [+ pathFrameOff] + instOff.x + fromOff.x) + dx - toOff.x
     const cxExpr = fromTermX
@@ -1015,7 +1357,8 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   // raw scene-stored cx/cy of "free" operands (which can be inconsistent
   // with the boolean's stored cx/cy), producing geometry that's shifted
   // from what the canvas shows.
-  const parametricPos = computeParametricPositions(solvedAll, snaps, paramValues);
+  const ppMeta0 = {};
+  const parametricPos = computeParametricPositions(solvedAll, snaps, paramValues, ppMeta0);
   // Identify mirror-target ids; those don't get parametric positions.
   const mirrorTargetIds = new Set();
   for (const m of mirrors || []) {
@@ -1130,6 +1473,70 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   // these are positions that TRACK most sweeps but carry a baked piece.
   for (const it of ppMeta.orientationBaked || []) noteCaveat(it.id, it.detail);
   for (const it of ppMeta.pathFrameBaked || []) noteCaveat(it.id, it.detail);
+  for (const it of ppMeta.groupRigid || []) noteCaveat(it.id, it.detail);
+  // ── Group-rigid + group-pivot HFSS variables ─────────────────────────
+  // δ vars (grp_rigid_<g>_dx/dy) come from computeParametricPositions
+  // (both calls emit identical defs — dedupe by name). Pivot vars
+  // (grp_pivot_<g>_x/y) are the PARAMETRIC group centroid: the mean of
+  // the members' emitted position exprs (which reference the δ var) —
+  // guarded against the solved centroid, so the translate-rotate-
+  // translate pivot tracks HFSS sweeps instead of staying baked. All are
+  // one-line set_vars; every consumer references them BY NAME (inlining
+  // these exprs blew a real balun export up to 60 MB).
+  const rigidVarDefs = [];
+  {
+    const seenRV = new Set();
+    for (const rv of [...(ppMeta0.rigidVars || []), ...(ppMeta.rigidVars || [])]) {
+      if (seenRV.has(rv.name)) continue;
+      seenRV.add(rv.name);
+      rigidVarDefs.push(rv);
+    }
+  }
+  const groupPivotVar = new Map(); // groupName -> { x, y } variable names
+  const pivotVarDefs = [];
+  {
+    // Guard context: rigid var names resolve to their solver numerics.
+    const rigidNumPV = { ...paramValues };
+    for (const rv of rigidVarDefs) {
+      const nv = Number.isFinite(rv.num) ? rv.num : evalExpr(stripUnitsForGuard(rv.expr), paramValues);
+      if (Number.isFinite(nv)) rigidNumPV[rv.name] = nv;
+    }
+    const pivotTakenLC = new Set([
+      ...Object.keys(paramValues || {}).map(n => String(n).toLowerCase()),
+      ...rigidVarDefs.map(rv => rv.name.toLowerCase()),
+    ]);
+    const groupsWithPivot = new Set();
+    for (const cc of solved) {
+      if (!cc.group) continue;
+      if ((cc.transforms || []).some(t => t && t.enabled !== false && t.kind === 'rotate' && t.pivot === 'group')) {
+        groupsWithPivot.add(cc.group);
+      }
+    }
+    for (const g of groupsWithPivot) {
+      const members = solved.filter(cc => cc.group === g && !cc.consumedBy);
+      const pps = members.map(m => parametricPosForExport[m.id]).filter(Boolean);
+      if (!members.length || pps.length !== members.length) continue;
+      const xE = `(${pps.map(pp2 => `(${pp2.cxExpr})`).join(' + ')})/${pps.length}`;
+      const yE = `(${pps.map(pp2 => `(${pp2.cyExpr})`).join(' + ')})/${pps.length}`;
+      let gx0 = 0, gy0 = 0;
+      for (const m of members) { gx0 += m.cx; gy0 += m.cy; }
+      gx0 /= members.length; gy0 /= members.length;
+      const gx = evalExpr(stripUnitsForGuard(xE), rigidNumPV);
+      const gy = evalExpr(stripUnitsForGuard(yE), rigidNumPV);
+      const tolP = (v) => 1e-4 * Math.max(1, Math.abs(v));
+      if (Number.isFinite(gx) && Number.isFinite(gy)
+          && Math.abs(gx - gx0) <= tolP(gx0) && Math.abs(gy - gy0) <= tolP(gy0)) {
+        // Collision-safe name (vs params AND the rigid vars), same
+        // registry semantics as rigidVarBase in cPP.
+        const sanP = `grp_pivot_${String(g).replace(/[^A-Za-z0-9_]/g, '_')}`;
+        let vbase = sanP, kSuf = 2;
+        while (pivotTakenLC.has(vbase.toLowerCase())) vbase = `${sanP}_${kSuf++}`;
+        pivotTakenLC.add(vbase.toLowerCase());
+        groupPivotVar.set(g, { x: `${vbase}_x`, y: `${vbase}_y` });
+        pivotVarDefs.push({ name: `${vbase}_x`, expr: xE }, { name: `${vbase}_y`, expr: yE });
+      }
+    }
+  }
   // Case-insensitive param collisions resolved at the top of the export
   // (dropped orphans / renamed+rewritten params).
   for (const msg of caseCollisionNotes) noteCaveat('params', msg);
@@ -1189,8 +1596,7 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   // an exponent iff it sits between [eE] (itself preceded by a digit) and
   // a digit. (An identifier literally ending in digit+e, e.g. "x1e-3",
   // also matches and stays unspaced — pathological naming, accepted.)
-  const spaceHyphens = (s) => String(s).replace(/(\w)-(\w)/g, (m, a, b, off, str) =>
-    (/[eE]/.test(a) && /\d/.test(str[off - 1] ?? '') && /\d/.test(b)) ? m : `${a} - ${b}`);
+  const spaceHyphens = spaceHyphensM;
   // ── AEDT expression sanitizer (THE emission choke point) ────────────
   // AEDT's expression parser REJECTS unary plus: "(+(x))*sin(a)" fails with
   // "Expected a value ... Instead found this: +(...)" — a real import
@@ -1224,39 +1630,7 @@ export function generateHfssNative(scene, paramValues, options = {}) {
   // parens/function args are untouched (trig args are dimensionless), a
   // digit+[eE] before the sign is an exponent (not a term boundary), and
   // a term that IS the whole expression uses the `(Num um)` numeric form.
-  const umTagBareTerms = (s) => {
-    const str = String(s);
-    const NUMRE = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
-    // A PURE-number string is left alone: the numeric-context callers
-    // (exprWithUm's `(Xum)` branch, the transform emitters' toFixed
-    // paths) already unit-handle it — tagging here would churn the
-    // proven forms. Mixed ident+constant expressions are the hazard.
-    if (NUMRE.test(str.trim())) return str;
-    let out = '', depth = 0, termStart = 0;
-    const flush = (end) => {
-      const term = str.slice(termStart, end);
-      const t = term.trim();
-      out += NUMRE.test(t) ? term.replace(t, `(${t}*1um)`) : term;
-    };
-    for (let i = 0; i < str.length; i++) {
-      const ch = str[i];
-      if (ch === '(') depth++;
-      else if (ch === ')') depth--;
-      else if ((ch === '+' || ch === '-') && depth === 0 && i > termStart) {
-        const prev = str.slice(termStart, i).trimEnd();
-        const last = prev[prev.length - 1];
-        // Binary operator only (preceded by an operand) and NOT the sign
-        // of a scientific exponent (digit+[eE] immediately before).
-        if (last && /[\w)]/.test(last) && !/\d[eE]$/.test(prev)) {
-          flush(i);
-          out += ch;
-          termStart = i + 1;
-        }
-      }
-    }
-    flush(str.length);
-    return out;
-  };
+  const umTagBareTerms = umTagBareTermsM;
   const _sanCache = new Map();
   const sanitizeLenExpr = (e) => {
     const key = String(e ?? '0');
@@ -1809,6 +2183,14 @@ def set_var(name, value):
   // references, regardless of the params object's key order.
   for (const name of topoSortParams(params)) {
     code += `set_var("${ascii(name)}", "${formatVarValue(params[name])}")\n`;
+  }
+  // Group-rigid δ + parametric group-centroid pivots (defined AFTER the
+  // scene params they reference; pivots reference the δ vars, so the δ
+  // block comes first).
+  if (rigidVarDefs.length || pivotVarDefs.length) {
+    code += `# group-rigid snap shift + group-centroid pivot variables\n`;
+    for (const rv of rigidVarDefs) code += `set_var("${ascii(rv.name)}", "${exprWithUm(rv.expr)}")\n`;
+    for (const rv of pivotVarDefs) code += `set_var("${ascii(rv.name)}", "${exprWithUm(rv.expr)}")\n`;
   }
 
   // Substrate / chip dimension variables, so the user can retune the
@@ -4513,13 +4895,25 @@ except Exception as e:
             const gc = groupCentroid(componentGroup);
             if (gc) {
               pivotX = gc.x; pivotY = gc.y;
-              // groupCentroid currently averages solved numerics; we
-              // don't have parametric chains for group members yet, so
-              // fall back to a baked numeric expression. The rotation
-              // itself is still emitted with a parametric angle.
-              pivotXExpr = `${pivotX.toFixed(4)}um`;
-              pivotYExpr = `${pivotY.toFixed(4)}um`;
-              noteFrozen(chainReportId, 'rotate pivot (group centroid of mixed members - baked numerically)');
+              // PARAMETRIC group-centroid pivot: the mean of the members'
+              // parametric position exprs (computeParametricPositions —
+              // posExpr naturals + any group-rigid snap δ). Emitted into
+              // the translate-rotate-translate Move vectors, which DO
+              // evaluate variable expressions, so an HFSS sweep moves the
+              // pivot with the members and the rotation stays exact.
+              // Round-trip-guarded against the solved centroid; any
+              // mismatch (unresolvable member, HFSS-only form) keeps the
+              // old baked numeric.
+              const pvVar = groupPivotVar.get(componentGroup);
+              if (pvVar) {
+                pivotXExpr = pvVar.x;
+                pivotYExpr = pvVar.y;
+                notePara(`${chainReportId}.rotate(group)`, 'group-centroid pivot (parametric grp_pivot_* variable = mean of member position exprs)');
+              } else {
+                pivotXExpr = `${pivotX.toFixed(4)}um`;
+                pivotYExpr = `${pivotY.toFixed(4)}um`;
+                noteFrozen(chainReportId, 'rotate pivot (group centroid - baked numerically)');
+              }
             }
           } else if (pivot === 'custom') {
             // C9: explicit (px, py) world-coordinate pivot. px/py are

@@ -3062,10 +3062,38 @@ export default function App() {
     // parent). External OUTGOING snaps are dropped — cloning them would
     // create a second snap targeting the same external 'to' component
     // (duplicate-to violation). See cloneSnapsForDuplicate (module scope).
-    const newSnaps = cloneSnapsForDuplicate(
+    let newSnaps = cloneSnapsForDuplicate(
       scene.snaps, ids, idMap,
       () => `snap_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
     );
+    // GROUP-RIGID guard (adversarial-review find): a duplicated member of
+    // a rigidly-snapped group keeps its group tag, so cloning its
+    // external-incoming snap would put a SECOND absolute constraint on
+    // the group's single rigid-translation DOF — the solver then breaks
+    // the first snap. Drop the clone (the copy rides the group's existing
+    // rigid placement at its duplication offset), mirroring the
+    // external-outgoing drop precedent.
+    const reverseIdMap = Object.fromEntries(Object.entries(idMap).map(([a, b]) => [b, a]));
+    newSnaps = newSnaps.filter(sn => {
+      const origChildId = reverseIdMap[sn.to.compId];
+      if (!origChildId || ids.has(sn.from.compId) || idMap[sn.from.compId]) return true; // internal snap → keep
+      const origChild = scene.components.find(c => c.id === origChildId);
+      if (!origChild || !origChild.group) return true;
+      const par = scene.components.find(c => c.id === sn.from.compId);
+      if (par && par.group === origChild.group) return true;
+      const enabled = (origChild.transforms || []).some(t => t && t.enabled !== false);
+      if (!enabled) return true;
+      const bw = evalExpr(String(origChild.w ?? '0'), paramValues);
+      const bh = evalExpr(String(origChild.h ?? '0'), paramValues);
+      const insts = expandTransforms([{
+        ...origChild,
+        w: Number.isFinite(bw) ? bw : 0,
+        h: Number.isFinite(bh) ? bh : 0,
+      }], paramValues, scene.components);
+      const i0 = insts.find(i => i.idx === 0);
+      const moved = !!i0 && (Math.abs(i0.cx - origChild.cx) > 1e-9 || Math.abs(i0.cy - origChild.cy) > 1e-9);
+      return !moved;
+    });
     updateScene(prev => ({
       ...prev,
       components: [...prev.components, ...newComps],

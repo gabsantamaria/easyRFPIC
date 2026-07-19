@@ -284,6 +284,51 @@ For non-rect shapes, `expandTransforms` propagates shape-specific fields (r, rx,
 
 **Solver** (`solveLayout`): iteratively propagates snap constraints. Uses a fixed-point iteration with shift-clustering on each snap. After primitive snap propagation, `refreshBooleanBbox` recomputes boolean AABBs inline. A final fixed-point pass picks up any chained position dependencies.
 
+**GROUP-RIGID SNAP (snap onto/from a transformed group)**: a snap whose
+CHILD is a group member whose transform chain MOVES its instance-0 base
+(rotate pivot:'group', displace, duplicate_mirror — the `movedBase`
+test) AND whose parent is OUTSIDE the group gets RIGID-ASSEMBLY
+semantics: the solver pins the child to its NATURAL pose (posExpr when
+present, else the scene raw — its intra-group position), measures the
+child's RENDERED instance-0 anchor, and translates the WHOLE group
+tag-set (plus each shifted member's boolean operand cluster and every
+already-placed snap DESCENDANT) so the rendered anchor lands on the
+target. The raw shift is solved through a 2×2 Jacobian probe (uniform
+raw shift of the set → rendered-anchor response), exact for every chain
+kind (all affine; identity for group-pivot chains). Result: snapping a
+loose feed to a −90°-rotated balun member drags the whole balun in as
+one piece — previously the one member teleported to its base-frame pose
+and the centroid shift warped all 30 siblings (real user bug). The GATE
+is deliberately narrow: unmoved-base chains (an IDC's `repeat`) and
+intra-group snaps keep the legacy per-member placement BYTE-EXACT
+(intra-group snap CHAINS depend on it — guard:
+tests/group-rigid-snap.test.js LEGACY case). An UNGROUPED moved-base
+child gets the same rendered-anchor correction for itself alone.
+Diagnostics: `group-overconstrained` (another member is externally
+snapped — rigidity wins), `rigid-snap-singular` (degenerate chain).
+Adversarial-review hardening (all probe-confirmed): the movedBase test
+is POSITION-only (orientation-only chains — rotate pivot 'C', in-place
+mirror — keep byte-exact legacy placement; keep the solver and
+hfss-native `chainMovesBase` twins IDENTICAL); intra-set snap children
+are PRE-PINNED to their natural relative pose before the rendered-anchor
+measurement (their stale raws contaminated the pivot centroid); shifted
+placed booleans re-record their `_comp_*` synthetics (recordPlaced, not
+bare refresh); a SECOND external snap on an already-rigid group skips
+the posExpr re-pin (clean last-snap-wins instead of corruption); a
+shifted member of ANOTHER rigidly-placed group drags that whole tag-set
+(rigidGroups gate in shiftRec); ⌘D drops a cloned external-incoming
+snap that would double-constrain a rigid group; reRootSnaps routes
+moved-base endpoints through the numeric-correction path (childPoint
+measures the rendered instance-0 anchor). An UNGROUPED moved-base child
+(non-boolean) is BAKED at its solved pose in the HFSS export (+ caveat)
+— the legacy formula was off by the chain offset.
+Canvas parity: `onAnchorClick` measures child-side offsets at the
+rendered instance-0 anchor for moved bases (movedBaseIds), and an idx-0
+instance-dot pick may REVERSE into the child role (only true replicas
+idx>0 refuse); EditableSnapDims/showDimensions measure the child leg at
+the rendered anchor. HFSS export: see the group-rigid emission notes in
+the HFSS native section. Fixture guard: tests/fixtures/ki-lumped-balun.json.
+
 **Cluster drag**: dragging a primitive that's a member of a boolean drags the WHOLE cluster (operands + the boolean) in tandem. Implementation: walk `consumedBy` to find the root boolean, then walk `operandIds` recursively (with a `visitedBooleans` guard to prevent infinite loops in nested boolean structures). All cluster members move with the same delta.
 
 **Alt-drag snap creation**: alt-modifier drag creates a new snap between the dragged component and a target. The candidate target list is computed at drag-init time:
@@ -357,7 +402,11 @@ walk is SKIPPED while the whole group is selected (it redirected the
 second click off the group) and filtered to members inside isolation;
 Alt-drag (parametric snap creation) NEVER co-moves the selection — it
 drags the clicked component alone, so an alt-drag from a selected group
-can still target a snap.
+can still target a snap. Snapping a whole transformed group INTO place
+goes through the group-rigid snap semantics (see the solver section):
+make the group member the snap CHILD (the snap button auto-reverses,
+idx-0 picks allowed) and the assembly translates rigidly onto the
+parent anchor.
 
 **Snap discoverability aids** (Canvas render):
 - **Alt-held anchor guides**: while Option/Alt is held (and not in add/ruler/snap-mode), faint amber dots show the 9 snap anchors of every instance INCLUDING repeat replicas (sourced from `transformInstances`, viewport-culled, `pointerEvents:none`), so the user can see where an Alt-drag will land. They vanish on Alt release; the dragged cluster's own anchors are skipped.
@@ -1447,6 +1496,42 @@ HFSS-only forms like `cos(((a))*1deg)` evaluate to a SILENT finite 0 in
 evalExpr. gdsfactory's `exprToPython` converts `deg` with a NUMERIC
 radian factor (inserting `math.pi` before the bare-pi pass garbled it
 into `math.math.pi`).
+
+**Group-rigid snap emission** (`computeParametricPositions` +
+`generateHfssNative`): the solver's rigid decomposition (member = natural
++ δ) is mirrored parametrically. δ = parentAnchorTerm + d − (Cn +
+R·(natC + a − Cn)) where Cn is the natural member centroid, natC the
+child's natural (posExpr), a the child anchor offset, R the baked
+rotation trig — round-trip guarded (stripUnitsForGuard + evalExpr vs the
+solver δ), frozen-numeric fallback with a `groupRigid` caveat note.
+CRITICAL: everything is emitted through HFSS VARIABLE INDIRECTION —
+`set_var("grp_rigid_<group>_dx/dy", <δ expr>)` right after the scene
+params, and every member position references the NAME (`(<posExpr>) +
+(grp_rigid_g_dx)`); members without posExprs emit a frozen natural
+(solved − δ). Inlining the δ/centroid exprs blew a real 31-member balun
+export to 61 MB (the centroid sum re-embedded per member and per pivot)
+— the variables keep it at ~283 kB AND surface the shift as a tunable
+AEDT variable. The rotate pivot:'group' chain emission is upgraded the
+same way: `grp_pivot_<group>_x/y` variables = mean of the member
+position exprs (guarded against the solved centroid; baked fallback +
+noteFrozen), emitted into the translate-rotate-translate Move vectors —
+so group rotation now tracks HFSS sweeps instead of staying baked.
+Meta-less computeParametricPositions callers (twoLine flattenReplicas)
+get a FROZEN-numeric δ (the inline form hit 30 kB per position on the
+real balun; frozen is exact at flatten-time params and passes that
+caller's own round-trip guard). Review hardening: variable names come
+from a CASE-INSENSITIVE collision registry keyed on the ORIGINAL group
+string ("g 1"/"g-1" no longer merge; user params can't collide); member
+naturals and the δ definition REJECT `_comp_*` synthetic references
+(resolveSynthetics would inline the member's own emitted position —
+circular set_var / double-counted δ) and fall to frozen forms; each
+um-FREE natural piece is flattened + um-tagged individually
+(`sanRigidPiece`) before composition — the um mix makes the final
+simplifier bail, and a bare folded-drag constant ("+ 173.5463") would
+have resolved in METERS in AEDT.
+Gold test: tests/group-rigid-snap.test.js sweep-parity on the real
+balun fixture (sub-1e-5 µm across dyb2_*/feedZ0_*/cap_* sweeps; the
+no-rigid-snap scene stays byte-parity).
 
 **Zero-thickness sheet impedance** is resolved PER FIELD (Rs and Xs
 independently) in priority: (1) `options.sheetImpedance` (2-line wizard)

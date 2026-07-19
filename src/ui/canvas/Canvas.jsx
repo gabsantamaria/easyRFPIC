@@ -1076,9 +1076,29 @@ function EditableSnapDims({ svgRef, viewport, snaps, solved, transformInstances,
     }
     // Path-kind CHILD: the solver pins the vertex-chain root (v0) — the
     // editable Δx/Δy measure to the point the snap actually constrains.
-    const toW = PATH_KINDS.has(toComp.kind)
-      ? { x: toComp.cx, y: toComp.cy }
-      : anchorWorld(toComp, s.to.anchor, paramValues);
+    // MOVED-BASE CHILD: with an enabled transform chain the solver pins
+    // the RENDERED instance-0 anchor (group-rigid semantics) — measure
+    // there; for unmoved chains the instance-0 anchor equals the base
+    // anchor, so this is always the rendered truth.
+    const toW = (() => {
+      // Solver-parity gates: intra-group snaps + boolean children keep
+      // base-anchor measurement (legacy placement branches).
+      const parentInGroup = !!toComp.group && fromComp.group === toComp.group;
+      const childHasChain = toComp.kind !== 'boolean' && !parentInGroup
+        && (toComp.transforms || []).some(t => t && t.enabled !== false);
+      if (PATH_KINDS.has(toComp.kind)) {
+        if (childHasChain) {
+          const inst = (transformInstances || []).find(i => i.compId === toComp.id && i.idx === 0);
+          if (inst && Number.isFinite(inst.cx) && Number.isFinite(inst.cy)) return { x: inst.cx, y: inst.cy };
+        }
+        return { x: toComp.cx, y: toComp.cy };
+      }
+      if (childHasChain) {
+        const ra = resolveInstanceAnchorNumeric(toComp.id, s.to.anchor, 0, byId, transformInstances || [], paramValues);
+        if (ra && Number.isFinite(ra.x) && Number.isFinite(ra.y)) return ra;
+      }
+      return anchorWorld(toComp, s.to.anchor, paramValues);
+    })();
     const valDx = evalExpr(s.dx, paramValues);
     const valDy = evalExpr(s.dy, paramValues);
     // dx leg: horizontal at fromW.y, from fromW.x to toW.x.
@@ -3471,20 +3491,37 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // the user dropped is preserved exactly, and the snap still
         // tracks the parent parametrically through the gap_* params.
         const toSolvedPath = solved.find(c => c.id === toCompId);
-        if (toSolvedPath && PATH_KINDS.has(toSolvedPath.kind)) {
-          const fromSolved = solved.find(c => c.id === fromCompId);
+        const fromSolvedC = solved.find(c => c.id === fromCompId);
+        // MOVED-BASE CHILD (adversarial-review find): the alt-drag preview
+        // aligned the BASE-frame anchor, but the solver now pins the
+        // RENDERED instance-0 anchor — a zero-offset commit would jump the
+        // part at release. Capture the full offset from the rendered pose
+        // instead (same drop-preserving idiom as the path-kind block).
+        const childIsMovedBase = toSolvedPath && !PATH_KINDS.has(toSolvedPath.kind)
+          && toSolvedPath.kind !== 'boolean' && movedBaseIds.has(toCompId)
+          && !(toSolvedPath.group && fromSolvedC && fromSolvedC.group === toSolvedPath.group);
+        if (toSolvedPath && (PATH_KINDS.has(toSolvedPath.kind) || childIsMovedBase)) {
           let fx = null, fy = null;
           if (target.kind === 'anchor' && fromCompId === targetCompId) {
             // The preview point IS the from-anchor world position
             // (includes replica instanceIdx targets).
             fx = target.x; fy = target.y;
-          } else if (fromSolved) {
-            const wpt = anchorWorld(fromSolved, fromAnchor, paramValues);
+          } else if (fromSolvedC) {
+            const wpt = anchorWorld(fromSolvedC, fromAnchor, paramValues);
             fx = wpt.x; fy = wpt.y;
           }
           if (Number.isFinite(fx) && Number.isFinite(fy)) {
-            finalDx = toSolvedPath.cx - fx;
-            finalDy = toSolvedPath.cy - fy;
+            if (childIsMovedBase) {
+              const byIdAD = Object.fromEntries(solved.map(cc => [cc.id, cc]));
+              const ra = resolveInstanceAnchorNumeric(toCompId, toAnchor, 0, byIdAD, transformInstances || [], paramValues);
+              if (ra && Number.isFinite(ra.x) && Number.isFinite(ra.y)) {
+                finalDx = ra.x - fx;
+                finalDy = ra.y - fy;
+              }
+            } else {
+              finalDx = toSolvedPath.cx - fx;
+              finalDy = toSolvedPath.cy - fy;
+            }
           }
         }
         // Pick fresh gap-parameter names. The captured offset is the
@@ -3610,7 +3647,13 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       // a base snap that contradicts the instance-anchor preview the user
       // saw, refuse and explain (matches the reference-can't-be-a-replica
       // intent). The second-clicked component keeps its existing snap.
-      if (Number.isInteger(pickIdx)) {
+      // idx 0 is NOT a replica — it's the rendered base pose of a
+      // transform-moved component (e.g. a group-rotated balun member).
+      // The solver's child placement measures the rendered instance-0
+      // anchor (group-rigid semantics), so reversing with an idx-0 pick
+      // is exact: the idx is simply dropped on the child side. Only a
+      // TRUE replica (idx > 0) can't become the child.
+      if (Number.isInteger(pickIdx) && pickIdx > 0) {
         setSnapPick(null); setSnapHover(null); setSnapCursor(null); setSnapMode('idle');
         if (alertDialog) {
           alertDialog(
@@ -3630,9 +3673,33 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
     // Path-kind CHILD: the solver collapses child anchors to the vertex-
     // chain root (v0) — measure the captured offset from THAT point, so
     // the committed snap keeps the trace byte-exactly where it is.
-    const tW = PATH_KINDS.has(toCompActual.kind)
-      ? { x: toCompActual.cx, y: toCompActual.cy }
-      : anchorWorld(toCompActual, actualToAnchor, paramValues);
+    // MOVED-BASE CHILD (transform chain moves instance 0 — group-pivot
+    // rotate, displace, duplicate_mirror): the solver places the
+    // RENDERED instance-0 anchor at the target (rigid group semantics),
+    // so measure the captured offset from the rendered pose the user
+    // actually sees — measuring the invisible base pose committed
+    // garbage offsets (the balun "member deforms" bug).
+    const childRenderedPoint = (comp, anchorName) => {
+      // SOLVER-PARITY GATES (adversarial-review finds): an INTRA-GROUP
+      // snap keeps legacy base placement (measure the base anchor), and
+      // boolean children go through the cluster-shift branch (base
+      // semantics) — measuring the rendered pose for either committed
+      // offsets the solver then contradicts.
+      const parentInGroup = !!comp.group && fromCompActual && fromCompActual.group === comp.group;
+      if (movedBaseIds.has(comp.id) && !parentInGroup && comp.kind !== 'boolean') {
+        if (PATH_KINDS.has(comp.kind)) {
+          const inst = (transformInstances || []).find(i => i.compId === comp.id && i.idx === 0);
+          if (inst && Number.isFinite(inst.cx) && Number.isFinite(inst.cy)) return { x: inst.cx, y: inst.cy };
+        } else {
+          const ra = instAwareAnchor(comp, anchorName, 0);
+          if (ra) return ra;
+        }
+      }
+      return PATH_KINDS.has(comp.kind)
+        ? { x: comp.cx, y: comp.cy }
+        : anchorWorld(comp, anchorName, paramValues);
+    };
+    const tW = childRenderedPoint(toCompActual, actualToAnchor);
     let actualDx = tW.x - fW.x;
     let actualDy = tW.y - fW.y;
     // Shift held = axis-lock the resulting offset to a single axis (zero the smaller delta)
@@ -5571,6 +5638,8 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           geometry, an arrow line offset perpendicular, end arrows, and a
           centered label on a dark pill so it reads against any background. */}
       {showDimensions && (() => {
+        // Plain-object id lookup for resolveInstanceAnchorNumeric below.
+        const dimById = Object.fromEntries(solved.map(cc => [cc.id, cc]));
         // Global read-only overlay (the "dimensions" toolbar toggle). The
         // on-SELECT dimensions — editable W/H (EditableDimsOverlay) and editable
         // snap dx/dy (EditableSnapDims) — are rendered in the editDims block.
@@ -5614,15 +5683,31 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           // the ACTUAL gap (replica→child), not base→child.
           let fromW = anchorWorld(fromComp, s.from.anchor, paramValues);
           if (Number.isInteger(s.from.instanceIdx) && s.from.instanceIdx >= 0) {
-            const byIdSolvedForDims = Object.fromEntries(solved.map(cc => [cc.id, cc]));
-            const ra = resolveInstanceAnchorNumeric(s.from.compId, s.from.anchor, s.from.instanceIdx, byIdSolvedForDims, transformInstances, paramValues);
+            const ra = resolveInstanceAnchorNumeric(s.from.compId, s.from.anchor, s.from.instanceIdx, dimById, transformInstances, paramValues);
             if (ra && Number.isFinite(ra.x) && Number.isFinite(ra.y)) fromW = ra;
           }
           // Path-kind CHILD: the solver pins the vertex-chain root (v0) —
           // measure the dim to the point the snap actually constrains.
-          const toW = PATH_KINDS.has(toComp.kind)
-            ? { x: toComp.cx, y: toComp.cy }
-            : anchorWorld(toComp, s.to.anchor, paramValues);
+          // Moved-base child: the solver pins the RENDERED instance-0
+          // anchor — measure the read-only dim there too (identical to
+          // the base anchor when the chain leaves the base in place).
+          const toW = (() => {
+            const parentInGroup = !!toComp.group && fromComp.group === toComp.group;
+            const childHasChain = toComp.kind !== 'boolean' && !parentInGroup
+              && (toComp.transforms || []).some(t => t && t.enabled !== false);
+            if (PATH_KINDS.has(toComp.kind)) {
+              if (childHasChain) {
+                const ti = (transformInstances || []).find(i => i.compId === toComp.id && i.idx === 0);
+                if (ti && Number.isFinite(ti.cx) && Number.isFinite(ti.cy)) return { x: ti.cx, y: ti.cy };
+              }
+              return { x: toComp.cx, y: toComp.cy };
+            }
+            if (childHasChain) {
+              const ra = resolveInstanceAnchorNumeric(toComp.id, s.to.anchor, 0, dimById, transformInstances || [], paramValues);
+              if (ra && Number.isFinite(ra.x) && Number.isFinite(ra.y)) return ra;
+            }
+            return anchorWorld(toComp, s.to.anchor, paramValues);
+          })();
           if (hasParam(s.dx)) {
             const valDx = evalExpr(s.dx, paramValues);
             // Skip if dx is essentially zero — a zero-length dim is useless

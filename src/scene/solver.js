@@ -398,6 +398,199 @@ export function solveLayout(components, snaps, paramValues) {
       recordPlaced(byId[c.id]);
     }
   }
+  // Snap-children adjacency (from → [to]) for the rigid-shift descendant
+  // walk below. Built once per solve; snaps are immutable during a solve.
+  const snapChildrenOf = new Map();
+  for (const s of snaps) {
+    if (!snapChildrenOf.has(s.from.compId)) snapChildrenOf.set(s.from.compId, []);
+    snapChildrenOf.get(s.from.compId).push(s.to.compId);
+  }
+  // Rigid translation of one working clone: raw cx/cy plus the solver-
+  // stashed derived geometry (displayBbox, _resolvedVerts) and the
+  // synthetic params when already placed — the same mutation contract as
+  // the boolean-cluster shift below.
+  const translateClone = (c, ddx, ddy) => {
+    c.cx += ddx;
+    c.cy += ddy;
+    if (c.displayBbox) {
+      c.displayBbox = { ...c.displayBbox, cx: c.displayBbox.cx + ddx, cy: c.displayBbox.cy + ddy };
+    }
+    if (Array.isArray(c._resolvedVerts)) {
+      c._resolvedVerts = c._resolvedVerts.map(([px, py]) => [px + ddx, py + ddy]);
+    }
+    if (placed.has(c.id)) {
+      if (Number.isFinite(c.cx)) workingPV[`_comp_${c.id}_cx`] = c.cx;
+      if (Number.isFinite(c.cy)) workingPV[`_comp_${c.id}_cy`] = c.cy;
+    }
+  };
+  // Rendered instance-0 point of a snap CHILD: the anchor NAME on the
+  // chain-transformed pose (path kinds: the transformed vertex-chain
+  // root). Same math as the from-side instanceIdx branch / canvas dots.
+  const renderedChildPoint = (child, anchorName) => {
+    const cw = typeof child.w === 'number' ? child.w : evalExpr(child.w, workingPV);
+    const ch = typeof child.h === 'number' ? child.h : evalExpr(child.h, workingPV);
+    const insts = expandTransforms([{
+      ...child,
+      w: Number.isFinite(cw) ? cw : 0,
+      h: Number.isFinite(ch) ? ch : 0,
+    }], workingPV, Object.values(byId));
+    const inst = insts.find(i => i.idx === 0);
+    if (!inst || !Number.isFinite(inst.cx) || !Number.isFinite(inst.cy)) return null;
+    if (child.kind === 'polyline' || child.kind === 'polyshape') {
+      return { x: inst.cx, y: inst.cy };
+    }
+    const lp = anchorLocalInstance(anchorName, inst.w, inst.h, inst.rotation || 0, inst.scaleX ?? 1, inst.scaleY ?? 1);
+    const fc = instanceFrameCenter(child, inst);
+    return { x: fc.cx + lp.x, y: fc.cy + lp.y };
+  };
+  // ── GROUP-RIGID / MOVED-BASE SNAP-CHILD CORRECTION ───────────────────
+  // The base placement above/below puts the child's BASE-frame anchor at
+  // the target. When the child's transform chain MOVES its instance-0
+  // pose (rotate pivot:'group' about the group centroid, displace,
+  // duplicate_mirror, non-'C' pivots), the RENDERED shape sits elsewhere
+  // — a snap onto a grouped balun member teleported the member to a
+  // garbage pose AND warped the whole group (moving one member shifts
+  // the pivot centroid every other member rotates about; real user bug).
+  // Correction: measure the rendered instance-0 anchor, then shift so IT
+  // lands on the target. A GROUPED child shifts its whole tag-set
+  // rigidly — the centroid translates along, the rotation is preserved
+  // exactly, and the assembly moves in as one piece (Illustrator
+  // semantics). The raw shift is solved through a 2x2 Jacobian probe so
+  // chains whose rendered pose is NOT 1:1 in the raw position (fixed
+  // world pivots, mirror planes) place exactly too — every chain kind is
+  // affine in the raw positions, so the probe is exact, and for
+  // group/'C'-pivot chains it reduces to the identity. Already-placed
+  // snap DESCENDANTS of shifted members co-shift so their constraints
+  // stay satisfied (the solve places each snap once per pass).
+  // Group tags that were placed RIGIDLY (whole-tag-set shift) by the
+  // correction below — a later rigid shift reaching one of their members
+  // as a snap descendant must co-shift the whole set (see shiftRec).
+  const rigidGroups = new Set();
+  const applyRenderedChildCorrection = (s, toComp, targetX, targetY) => {
+    const hasEnabled = (toComp.transforms || []).some(t => t && t.enabled !== false);
+    if (!hasEnabled) return;
+    const shiftSet = [];
+    if (toComp.group) {
+      for (const cc of Object.values(byId)) {
+        if (cc.group === toComp.group) shiftSet.push(cc);
+      }
+    } else {
+      shiftSet.push(toComp);
+    }
+    const inSet = new Set(shiftSet.map(cc => cc.id));
+    // PRE-PIN intra-set snap children to their natural relative pose
+    // BEFORE measuring the rendered anchor: an intra-group snap child is
+    // necessarily unplaced when this correction runs, and its stale
+    // scene raw would contaminate the pivot:'group' centroid — the
+    // rigid child's anchor then missed the target by hundreds of µm
+    // with no diagnostic (adversarial-review find, probe-confirmed).
+    // The pre-pin uses the SAME base-frame math as the legacy
+    // intra-group placement, so the later real placement is a no-op.
+    {
+      const prePinned = new Set([toComp.id]);
+      let prog = true;
+      while (prog) {
+        prog = false;
+        for (const sn of snaps) {
+          if (!inSet.has(sn.to.compId) || !inSet.has(sn.from.compId)) continue;
+          const kid = byId[sn.to.compId];
+          const par = byId[sn.from.compId];
+          if (!kid || !par || kid.id === toComp.id) continue;
+          if (placed.has(kid.id) || prePinned.has(kid.id)) continue;
+          if (!placed.has(par.id) && !prePinned.has(par.id)) continue;
+          const pAnchor = anchorWorld(par, sn.from.anchor, workingPV);
+          const kw = typeof kid.w === 'number' ? kid.w : evalExpr(kid.w, workingPV);
+          const kh = typeof kid.h === 'number' ? kid.h : evalExpr(kid.h, workingPV);
+          const kIsPath = kid.kind === 'polyline' || kid.kind === 'polyshape';
+          const kLocal = kIsPath
+            ? { x: 0, y: 0 }
+            : anchorLocalRotated(sn.to.anchor, Number.isFinite(kw) ? kw : 0, Number.isFinite(kh) ? kh : 0, compRotationDeg(kid, workingPV));
+          let pdx = evalExpr(sn.dx, workingPV);
+          let pdy = evalExpr(sn.dy, workingPV);
+          if (!Number.isFinite(pdx)) pdx = 0;
+          if (!Number.isFinite(pdy)) pdy = 0;
+          translateClone(kid, (pAnchor.x + pdx - kLocal.x) - kid.cx, (pAnchor.y + pdy - kLocal.y) - kid.cy);
+          prePinned.add(kid.id);
+          prog = true;
+        }
+      }
+    }
+    const A0 = renderedChildPoint(toComp, s.to.anchor);
+    if (!A0) return;
+    const dwx = targetX - A0.x;
+    const dwy = targetY - A0.y;
+    if (Math.abs(dwx) < 1e-9 && Math.abs(dwy) < 1e-9) return;
+    // Over-constraint: another member of the rigid set is itself the
+    // child of a snap whose parent is OUTSIDE the set — rigidity and
+    // that snap can't both hold. Rigidity wins; surface it.
+    for (const cc of shiftSet) {
+      if (cc.id === toComp.id) continue;
+      const other = snaps.find(sn => sn.to.compId === cc.id && !inSet.has(sn.from.compId));
+      if (other) {
+        diag.issues.push({ kind: 'group-overconstrained', message: `Group "${toComp.group}": member ${cc.id} is positioned by snap ${other.id ?? `${other.from.compId}→${cc.id}`} but the group rigidly follows the snap on ${toComp.id} — the two constraints conflict; the group shift wins` });
+      }
+    }
+    const probe = (hx, hy) => {
+      for (const cc of shiftSet) { cc.cx += hx; cc.cy += hy; }
+      const pp = renderedChildPoint(toComp, s.to.anchor);
+      for (const cc of shiftSet) { cc.cx -= hx; cc.cy -= hy; }
+      return pp;
+    };
+    const hpr = 1;
+    const pxp = probe(hpr, 0);
+    const pyp = probe(0, hpr);
+    let m11 = 1, m12 = 0, m21 = 0, m22 = 1;
+    if (pxp && pyp) {
+      m11 = (pxp.x - A0.x) / hpr; m21 = (pxp.y - A0.y) / hpr;
+      m12 = (pyp.x - A0.x) / hpr; m22 = (pyp.y - A0.y) / hpr;
+    }
+    const det = m11 * m22 - m12 * m21;
+    let ddx, ddy;
+    if (Number.isFinite(det) && Math.abs(det) > 1e-6) {
+      ddx = (m22 * dwx - m12 * dwy) / det;
+      ddy = (-m21 * dwx + m11 * dwy) / det;
+    } else {
+      ddx = dwx; ddy = dwy;
+      diag.issues.push({ kind: 'rigid-snap-singular', message: `Snap ${s.id ?? `${s.from.compId}→${s.to.compId}`}: child transform chain is singular in the raw position — rendered-anchor placement approximated` });
+    }
+    // Shift the rigid set, each shifted boolean's consumed operands, and
+    // every ALREADY-PLACED snap descendant hanging off a shifted member.
+    const shifted = new Set();
+    const shiftRec = (cid) => {
+      if (shifted.has(cid)) return;
+      shifted.add(cid);
+      const cc = byId[cid];
+      if (!cc) return;
+      if (cc.kind === 'boolean') {
+        for (const opid of (cc.operandIds || [])) {
+          const op = byId[opid];
+          if (op && op.consumedBy === cc.id) shiftRec(opid);
+        }
+        // Re-record synthetics after the refresh — a snap dx referencing
+        // _comp_<bool>_cx read the PRE-shift center otherwise
+        // (adversarial-review find). recordPlaced = refresh + workingPV.
+        if (placed.has(cid)) recordPlaced(cc); else refreshBooleanBbox(cc);
+      } else {
+        translateClone(cc, ddx, ddy);
+      }
+      // CHAINED RIGID GROUPS: a descendant that is itself a member of a
+      // RIGIDLY-PLACED group co-shifts its WHOLE tag-set. Translating the
+      // one member alone deforms that group (the pivot:'group' centroid
+      // shifts by only 1/N, so every rendered pose rotates about a moved
+      // pivot) AND silently breaks the descendant's own rigid snap.
+      // Gated on `rigidGroups` so legacy groups (unmoved chains, per-
+      // member placement) keep their byte-exact semantics.
+      if (cc.group && !inSet.has(cid) && rigidGroups.has(cc.group)) {
+        for (const sib of Object.values(byId)) {
+          if (sib.group === cc.group && !shifted.has(sib.id)) shiftRec(sib.id);
+        }
+      }
+      for (const kid of (snapChildrenOf.get(cid) || [])) {
+        if (!inSet.has(kid) && placed.has(kid)) shiftRec(kid);
+      }
+    };
+    for (const cc of shiftSet) shiftRec(cc.id);
+  };
   let progressed = true;
   let iters = 0;
   while (progressed && iters < 100) {
@@ -555,8 +748,60 @@ export function solveLayout(components, snaps, paramValues) {
           refreshBooleanBbox(toComp);
         }
       } else {
-        toComp.cx = targetCx;
-        toComp.cy = targetCy;
+        // GROUP-RIGID GATE — deliberately NARROW so legacy patterns keep
+        // their semantics byte-exact:
+        //   (1) the child's transform chain must MOVE its instance-0
+        //       base pose (rotate pivot:'group'/non-'C', displace,
+        //       duplicate_mirror). Unmoved chains (an IDC's repeat) keep
+        //       plain per-member placement — intra-group snap CHAINS
+        //       (cond1 → cond1_copy → …) depend on it.
+        //   (2) the snap parent must be OUTSIDE the group — an
+        //       intra-group snap is a RELATIVE constraint that a rigid
+        //       whole-group shift can never satisfy (the target moves
+        //       with the set).
+        // Only then: pin the child to its NATURAL pose (posExpr when
+        // present, else the scene raw — its intra-group position) and
+        // let the rigid correction translate the WHOLE group so the
+        // child's rendered anchor lands on the target. The snap still
+        // wins over the posExpr for the ASSEMBLY position — the expr
+        // only defines where the child sits WITHIN the group.
+        const enabledChain = (toComp.transforms || []).some(t => t && t.enabled !== false);
+        const parentInGroup = !!toComp.group && fromComp.group === toComp.group;
+        let movedBase = false;
+        if (enabledChain && !parentInGroup) {
+          const bw = typeof toComp.w === 'number' ? toComp.w : evalExpr(toComp.w, workingPV);
+          const bh = typeof toComp.h === 'number' ? toComp.h : evalExpr(toComp.h, workingPV);
+          const mInsts = expandTransforms([{
+            ...toComp,
+            w: Number.isFinite(bw) ? bw : 0,
+            h: Number.isFinite(bh) ? bh : 0,
+          }], workingPV, Object.values(byId));
+          const i0 = mInsts.find(i => i.idx === 0);
+          if (i0) {
+            // POSITION-only: orientation-only chains (rotate pivot 'C',
+            // in-place mirror) keep instance-0 AT the base pose — legacy
+            // base placement is already exact for them, and treating them
+            // as "moved" silently changed existing designs (adversarial-
+            // review find). Keep IDENTICAL to the hfss-native.js twin.
+            movedBase = Math.abs(i0.cx - toComp.cx) > 1e-9 || Math.abs(i0.cy - toComp.cy) > 1e-9;
+          }
+        }
+        if (toComp.group && movedBase) {
+          // Second external snap on an already-rigid group: skip the
+          // posExpr re-pin — it discarded the FIRST shift and corrupted
+          // the assembly; without it the group cleanly follows the LAST
+          // snap (the group-overconstrained diagnostic flags the
+          // conflict). (adversarial-review find)
+          if (!rigidGroups.has(toComp.group)) applyPosExprs(toComp);
+          rigidGroups.add(toComp.group);
+          applyRenderedChildCorrection(s, toComp, fromAnchor.x + dx, fromAnchor.y + dy);
+        } else {
+          toComp.cx = targetCx;
+          toComp.cy = targetCy;
+          // Rendered-pose correction for a chain-moved UNGROUPED child —
+          // no-op when the chain leaves the base in place.
+          if (movedBase) applyRenderedChildCorrection(s, toComp, fromAnchor.x + dx, fromAnchor.y + dy);
+        }
       }
       placed.add(toComp.id);
       recordPlaced(toComp);
