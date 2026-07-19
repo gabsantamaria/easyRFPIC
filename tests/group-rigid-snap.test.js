@@ -200,6 +200,11 @@ describe('HFSS export: group-rigid parametric emission', () => {
     expect(script).toContain('set_var("grp_rigid_group2_dx"');
     expect(script).toContain('set_var("grp_pivot_group2_x"');
     expect(script).not.toMatch(/\(\+\(/);
+    // AEDT lexes "- -1.0*(...)" as the illegal '--' operator (and "+ -"
+    // fails the same way) — the δ trig coefficients must be emitted
+    // parenthesized (real shipped import failure: the grp_rigid set_var
+    // parse-failed and every member position cascaded).
+    expect(script).not.toMatch(/[-+]\s*-\s*\d/);
   });
 });
 

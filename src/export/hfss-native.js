@@ -1150,8 +1150,15 @@ export function computeParametricPositions(components, snaps, paramValues = {}, 
           const aOff = PATH_KINDS.has(c.kind)
             ? { xOff: '0', yOff: '0' }
             : anchorOffsetExpr(snap.to.anchor, cDims.wExpr, cDims.hExpr, componentRotationExpr(c));
-          const caS = Math.cos(rigidInfo.angleRad).toFixed(9);
-          const saS = Math.sin(rigidInfo.angleRad).toFixed(9);
+          // PARENTHESIZED trig coefficients: sin(-90°) = -1.000000000
+          // emitted bare produced "- -1.000000000*(...)" — AEDT lexes
+          // that as the illegal '--' operator and the whole δ set_var
+          // failed (real shipped import failure: every member position,
+          // _cx var, airbridge, and the PEC boundary cascaded). The
+          // existing chain emitter's "((-1.0) * ...)" idiom is the
+          // precedent.
+          const caS = `(${Math.cos(rigidInfo.angleRad).toFixed(9)})`;
+          const saS = `(${Math.sin(rigidInfo.angleRad).toFixed(9)})`;
           const relX = `((${nat.xH}) + (${aOff.xOff})) - (${rigidInfo.cn.xH})`;
           const relY = `((${nat.yH}) + (${aOff.yOff})) - (${rigidInfo.cn.yH})`;
           const aNatX = `(${rigidInfo.cn.xH}) + ${caS}*(${relX}) - ${saS}*(${relY})`;
