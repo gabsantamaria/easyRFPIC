@@ -2537,6 +2537,23 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           coMoverIds.add(findSnapRoot(memberId));
         }
       }
+      // GROUP WITH AN EXTERNAL SNAP: dragging it must co-move ONLY the
+      // external chain ROOT — the snap constraint then carries the whole
+      // group rigidly (exactly like dragging the capacitor/parent side).
+      // Mixing regimes deformed the assembly: per-member translation
+      // folded 29 naturals by the drag delta while findSnapRoot(child)
+      // ALSO dragged the external root (moving the snap target), and the
+      // child's own natural never moved — the child ended up offset from
+      // its siblings by exactly the drag delta (real user bug on the
+      // balun). Returns the external root id, or null for a free /
+      // intra-group-only group (per-member co-move stays correct there).
+      const externalRootOfGroup = (members) => {
+        for (const mid of members) {
+          const inc = scene.snaps.find(sn => sn.to.compId === mid);
+          if (inc && !members.has(inc.from.compId)) return findSnapRoot(mid);
+        }
+        return null;
+      };
       // Multi-selection co-drag: dragging an ALREADY-SELECTED member of a
       // multi-selection translates every selected root — matching the
       // arrow-nudge semantics (collectNudgeCluster expands ALL of
@@ -2551,15 +2568,22 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       // and desync the alt preview from the committed single-comp snap.)
       if (!e.altKey && selectedIds.has(id) && selectedIds.size > 1) {
         for (const sid of selectedIds) {
-          coMoverIds.add(findSnapRoot(sid));
+          const sGrp = groupsInfo.groupOfComp[sid];
+          const sExt = sGrp ? externalRootOfGroup(sGrp.members) : null;
+          coMoverIds.add(sExt ?? findSnapRoot(sid));
         }
       }
-      // Whole-group click: every member's snap-root co-moves (same
-      // expansion the multi-selection branch does — the group IS the
-      // selection for this gesture).
+      // Whole-group click: co-move the external chain root when the group
+      // is snap-bound (the constraint carries the members); else every
+      // member's snap-root co-moves (free / intra-group-only groups).
       if (groupClickMembers) {
-        for (const mid of groupClickMembers) {
-          coMoverIds.add(findSnapRoot(mid));
+        const extRoot = externalRootOfGroup(groupClickMembers);
+        if (extRoot) {
+          coMoverIds.add(extRoot);
+        } else {
+          for (const mid of groupClickMembers) {
+            coMoverIds.add(findSnapRoot(mid));
+          }
         }
       }
       // Walk consumedBy upward to the topmost containing boolean (if any).

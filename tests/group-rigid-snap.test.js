@@ -397,3 +397,45 @@ describe('rigid-group interaction fixes (drag fold + port flankers)', () => {
     expect(det.to).toBe('R');
   });
 });
+
+describe('group drag = external-root drag (no deformation)', () => {
+  it('dragging the balun group translates the whole chain rigidly via cond1', async () => {
+    const { translateWithPosExprs, isPosExprActive } = await import('../src/scene/posexpr.js');
+    const d = JSON.parse(fs.readFileSync(new URL('./fixtures/ki-lumped-balun-v2.json', import.meta.url), 'utf8'));
+    const scene = normalizeScene(d.scene);
+    const pv = resolveParams(scene.params).values;
+    // the Canvas drag-init rule: an externally-snapped group co-moves ONLY
+    // its external chain root — reproduce it here
+    const members = new Set(scene.components.filter(c => c.group === 'group2').map(c => c.id));
+    const findRoot = (startId) => {
+      let rid = startId; const seen = new Set();
+      while (!seen.has(rid)) {
+        seen.add(rid);
+        const inc = scene.snaps.find(s => s.to.compId === rid);
+        if (!inc) break;
+        rid = inc.from.compId;
+      }
+      return rid;
+    };
+    let extRoot = null;
+    for (const mid of members) {
+      const inc = scene.snaps.find(s => s.to.compId === mid);
+      if (inc && !members.has(inc.from.compId)) { extRoot = findRoot(mid); break; }
+    }
+    expect(extRoot).toBe('cond1');
+    const solved0 = solveLayout(scene.components, scene.snaps, pv);
+    const insts0 = expandTransforms(solved0, pv);
+    const comps2 = scene.components.map(c => c.id === extRoot
+      ? translateWithPosExprs(c, c, 50, 30, isPosExprActive(c, scene.snaps, scene.components, pv))
+      : c);
+    const solved1 = solveLayout(comps2, scene.snaps, pv);
+    const insts1 = expandTransforms(solved1, pv);
+    for (const id of members) {
+      const a = insts0.find(i => i.compId === id && i.idx === 0);
+      const b = insts1.find(i => i.compId === id && i.idx === 0);
+      expect(b.cx - a.cx, id).toBeCloseTo(50, 9);
+      expect(b.cy - a.cy, id).toBeCloseTo(30, 9);
+      expect((b.rotation || 0) - (a.rotation || 0), id).toBeCloseTo(0, 9);
+    }
+  });
+});

@@ -329,6 +329,14 @@ so a group drag folds the child's exprs like every other member's;
 skipping it folded 29 naturals but not the child's and permanently
 deformed the assembly. Callers pass (comp, snaps, components,
 paramValues) — without the pool/pv the legacy inert answer applies.
+And the Canvas GROUP-DRAG rule: a group with an EXTERNALLY-snapped
+member co-moves ONLY the external chain root (externalRootOfGroup in
+the drag-init; both the whole-group-click and multi-select branches) —
+the snap constraint then carries the whole group rigidly, exactly like
+dragging the parent side. Mixing regimes (per-member folds + the
+child's findSnapRoot walking OUT to the external root) offset the child
+from its 29 siblings by the drag delta every drag. Free /
+intra-group-only groups keep per-member co-move.
 (2) `detectPortIntegrationLine` (lumpedPort.js) evaluates the PORT at
 its RENDERED instance-0 pose in the SAME frame as the electrode
 instances, with ROTATION-AWARE extents (numeric instance rotation swaps
