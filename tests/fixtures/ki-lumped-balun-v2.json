@@ -1,0 +1,2782 @@
+{
+  "format": "photonic-layout-design",
+  "version": 1,
+  "name": "KI_lumped_current",
+  "exportedAt": "2026-07-19T03:41:06.619Z",
+  "scene": {
+    "params": {
+      "canvas_w": {
+        "expr": "2*(cap_L/2+feed_w/2+(cap_s-feed_w)/2)",
+        "unit": "µm",
+        "desc": ""
+      },
+      "h_si": {
+        "expr": "250",
+        "unit": "µm",
+        "desc": "Silicon handle thickness"
+      },
+      "h_sio2": {
+        "expr": "4.7",
+        "unit": "µm",
+        "desc": "Buried oxide thickness"
+      },
+      "h_wg": {
+        "expr": "0.6",
+        "unit": "µm",
+        "desc": "WG total height (LiTaO3 layer)"
+      },
+      "w_wg": {
+        "expr": "1.2",
+        "unit": "µm",
+        "desc": "WG core width (rib bottom)"
+      },
+      "h_slab": {
+        "expr": "0.1",
+        "unit": "µm",
+        "desc": "Slab height (unetched LiTaO3 below rib)"
+      },
+      "w_slab": {
+        "expr": "5",
+        "unit": "µm",
+        "desc": "Slab width (around rib)"
+      },
+      "etch_angle": {
+        "expr": "70",
+        "unit": "deg",
+        "desc": "Etch sidewall angle from horizontal"
+      },
+      "h_cond": {
+        "expr": "0.0",
+        "unit": "µm",
+        "desc": "Conductor (electrode) thickness"
+      },
+      "cap_L": {
+        "expr": "4.56*cap_d/2",
+        "unit": "µm",
+        "desc": "cond1 width"
+      },
+      "cap_W": {
+        "expr": "1",
+        "unit": "µm",
+        "desc": "cond1 height"
+      },
+      "cap_gap": {
+        "expr": "w_slab+slab_gap",
+        "unit": "µm",
+        "desc": "Auto-created (snap dy) (used in expression)"
+      },
+      "feed_w": {
+        "expr": "10",
+        "unit": "µm",
+        "desc": "cond3 width"
+      },
+      "cap_cap_L": {
+        "expr": "cap_L",
+        "unit": "µm",
+        "desc": "[cap] alias of cap_L"
+      },
+      "cap_cap_W": {
+        "expr": "cap_W",
+        "unit": "µm",
+        "desc": "[cap] alias of cap_W"
+      },
+      "cap_feed_w": {
+        "expr": "feed_w",
+        "unit": "µm",
+        "desc": "[cap] alias of feed_w"
+      },
+      "brid_L": {
+        "expr": "14",
+        "unit": "µm",
+        "desc": "[cap] alias of feed_L"
+      },
+      "cap_cap_gap": {
+        "expr": "cap_gap",
+        "unit": "µm",
+        "desc": "[cap] alias of cap_gap"
+      },
+      "cap_s": {
+        "expr": "242.9853",
+        "unit": "µm",
+        "desc": "Auto-created (transform.dx) (used in expression)"
+      },
+      "h_clad": {
+        "expr": "2",
+        "unit": "µm",
+        "desc": "Auto-created (layer Cladding (SiO2) thickness) (used in expression)"
+      },
+      "slab_gap": {
+        "expr": "0.3",
+        "unit": "µm",
+        "desc": "Auto-created (used by cap_gap) (used in expression)"
+      },
+      "wg_L": {
+        "expr": "400",
+        "unit": "µm",
+        "desc": "Auto-created (wg1.w) (used in expression)"
+      },
+      "cap_d": {
+        "expr": "60",
+        "unit": "µm",
+        "desc": "Auto-created (cond3_copy.h) (used in expression)"
+      },
+      "gap_x2": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond1_copy_copy.S → cond3_copy2.N (dx)"
+      },
+      "gap_y2": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond1_copy_copy.S → cond3_copy2.N (dy)"
+      },
+      "cap_feed2_L": {
+        "expr": "36.5196",
+        "unit": "µm",
+        "desc": "Auto-created (cond3_copy2.h) (used in expression)"
+      },
+      "gap_x4": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond3_copy2.SE → cond5.SW (dx)"
+      },
+      "gap_y4": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond3_copy2.SE → cond5.SW (dy)"
+      },
+      "pad_w": {
+        "expr": "10",
+        "unit": "µm",
+        "desc": "hoqoa13 width"
+      },
+      "pad_h": {
+        "expr": "5",
+        "unit": "µm",
+        "desc": "hoqoa13 height"
+      },
+      "padext_w": {
+        "expr": "pad_w",
+        "unit": "µm",
+        "desc": "cond16 width"
+      },
+      "padext_h": {
+        "expr": "cap_d - cap_cap_gap - 2*cap_cap_W- (brid_L-cap_cap_gap)/2",
+        "unit": "µm",
+        "desc": "cond16 height"
+      },
+      "gap_x8": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond1_copy2.NE → cond16.SE (dx)"
+      },
+      "gap_y8": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond1_copy2.NE → cond16.SE (dy)"
+      },
+      "gap_x10": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond1_copy.SW → cond16_copy.NW (dx)"
+      },
+      "gap_y10": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond1_copy.SW → cond16_copy.NW (dy)"
+      },
+      "bridge2_W": {
+        "expr": "7.446",
+        "unit": "µm",
+        "desc": "bridge2 airbridge strap width"
+      },
+      "padext2_h": {
+        "expr": "10",
+        "unit": "µm",
+        "desc": "Auto-created (cond16_copy_copy.h) (used in expression)"
+      },
+      "gap_x7": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond1_copy_copy.SW → cond16_copy_copy.NW (dx)"
+      },
+      "gap_y7": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond1_copy_copy.SW → cond16_copy_copy.NW (dy)"
+      },
+      "gap_x9": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond16_copy.S → bridge2.E (dx)"
+      },
+      "gap_y9": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond16_copy.S → bridge2.E (dy)"
+      },
+      "gap_x11": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond1.NE → cond16_copy_copy_copy.SE (dx)"
+      },
+      "gap_y11": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond1.NE → cond16_copy_copy_copy.SE (dy)"
+      },
+      "gap_x12": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond16.N → bridge2_copy.W (dx)"
+      },
+      "gap_y12": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond16.N → bridge2_copy.W (dy)"
+      },
+      "meander_cell_w": {
+        "expr": "40",
+        "unit": "µm",
+        "desc": "meander cell period along meander axis"
+      },
+      "meander_cell_s": {
+        "expr": "2.0000",
+        "unit": "µm",
+        "desc": "meander gap between adjacent cells"
+      },
+      "meander_cell_h": {
+        "expr": "14",
+        "unit": "µm",
+        "desc": "meander frame inner height (outer-bar to inner-bar gap)"
+      },
+      "meander_cell_d": {
+        "expr": "4",
+        "unit": "µm",
+        "desc": "meander rail-to-outer-bar gap"
+      },
+      "meander_trace_w": {
+        "expr": "0.5000",
+        "unit": "µm",
+        "desc": "meander trace width"
+      },
+      "meander_gap_s": {
+        "expr": "2",
+        "unit": "µm",
+        "desc": "meander centered gap in outer bar / rail"
+      },
+      "meander_N": {
+        "expr": "3",
+        "unit": "",
+        "desc": "meander number of cells (drives repeat transform)"
+      },
+      "gap_x13": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond3.N → meander.SE (dx)"
+      },
+      "gap_y13": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond3.N → meander.SE (dy)"
+      },
+      "feedZ0_L": {
+        "expr": "10.0000",
+        "unit": "µm",
+        "desc": "cond22 height"
+      },
+      "feezZ0_W": {
+        "expr": "40.0000",
+        "unit": "µm",
+        "desc": "Auto-created (cond22.w) (used in expression)"
+      },
+      "feedZ0_gap": {
+        "expr": "1",
+        "unit": "µm",
+        "desc": "Auto-created (transform.dx) (used in expression)"
+      },
+      "gap_x14": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap meander.SW → cond23.NW (dx)"
+      },
+      "gap_y14": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap meander.SW → cond23.NW (dy)"
+      },
+      "gap_x15": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond23.NE → cond22.SE (dx)"
+      },
+      "gap_y15": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond23.NE → cond22.SE (dy)"
+      },
+      "short_w": {
+        "expr": "2",
+        "unit": "µm",
+        "desc": "Auto-created (cond23.h) (used in expression)"
+      },
+      "sec2_L": {
+        "expr": "128.923",
+        "unit": "µm",
+        "desc": "sec2 section length"
+      },
+      "gap_x5": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond22_copy.SW → cond23_copy_copy.NW (dx)"
+      },
+      "gap_y5": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond22_copy.SW → cond23_copy_copy.NW (dy)"
+      },
+      "gap_x6": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond23.E → cond25.W (dx)"
+      },
+      "gap_y6": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond23.E → cond25.W (dy)"
+      },
+      "feedZ0_L2": {
+        "expr": "20",
+        "unit": "µm",
+        "desc": "Auto-created (cond22_copy_copy.h) (used in expression)"
+      },
+      "choke_w": {
+        "expr": "1",
+        "unit": "µm",
+        "desc": "Auto-created (cond25.h) (used in expression)"
+      },
+      "gap_x17": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond22_copy_copy_copy.SW → cond22_copy.NW (dx)"
+      },
+      "gap_y17": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond22_copy_copy_copy.SW → cond22_copy.NW (dy)"
+      },
+      "gap_x20": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond22.NW → cond22_copy2_copy.SW (dx)"
+      },
+      "gap_y20": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond22.NW → cond22_copy2_copy.SW (dy)"
+      },
+      "dyb2_bar": {
+        "expr": "10.0000",
+        "unit": "µm",
+        "desc": "shorting-bar width"
+      },
+      "dyb2_og": {
+        "expr": "15",
+        "unit": "µm",
+        "desc": "CPW covered-open end gap (center strip end to cover bar)"
+      },
+      "dyb2_Lw": {
+        "expr": "stub_cpw_L",
+        "unit": "µm",
+        "desc": "CPW dummy-stub length (open 60° = short 300°)"
+      },
+      "stub_cpw_L": {
+        "expr": "110",
+        "unit": "µm",
+        "desc": "Auto-created (used by dyb2_Lw) (used in expression)"
+      },
+      "dyb2_nd": {
+        "expr": "node_size",
+        "unit": "µm",
+        "desc": "junction hexagon circumradius (node size; ≥ cw)"
+      },
+      "node_size": {
+        "expr": "12",
+        "unit": "µm",
+        "desc": "Auto-created (used by dyb2_nd) (used in expression)"
+      },
+      "dyb2_jy": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "junction center y"
+      },
+      "dyb2_jx": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "junction center x (move the whole balun)"
+      },
+      "dyb2_cw": {
+        "expr": "CPW_W",
+        "unit": "µm",
+        "desc": "CPW center width (all 3 CPW arms) — tune for 50 Ω"
+      },
+      "CPW_W": {
+        "expr": "32",
+        "unit": "µm",
+        "desc": "Auto-created (dyb2_cw) (used in expression)"
+      },
+      "dyb2_cg": {
+        "expr": "CPW_gap",
+        "unit": "µm",
+        "desc": "CPW gap — tune for 50 Ω"
+      },
+      "CPW_gap": {
+        "expr": "1",
+        "unit": "µm",
+        "desc": "Auto-created (used by dyb2_cg) (used in expression)"
+      },
+      "dyb2_fw": {
+        "expr": "CPW_GND",
+        "unit": "µm",
+        "desc": "CPW flank/ground strip width"
+      },
+      "CPW_GND": {
+        "expr": "40",
+        "unit": "µm",
+        "desc": "Auto-created (used by dyb2_fw) (used in expression)"
+      },
+      "dyb2_pw": {
+        "expr": "CPS_W",
+        "unit": "µm",
+        "desc": "CPS strip width — tune for 50 Ω"
+      },
+      "CPS_W": {
+        "expr": "40",
+        "unit": "µm",
+        "desc": "Auto-created (used by dyb2_pw) (used in expression)"
+      },
+      "dyb2_ps": {
+        "expr": "CPS_gap",
+        "unit": "µm",
+        "desc": "CPS slot — tune for 50 Ω"
+      },
+      "CPS_gap": {
+        "expr": "1",
+        "unit": "µm",
+        "desc": "Auto-created (used by dyb2_ps) (used in expression)"
+      },
+      "dyb2_brp": {
+        "expr": "5.0000",
+        "unit": "µm",
+        "desc": "airbridge landing-pad length"
+      },
+      "dyb2_brw": {
+        "expr": "20.0000",
+        "unit": "µm",
+        "desc": "airbridge strap width"
+      },
+      "dyb2_rbr": {
+        "expr": "bridge_sep",
+        "unit": "µm",
+        "desc": "mouth-bridge radius from junction center"
+      },
+      "bridge_sep": {
+        "expr": "30",
+        "unit": "µm",
+        "desc": "Auto-created (used by dyb2_rbr) (used in expression)"
+      },
+      "dyb2_Lc": {
+        "expr": "stub_cps_L",
+        "unit": "µm",
+        "desc": "CPS dummy-stub strip length (short 120° = open 240°)"
+      },
+      "stub_cps_L": {
+        "expr": "20",
+        "unit": "µm",
+        "desc": "Auto-created (used by dyb2_Lc) (used in expression)"
+      },
+      "dyb2_port": {
+        "expr": "20",
+        "unit": "µm",
+        "desc": "port rect size"
+      },
+      "dyb2_Lo": {
+        "expr": "feed_cps_L",
+        "unit": "µm",
+        "desc": "CPS output strip length"
+      },
+      "feed_cps_L": {
+        "expr": "30",
+        "unit": "µm",
+        "desc": "Auto-created (used by dyb2_Lo) (used in expression)"
+      },
+      "dyb2_barw": {
+        "expr": "20.0000",
+        "unit": "µm",
+        "desc": "launch bar width"
+      },
+      "dyb2_Lin": {
+        "expr": "feed_cpw_L",
+        "unit": "µm",
+        "desc": "CPW input arm length (from the node flat)"
+      },
+      "feed_cpw_L": {
+        "expr": "150",
+        "unit": "µm",
+        "desc": "Auto-created (used by dyb2_Lin) (used in expression)"
+      },
+      "group2_dyb2_Lin": {
+        "expr": "dyb2_Lin",
+        "unit": "µm",
+        "desc": "[group2] alias of dyb2_Lin"
+      },
+      "group2_dyb2_cw": {
+        "expr": "dyb2_cw",
+        "unit": "µm",
+        "desc": "[group2] alias of dyb2_cw"
+      },
+      "group2_dyb2_nd": {
+        "expr": "dyb2_nd",
+        "unit": "µm",
+        "desc": "[group2] alias of dyb2_nd"
+      },
+      "group2_dyb2_port": {
+        "expr": "dyb2_port",
+        "unit": "µm",
+        "desc": "[group2] alias of dyb2_port"
+      },
+      "group2_dyb2_cg": {
+        "expr": "dyb2_cg",
+        "unit": "µm",
+        "desc": "[group2] alias of dyb2_cg"
+      },
+      "group2_dyb2_fw": {
+        "expr": "dyb2_fw",
+        "unit": "µm",
+        "desc": "[group2] alias of dyb2_fw"
+      },
+      "group2_dyb2_ps": {
+        "expr": "dyb2_ps",
+        "unit": "µm",
+        "desc": "[group2] alias of dyb2_ps"
+      },
+      "group2_dyb2_pw": {
+        "expr": "dyb2_pw",
+        "unit": "µm",
+        "desc": "[group2] alias of dyb2_pw"
+      },
+      "group2_dyb2_barw": {
+        "expr": "dyb2_barw",
+        "unit": "µm",
+        "desc": "[group2] alias of dyb2_barw"
+      },
+      "group2_dyb2_Lo": {
+        "expr": "dyb2_Lo",
+        "unit": "µm",
+        "desc": "[group2] alias of dyb2_Lo"
+      },
+      "group2_dyb2_Lw": {
+        "expr": "dyb2_Lw",
+        "unit": "µm",
+        "desc": "[group2] alias of dyb2_Lw"
+      },
+      "group2_dyb2_og": {
+        "expr": "dyb2_og",
+        "unit": "µm",
+        "desc": "[group2] alias of dyb2_og"
+      },
+      "group2_dyb2_Lc": {
+        "expr": "dyb2_Lc",
+        "unit": "µm",
+        "desc": "[group2] alias of dyb2_Lc"
+      },
+      "group2_dyb2_bar": {
+        "expr": "dyb2_bar",
+        "unit": "µm",
+        "desc": "[group2] alias of dyb2_bar"
+      },
+      "group2_dyb2_brw": {
+        "expr": "dyb2_brw",
+        "unit": "µm",
+        "desc": "[group2] alias of dyb2_brw"
+      },
+      "gap_x1": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond22_copy_copy_copy.NE → dyb2_s0n_copy_copy.NE (dx)"
+      },
+      "gap_y1": {
+        "expr": "0",
+        "unit": "µm",
+        "desc": "Gap cond22_copy_copy_copy.NE → dyb2_s0n_copy_copy.NE (dy)"
+      }
+    },
+    "components": [
+      {
+        "transforms": [
+          {
+            "id": "t_mp310yxl_hfo5",
+            "kind": "repeat",
+            "enabled": true,
+            "n": "1",
+            "dx": "cap_s",
+            "dy": "0",
+            "includeOriginal": true
+          }
+        ],
+        "id": "cond1",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": -40.093533465812015,
+        "cy": 91.16430444335936,
+        "w": "cap_cap_L",
+        "h": "cap_cap_W",
+        "cutouts": [],
+        "label": "cond1",
+        "conductorLayerId": "l_cond",
+        "group": "cap"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mp310yxl_hfo5",
+            "kind": "repeat",
+            "enabled": true,
+            "n": "1",
+            "dx": "cap_s",
+            "dy": "0",
+            "includeOriginal": true
+          }
+        ],
+        "id": "cond1_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 4,
+        "cy": 28.5788,
+        "w": "cap_cap_L",
+        "h": "cap_cap_W",
+        "cutouts": [],
+        "label": "cond1",
+        "conductorLayerId": "l_cond",
+        "group": "cap"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mp310yxl_hfo5",
+            "kind": "repeat",
+            "enabled": true,
+            "n": "1",
+            "dx": "cap_s",
+            "dy": "0",
+            "includeOriginal": true
+          }
+        ],
+        "id": "cond3",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 4,
+        "cy": 68.5831,
+        "w": "cap_feed_w",
+        "h": "brid_L",
+        "cutouts": [],
+        "label": "cond3",
+        "conductorLayerId": "l_cond",
+        "group": "cap"
+      },
+      {
+        "transforms": [],
+        "id": "cond5",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 20,
+        "cy": -39.071749999999994,
+        "w": "cap_s-feed_w",
+        "h": "feed_w",
+        "cutouts": [],
+        "label": "cond5",
+        "conductorLayerId": "l_cond"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mp5gbmzb_55rq",
+            "kind": "repeat",
+            "enabled": true,
+            "n": "1",
+            "dx": "0",
+            "dy": "-cap_d ",
+            "includeOriginal": true
+          }
+        ],
+        "id": "wg1",
+        "kind": "rect",
+        "layer": "waveguide",
+        "cx": 11.852000000000004,
+        "cy": 39.38975,
+        "w": "wg_L",
+        "h": "w_wg",
+        "cutouts": [],
+        "label": "wg1"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mp310yxl_hfo5",
+            "kind": "repeat",
+            "enabled": true,
+            "n": "1",
+            "dx": "cap_s",
+            "dy": "0",
+            "includeOriginal": true
+          }
+        ],
+        "id": "cond1_copy2",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": -40,
+        "cy": -2.0409999999999973,
+        "w": "cap_cap_L",
+        "h": "cap_cap_W",
+        "cutouts": [],
+        "label": "cond1",
+        "conductorLayerId": "l_cond",
+        "group": "cap"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mp310yxl_hfo5",
+            "kind": "repeat",
+            "enabled": true,
+            "n": "1",
+            "dx": "cap_s",
+            "dy": "0",
+            "includeOriginal": true
+          }
+        ],
+        "id": "cond1_copy_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 14,
+        "cy": 18.5788,
+        "w": "cap_cap_L",
+        "h": "cap_cap_W",
+        "cutouts": [],
+        "label": "cond1",
+        "conductorLayerId": "l_cond",
+        "group": "cap"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mp310yxl_hfo5",
+            "kind": "repeat",
+            "enabled": true,
+            "n": "1",
+            "dx": "cap_s",
+            "dy": "0",
+            "includeOriginal": true
+          }
+        ],
+        "id": "cond3_copy2",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": -40,
+        "cy": -29.071749999999998,
+        "w": "cap_feed_w",
+        "h": "cap_feed2_L",
+        "cutouts": [],
+        "label": "cond3",
+        "conductorLayerId": "l_cond",
+        "group": "cap"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mql8fymd_dxux",
+            "kind": "repeat",
+            "enabled": true,
+            "n": "1",
+            "dx": "cap_s",
+            "dy": "0",
+            "includeOriginal": true
+          }
+        ],
+        "id": "cond16",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 23.39999999999999,
+        "cy": -2.5,
+        "w": "padext_w",
+        "h": "padext_h",
+        "cutouts": [],
+        "label": "cond16",
+        "conductorLayerId": "l_cond"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mql8fymd_dxux",
+            "kind": "repeat",
+            "enabled": true,
+            "n": "1",
+            "dx": "cap_s",
+            "dy": "0",
+            "includeOriginal": true
+          }
+        ],
+        "id": "cond16_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": -103.39999999999999,
+        "cy": 20.200000000000003,
+        "w": "padext_w",
+        "h": "padext_h",
+        "cutouts": [],
+        "label": "cond16",
+        "conductorLayerId": "l_cond"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mr3vqgte_kf2j",
+            "kind": "repeat",
+            "enabled": true,
+            "n": "1",
+            "dx": "cap_s",
+            "dy": "0",
+            "includeOriginal": true
+          }
+        ],
+        "id": "bridge2",
+        "kind": "bridge",
+        "layer": "bridge",
+        "cx": -103.39999999999999,
+        "cy": -20.15,
+        "length": "brid_L",
+        "width": "bridge2_W",
+        "height": "h_clad",
+        "padLength": "pad_h",
+        "thickness": "1",
+        "w": "(brid_L)",
+        "h": "(bridge2_W)",
+        "cutouts": [],
+        "label": "bridge2",
+        "conductorLayerId": "l_cond",
+        "rotation": "90"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mql8fymd_dxux",
+            "kind": "repeat",
+            "enabled": true,
+            "n": "1",
+            "dx": "cap_s",
+            "dy": "0",
+            "includeOriginal": true
+          }
+        ],
+        "id": "cond16_copy_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": -103.39999999999999,
+        "cy": -29.8,
+        "w": "padext_w",
+        "h": "padext2_h",
+        "cutouts": [],
+        "label": "cond16",
+        "conductorLayerId": "l_cond"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mql8fymd_dxux",
+            "kind": "repeat",
+            "enabled": true,
+            "n": "1",
+            "dx": "cap_s",
+            "dy": "0",
+            "includeOriginal": true
+          }
+        ],
+        "id": "cond16_copy_copy_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 23.39999999999999,
+        "cy": 47.5,
+        "w": "padext_w",
+        "h": "padext2_h",
+        "cutouts": [],
+        "label": "cond16",
+        "conductorLayerId": "l_cond"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mr3vqb13_mwcf",
+            "kind": "repeat",
+            "enabled": true,
+            "n": "1",
+            "dx": "cap_s",
+            "dy": "0",
+            "includeOriginal": true
+          }
+        ],
+        "id": "bridge2_copy",
+        "kind": "bridge",
+        "layer": "bridge",
+        "cx": 23.39999999999999,
+        "cy": 37.85,
+        "length": "brid_L",
+        "width": "bridge2_W",
+        "height": "h_clad",
+        "padLength": "pad_h",
+        "thickness": "1",
+        "w": "(brid_L)",
+        "h": "(bridge2_W)",
+        "cutouts": [],
+        "label": "bridge2",
+        "conductorLayerId": "l_cond",
+        "rotation": "90"
+      },
+      {
+        "transforms": [],
+        "id": "meander_rail_L",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": -54.25,
+        "cy": 63.198,
+        "w": "(meander_trace_w)",
+        "h": "((meander_cell_s) + (meander_cell_w) - (meander_gap_s)) / 2",
+        "cutouts": [],
+        "label": "Rail lower segment",
+        "consumedBy": "meander"
+      },
+      {
+        "transforms": [],
+        "id": "meander_rail_U",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 122.69828094547455,
+        "cy": -46.32308271525382,
+        "w": "(meander_trace_w)",
+        "h": "((meander_cell_s) + (meander_cell_w) - (meander_gap_s)) / 2",
+        "cutouts": [],
+        "label": "Rail upper segment",
+        "consumedBy": "meander"
+      },
+      {
+        "transforms": [],
+        "id": "meander_conL",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 122.69828094547455,
+        "cy": -46.32308271525382,
+        "w": "(meander_trace_w) + (meander_cell_d)",
+        "h": "(meander_trace_w)",
+        "cutouts": [],
+        "label": "Connector (lower, flanking gap_s)",
+        "consumedBy": "meander"
+      },
+      {
+        "transforms": [],
+        "id": "meander_conR",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 122.69828094547455,
+        "cy": -46.32308271525382,
+        "w": "(meander_trace_w) + (meander_cell_d)",
+        "h": "(meander_trace_w)",
+        "cutouts": [],
+        "label": "Connector (upper, flanking gap_s)",
+        "consumedBy": "meander"
+      },
+      {
+        "transforms": [],
+        "id": "meander_outBarL",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 122.69828094547455,
+        "cy": -46.32308271525382,
+        "w": "(meander_trace_w)",
+        "h": "((meander_cell_w) - (meander_gap_s)) / 2",
+        "cutouts": [],
+        "label": "Outer bar (lower half)",
+        "consumedBy": "meander"
+      },
+      {
+        "transforms": [],
+        "id": "meander_outBarR",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 122.69828094547455,
+        "cy": -46.32308271525382,
+        "w": "(meander_trace_w)",
+        "h": "((meander_cell_w) - (meander_gap_s)) / 2",
+        "cutouts": [],
+        "label": "Outer bar (upper half)",
+        "consumedBy": "meander"
+      },
+      {
+        "transforms": [],
+        "id": "meander_frmL",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 122.69828094547455,
+        "cy": -46.32308271525382,
+        "w": "2 * (meander_trace_w) + (meander_cell_h)",
+        "h": "(meander_trace_w)",
+        "cutouts": [],
+        "label": "Frame bottom horizontal",
+        "consumedBy": "meander"
+      },
+      {
+        "transforms": [],
+        "id": "meander_frmR",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 122.69828094547455,
+        "cy": -46.32308271525382,
+        "w": "2 * (meander_trace_w) + (meander_cell_h)",
+        "h": "(meander_trace_w)",
+        "cutouts": [],
+        "label": "Frame top horizontal",
+        "consumedBy": "meander"
+      },
+      {
+        "transforms": [],
+        "id": "meander_inBar",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 122.69828094547455,
+        "cy": -46.32308271525382,
+        "w": "(meander_trace_w)",
+        "h": "(meander_cell_w)",
+        "cutouts": [],
+        "label": "Inner bar (far vertical)",
+        "consumedBy": "meander"
+      },
+      {
+        "transforms": [
+          {
+            "id": "tr_meander_repeat_7kye",
+            "kind": "repeat",
+            "enabled": true,
+            "n": "meander_N - 1",
+            "dx": "0",
+            "dy": "(meander_cell_w) + (meander_cell_s)",
+            "includeOriginal": true
+          },
+          {
+            "id": "t_mr3vwosc_fmmy",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "180",
+            "pivot": "C"
+          },
+          {
+            "id": "t_mr3w608r_1wl9",
+            "kind": "duplicate_mirror",
+            "enabled": true,
+            "axis": "x",
+            "offset": "cap_s/2 + (meander_cell_h + meander_cell_d + meander_trace_w*2)/2",
+            "includeOriginal": true
+          }
+        ],
+        "id": "meander",
+        "kind": "boolean",
+        "op": "union",
+        "operandIds": [
+          "meander_rail_L",
+          "meander_rail_U",
+          "meander_conL",
+          "meander_conR",
+          "meander_outBarL",
+          "meander_outBarR",
+          "meander_frmL",
+          "meander_frmR",
+          "meander_inBar"
+        ],
+        "layer": "electrode",
+        "cx": 122.69828094547455,
+        "cy": -46.32308271525382,
+        "w": "0",
+        "h": "0",
+        "cutouts": [],
+        "label": "Meander electrode",
+        "conductorLayerId": "l_cond"
+      },
+      {
+        "transforms": [],
+        "id": "cond22",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 71.49265,
+        "cy": 153.333,
+        "w": "feezZ0_W",
+        "h": "feedZ0_L",
+        "cutouts": [],
+        "label": "cond22",
+        "conductorLayerId": "l_cond"
+      },
+      {
+        "transforms": [],
+        "id": "cond23",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 18.246325,
+        "cy": 137.32300000000004,
+        "w": "cap_s/2-feedZ0_gap/2",
+        "h": "short_w",
+        "cutouts": [],
+        "label": "cond23",
+        "conductorLayerId": "l_cond"
+      },
+      {
+        "transforms": [],
+        "id": "cond25",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 71.49265000000003,
+        "cy": 239.76699999999948,
+        "w": "feedZ0_gap",
+        "h": "choke_w",
+        "cutouts": [],
+        "label": "cond25",
+        "conductorLayerId": "l_cond"
+      },
+      {
+        "transforms": [],
+        "id": "sec2",
+        "kind": "polyline",
+        "layer": "section",
+        "cx": -86,
+        "cy": 62.40349999999935,
+        "width": "0",
+        "w": "0",
+        "h": "0",
+        "vertices": [
+          {
+            "kind": "rel",
+            "dx": "0",
+            "dy": "0"
+          },
+          {
+            "kind": "rel",
+            "dx": "0",
+            "dy": "-(sec2_L)"
+          }
+        ],
+        "closed": false,
+        "cutouts": [],
+        "label": "sec2"
+      },
+      {
+        "transforms": [],
+        "id": "cond23_copy_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 151.23897500000004,
+        "cy": 239.23399999999958,
+        "w": "cap_s/2-feedZ0_gap/2",
+        "h": "short_w",
+        "cutouts": [],
+        "label": "cond23",
+        "conductorLayerId": "l_cond"
+      },
+      {
+        "transforms": [],
+        "id": "cond22_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 109.31100836243627,
+        "cy": 301.5,
+        "w": "feezZ0_W",
+        "h": "feedZ0_L",
+        "cutouts": [],
+        "label": "cond22",
+        "conductorLayerId": "l_cond"
+      },
+      {
+        "transforms": [],
+        "id": "cond22_copy2_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 35.31100836243628,
+        "cy": 310.0129999999991,
+        "w": "feezZ0_W",
+        "h": "feedZ0_L2",
+        "cutouts": [],
+        "label": "cond22",
+        "conductorLayerId": "l_cond"
+      },
+      {
+        "transforms": [],
+        "id": "cond22_copy_copy_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 378.5826800341606,
+        "cy": 473.80284391784664,
+        "w": "feezZ0_W",
+        "h": "feedZ0_L2",
+        "cutouts": [],
+        "label": "cond22",
+        "conductorLayerId": "l_cond"
+      },
+      {
+        "transforms": [],
+        "id": "pshape36",
+        "kind": "polyshape",
+        "layer": "electrode",
+        "cx": -351.9665125436544,
+        "cy": 434,
+        "w": "0",
+        "h": "0",
+        "vertices": [
+          {
+            "kind": "snap",
+            "compId": "cond22_copy2_copy",
+            "anchor": "NW"
+          },
+          {
+            "kind": "rel",
+            "dx": "0",
+            "dy": "0"
+          },
+          {
+            "kind": "rel",
+            "dx": "0",
+            "dy": "0"
+          },
+          {
+            "kind": "snap",
+            "compId": "cond22_copy2_copy",
+            "anchor": "NE"
+          }
+        ],
+        "closed": true,
+        "cutouts": [],
+        "label": "pshape36",
+        "conductorLayerId": "l_cond"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_node_copy_copy",
+        "kind": "polyshape",
+        "layer": "electrode",
+        "cx": 178.34882659416377,
+        "cy": 478.80205259761306,
+        "cxExpr": "dyb2_jx + (dyb2_nd*cos(pi/6))*cos(60*pi/180) + (dyb2_cw/2)*sin(60*pi/180) + 159.2963",
+        "cyExpr": "dyb2_jy + (dyb2_nd*cos(pi/6))*sin(60*pi/180) - (dyb2_cw/2)*cos(60*pi/180) + 477.8021",
+        "w": "0",
+        "h": "0",
+        "vertices": [
+          {
+            "kind": "rel",
+            "dx": "0",
+            "dy": "0"
+          },
+          {
+            "kind": "rel",
+            "dx": "((dyb2_nd*cos(pi/6))*cos(60*pi/180) - (dyb2_cw/2)*sin(60*pi/180)) - ((dyb2_nd*cos(pi/6))*cos(60*pi/180) + (dyb2_cw/2)*sin(60*pi/180))",
+            "dy": "((dyb2_nd*cos(pi/6))*sin(60*pi/180) + (dyb2_cw/2)*cos(60*pi/180)) - ((dyb2_nd*cos(pi/6))*sin(60*pi/180) - (dyb2_cw/2)*cos(60*pi/180))"
+          },
+          {
+            "kind": "rel",
+            "dx": "((dyb2_nd*cos(pi/6))*cos(180*pi/180) + (dyb2_cw/2)*sin(180*pi/180)) - ((dyb2_nd*cos(pi/6))*cos(60*pi/180) - (dyb2_cw/2)*sin(60*pi/180))",
+            "dy": "((dyb2_nd*cos(pi/6))*sin(180*pi/180) - (dyb2_cw/2)*cos(180*pi/180)) - ((dyb2_nd*cos(pi/6))*sin(60*pi/180) + (dyb2_cw/2)*cos(60*pi/180))"
+          },
+          {
+            "kind": "rel",
+            "dx": "((dyb2_nd*cos(pi/6))*cos(180*pi/180) - (dyb2_cw/2)*sin(180*pi/180)) - ((dyb2_nd*cos(pi/6))*cos(180*pi/180) + (dyb2_cw/2)*sin(180*pi/180))",
+            "dy": "((dyb2_nd*cos(pi/6))*sin(180*pi/180) + (dyb2_cw/2)*cos(180*pi/180)) - ((dyb2_nd*cos(pi/6))*sin(180*pi/180) - (dyb2_cw/2)*cos(180*pi/180))"
+          },
+          {
+            "kind": "rel",
+            "dx": "((dyb2_nd*cos(pi/6))*cos(300*pi/180) + (dyb2_cw/2)*sin(300*pi/180)) - ((dyb2_nd*cos(pi/6))*cos(180*pi/180) - (dyb2_cw/2)*sin(180*pi/180))",
+            "dy": "((dyb2_nd*cos(pi/6))*sin(300*pi/180) - (dyb2_cw/2)*cos(300*pi/180)) - ((dyb2_nd*cos(pi/6))*sin(180*pi/180) + (dyb2_cw/2)*cos(180*pi/180))"
+          },
+          {
+            "kind": "rel",
+            "dx": "((dyb2_nd*cos(pi/6))*cos(300*pi/180) - (dyb2_cw/2)*sin(300*pi/180)) - ((dyb2_nd*cos(pi/6))*cos(300*pi/180) + (dyb2_cw/2)*sin(300*pi/180))",
+            "dy": "((dyb2_nd*cos(pi/6))*sin(300*pi/180) + (dyb2_cw/2)*cos(300*pi/180)) - ((dyb2_nd*cos(pi/6))*sin(300*pi/180) - (dyb2_cw/2)*cos(300*pi/180))"
+          }
+        ],
+        "closed": true,
+        "cutouts": [],
+        "label": "DYB2 junction node V2 (CPW flats = cw, strips merge flush)",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_c3_copy_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": -1.0960371345071565,
+        "cy": 477.80205259761306,
+        "cxExpr": "dyb2_jx + ((dyb2_nd*cos(pi/6)) + (dyb2_Lin)/2)*cos(180*pi/180) - (0)*sin(180*pi/180) + 159.2963",
+        "cyExpr": "dyb2_jy + ((dyb2_nd*cos(pi/6)) + (dyb2_Lin)/2)*sin(180*pi/180) + (0)*cos(180*pi/180) + 477.8021",
+        "w": "group2_dyb2_Lin",
+        "h": "group2_dyb2_cw",
+        "cutouts": [],
+        "label": "DYB2 CPW-in center",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_f3a_copy_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": -54.69153595778906,
+        "cy": 440.80205259761306,
+        "cxExpr": "dyb2_jx + (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + ((dyb2_nd*cos(pi/6)) + dyb2_Lin + dyb2_port - ((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))/2)*cos(180*pi/180) - ((dyb2_cw/2 + dyb2_cg + dyb2_fw/2))*sin(180*pi/180) + 159.2963",
+        "cyExpr": "dyb2_jy + (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + ((dyb2_nd*cos(pi/6)) + dyb2_Lin + dyb2_port - ((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))/2)*sin(180*pi/180) + ((dyb2_cw/2 + dyb2_cg + dyb2_fw/2))*cos(180*pi/180) + 477.8021",
+        "w": "(group2_dyb2_nd*cos(pi/6)) + group2_dyb2_Lin + group2_dyb2_port - ((group2_dyb2_cw/2 + group2_dyb2_cg + group2_dyb2_fw + group2_dyb2_ps/2 + group2_dyb2_pw)/sin(60*pi/180))",
+        "h": "group2_dyb2_fw",
+        "cutouts": [],
+        "label": "DYB2 CPW-in flank S",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_f3b_copy_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": -54.69153595778906,
+        "cy": 514.802052597613,
+        "cxExpr": "dyb2_jx + (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + ((dyb2_nd*cos(pi/6)) + dyb2_Lin + dyb2_port - ((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))/2)*cos(180*pi/180) - (-(dyb2_cw/2 + dyb2_cg + dyb2_fw/2))*sin(180*pi/180) + 159.2963",
+        "cyExpr": "dyb2_jy + (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + ((dyb2_nd*cos(pi/6)) + dyb2_Lin + dyb2_port - ((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))/2)*sin(180*pi/180) + (-(dyb2_cw/2 + dyb2_cg + dyb2_fw/2))*cos(180*pi/180) + 477.8021",
+        "w": "(group2_dyb2_nd*cos(pi/6)) + group2_dyb2_Lin + group2_dyb2_port - ((group2_dyb2_cw/2 + group2_dyb2_cg + group2_dyb2_fw + group2_dyb2_ps/2 + group2_dyb2_pw)/sin(60*pi/180))",
+        "h": "group2_dyb2_fw",
+        "cutouts": [],
+        "label": "DYB2 CPW-in flank N",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_portW_copy_copy",
+        "kind": "rect",
+        "layer": "port",
+        "cx": -153.59603713450716,
+        "cy": 477.8020525976131,
+        "cxExpr": "dyb2_jx + (((dyb2_nd*cos(pi/6)) + dyb2_Lin) + (dyb2_port)/2)*cos(180*pi/180) - (0)*sin(180*pi/180) + 159.2963",
+        "cyExpr": "dyb2_jy + (((dyb2_nd*cos(pi/6)) + dyb2_Lin) + (dyb2_port)/2)*sin(180*pi/180) + (0)*cos(180*pi/180) + 477.8021",
+        "w": "group2_dyb2_port",
+        "h": "group2_dyb2_cw",
+        "cutouts": [],
+        "label": "DYB2 CPW port",
+        "conductorLayerId": "l_cond",
+        "lumpedPort": {
+          "enabled": true,
+          "impedance": "50"
+        },
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_barW_copy_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": -166.09603713450716,
+        "cy": 477.8020525976131,
+        "cxExpr": "dyb2_jx + (((dyb2_nd*cos(pi/6)) + dyb2_Lin + dyb2_port) + (dyb2_barw)/2)*cos(180*pi/180) - (0)*sin(180*pi/180) + 159.2963",
+        "cyExpr": "dyb2_jy + (((dyb2_nd*cos(pi/6)) + dyb2_Lin + dyb2_port) + (dyb2_barw)/2)*sin(180*pi/180) + (0)*cos(180*pi/180) + 477.8021",
+        "w": "group2_dyb2_barw",
+        "h": "2*group2_dyb2_fw + 2*group2_dyb2_cg + group2_dyb2_cw",
+        "cutouts": [],
+        "label": "DYB2 launch bar",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_s0n_copy_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 421.87957020288314,
+        "cy": 498.30205259761306,
+        "cxExpr": "dyb2_jx + (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + (dyb2_Lo)/2)*cos(0*pi/180) - ((dyb2_ps/2 + dyb2_pw/2))*sin(0*pi/180) + 159.2963",
+        "cyExpr": "dyb2_jy + (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + (dyb2_Lo)/2)*sin(0*pi/180) + ((dyb2_ps/2 + dyb2_pw/2))*cos(0*pi/180) + 477.8021",
+        "w": "group2_dyb2_Lo",
+        "h": "group2_dyb2_pw",
+        "cutouts": [],
+        "label": "DYB2 CPS-out N strip",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_s0s_copy_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 421.87957020288314,
+        "cy": 457.30205259761306,
+        "cxExpr": "dyb2_jx + (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + (dyb2_Lo)/2)*cos(0*pi/180) - (-(dyb2_ps/2 + dyb2_pw/2))*sin(0*pi/180) + 159.2963",
+        "cyExpr": "dyb2_jy + (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + (dyb2_Lo)/2)*sin(0*pi/180) + (-(dyb2_ps/2 + dyb2_pw/2))*cos(0*pi/180) + 477.8021",
+        "w": "group2_dyb2_Lo",
+        "h": "group2_dyb2_pw",
+        "cutouts": [],
+        "label": "DYB2 CPS-out S strip",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_c1_copy_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 239.49242013361277,
+        "cy": 616.7058631652789,
+        "cxExpr": "dyb2_jx + ((dyb2_nd*cos(pi/6)) + (dyb2_Lw)/2)*cos(60*pi/180) - (0)*sin(60*pi/180) + 159.2963",
+        "cyExpr": "dyb2_jy + ((dyb2_nd*cos(pi/6)) + (dyb2_Lw)/2)*sin(60*pi/180) + (0)*cos(60*pi/180) + 477.8021",
+        "rotation": "60",
+        "w": "group2_dyb2_Lw",
+        "h": "group2_dyb2_cw",
+        "cutouts": [],
+        "label": "DYB2 CPW-open center",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_f1a_copy_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 236.7472296052295,
+        "cy": 685.9510536936622,
+        "cxExpr": "dyb2_jx + (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + ((dyb2_nd*cos(pi/6)) + dyb2_Lw + dyb2_og - ((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))/2)*cos(60*pi/180) - ((dyb2_cw/2 + dyb2_cg + dyb2_fw/2))*sin(60*pi/180) + 159.2963",
+        "cyExpr": "dyb2_jy + (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + ((dyb2_nd*cos(pi/6)) + dyb2_Lw + dyb2_og - ((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))/2)*sin(60*pi/180) + ((dyb2_cw/2 + dyb2_cg + dyb2_fw/2))*cos(60*pi/180) + 477.8021",
+        "rotation": "60",
+        "w": "(group2_dyb2_nd*cos(pi/6)) + group2_dyb2_Lw + group2_dyb2_og - ((group2_dyb2_cw/2 + group2_dyb2_cg + group2_dyb2_fw + group2_dyb2_ps/2 + group2_dyb2_pw)/sin(60*pi/180))",
+        "h": "group2_dyb2_fw",
+        "cutouts": [],
+        "label": "DYB2 CPW-open flank NW",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_f1b_copy_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 300.83310948527793,
+        "cy": 648.9510536936622,
+        "cxExpr": "dyb2_jx + (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + ((dyb2_nd*cos(pi/6)) + dyb2_Lw + dyb2_og - ((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))/2)*cos(60*pi/180) - (-(dyb2_cw/2 + dyb2_cg + dyb2_fw/2))*sin(60*pi/180) + 159.2963",
+        "cyExpr": "dyb2_jy + (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + ((dyb2_nd*cos(pi/6)) + dyb2_Lw + dyb2_og - ((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))/2)*sin(60*pi/180) + (-(dyb2_cw/2 + dyb2_cg + dyb2_fw/2))*cos(60*pi/180) + 477.8021",
+        "rotation": "60",
+        "w": "(group2_dyb2_nd*cos(pi/6)) + group2_dyb2_Lw + group2_dyb2_og - ((group2_dyb2_cw/2 + group2_dyb2_cg + group2_dyb2_fw + group2_dyb2_ps/2 + group2_dyb2_pw)/sin(60*pi/180))",
+        "h": "group2_dyb2_fw",
+        "cutouts": [],
+        "label": "DYB2 CPW-open flank SE",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_s2a_copy_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 10.25109568733663,
+        "cy": 694.9558631652789,
+        "cxExpr": "dyb2_jx + (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + (dyb2_Lc)/2)*cos(120*pi/180) - ((dyb2_ps/2 + dyb2_pw/2))*sin(120*pi/180) + 159.2963",
+        "cyExpr": "dyb2_jy + (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + (dyb2_Lc)/2)*sin(120*pi/180) + ((dyb2_ps/2 + dyb2_pw/2))*cos(120*pi/180) + 477.8021",
+        "rotation": "120",
+        "w": "group2_dyb2_Lc",
+        "h": "group2_dyb2_pw",
+        "cutouts": [],
+        "label": "DYB2 CPS-short strip SW",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_s2b_copy_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 45.758137242498634,
+        "cy": 715.4558631652789,
+        "cxExpr": "dyb2_jx + (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + (dyb2_Lc)/2)*cos(120*pi/180) - (-(dyb2_ps/2 + dyb2_pw/2))*sin(120*pi/180) + 159.2963",
+        "cyExpr": "dyb2_jy + (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + (dyb2_Lc)/2)*sin(120*pi/180) + (-(dyb2_ps/2 + dyb2_pw/2))*cos(120*pi/180) + 477.8021",
+        "rotation": "120",
+        "w": "group2_dyb2_Lc",
+        "h": "group2_dyb2_pw",
+        "cutouts": [],
+        "label": "DYB2 CPS-short strip NE",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_bar2_copy_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": -49.49538353508234,
+        "cy": 839.439800751867,
+        "cxExpr": "dyb2_jx + ((((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + dyb2_Lc) + (dyb2_bar)/2)*cos(120*pi/180) - (0)*sin(120*pi/180) + 159.2963",
+        "cyExpr": "dyb2_jy + ((((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + dyb2_Lc) + (dyb2_bar)/2)*sin(120*pi/180) + (0)*cos(120*pi/180) + 477.8021",
+        "rotation": "120",
+        "w": "group2_dyb2_bar",
+        "h": "2*group2_dyb2_pw + group2_dyb2_ps",
+        "cutouts": [],
+        "label": "DYB2 CPS shorting bar",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_s4a_copy_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 45.75813724249845,
+        "cy": 240.14824202994728,
+        "cxExpr": "dyb2_jx + (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + (dyb2_Lc)/2)*cos(240*pi/180) - ((dyb2_ps/2 + dyb2_pw/2))*sin(240*pi/180) + 159.2963",
+        "cyExpr": "dyb2_jy + (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + (dyb2_Lc)/2)*sin(240*pi/180) + ((dyb2_ps/2 + dyb2_pw/2))*cos(240*pi/180) + 477.8021",
+        "rotation": "240",
+        "w": "group2_dyb2_Lc",
+        "h": "group2_dyb2_pw",
+        "cutouts": [],
+        "label": "DYB2 CPS-open strip NE",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_s4b_copy_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 10.25109568733646,
+        "cy": 260.64824202994726,
+        "cxExpr": "dyb2_jx + (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + (dyb2_Lc)/2)*cos(240*pi/180) - (-(dyb2_ps/2 + dyb2_pw/2))*sin(240*pi/180) + 159.2963",
+        "cyExpr": "dyb2_jy + (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + (dyb2_Lc)/2)*sin(240*pi/180) + (-(dyb2_ps/2 + dyb2_pw/2))*cos(240*pi/180) + 477.8021",
+        "rotation": "240",
+        "w": "group2_dyb2_Lc",
+        "h": "group2_dyb2_pw",
+        "cutouts": [],
+        "label": "DYB2 CPS-open strip SW",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_c5_copy_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 239.49242013361277,
+        "cy": 338.89824202994726,
+        "cxExpr": "dyb2_jx + ((dyb2_nd*cos(pi/6)) + (dyb2_Lw)/2)*cos(300*pi/180) - (0)*sin(300*pi/180) + 159.2963",
+        "cyExpr": "dyb2_jy + ((dyb2_nd*cos(pi/6)) + (dyb2_Lw)/2)*sin(300*pi/180) + (0)*cos(300*pi/180) + 477.8021",
+        "rotation": "300",
+        "w": "group2_dyb2_Lw",
+        "h": "group2_dyb2_cw",
+        "cutouts": [],
+        "label": "DYB2 CPW-short center",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_f5a_copy_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 297.08310948527793,
+        "cy": 313.14824202994726,
+        "cxExpr": "dyb2_jx + (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + ((dyb2_nd*cos(pi/6)) + dyb2_Lw - ((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))/2)*cos(300*pi/180) - ((dyb2_cw/2 + dyb2_cg + dyb2_fw/2))*sin(300*pi/180) + 159.2963",
+        "cyExpr": "dyb2_jy + (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + ((dyb2_nd*cos(pi/6)) + dyb2_Lw - ((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))/2)*sin(300*pi/180) + ((dyb2_cw/2 + dyb2_cg + dyb2_fw/2))*cos(300*pi/180) + 477.8021",
+        "rotation": "300",
+        "w": "(group2_dyb2_nd*cos(pi/6)) + group2_dyb2_Lw - ((group2_dyb2_cw/2 + group2_dyb2_cg + group2_dyb2_fw + group2_dyb2_ps/2 + group2_dyb2_pw)/sin(60*pi/180))",
+        "h": "group2_dyb2_fw",
+        "cutouts": [],
+        "label": "DYB2 CPW-short flank NE",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_f5b_copy_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 232.9972296052295,
+        "cy": 276.14824202994726,
+        "cxExpr": "dyb2_jx + (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + ((dyb2_nd*cos(pi/6)) + dyb2_Lw - ((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))/2)*cos(300*pi/180) - (-(dyb2_cw/2 + dyb2_cg + dyb2_fw/2))*sin(300*pi/180) + 159.2963",
+        "cyExpr": "dyb2_jy + (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)) + ((dyb2_nd*cos(pi/6)) + dyb2_Lw - ((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))/2)*sin(300*pi/180) + (-(dyb2_cw/2 + dyb2_cg + dyb2_fw/2))*cos(300*pi/180) + 477.8021",
+        "rotation": "300",
+        "w": "(group2_dyb2_nd*cos(pi/6)) + group2_dyb2_Lw - ((group2_dyb2_cw/2 + group2_dyb2_cg + group2_dyb2_fw + group2_dyb2_ps/2 + group2_dyb2_pw)/sin(60*pi/180))",
+        "h": "group2_dyb2_fw",
+        "cutouts": [],
+        "label": "DYB2 CPW-short flank SW",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_bar5_copy_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 316.99242013361277,
+        "cy": 204.6643044433593,
+        "cxExpr": "dyb2_jx + (((dyb2_nd*cos(pi/6)) + dyb2_Lw) + (dyb2_bar)/2)*cos(300*pi/180) - (0)*sin(300*pi/180) + 159.2963",
+        "cyExpr": "dyb2_jy + (((dyb2_nd*cos(pi/6)) + dyb2_Lw) + (dyb2_bar)/2)*sin(300*pi/180) + (0)*cos(300*pi/180) + 477.8021",
+        "rotation": "300",
+        "w": "group2_dyb2_bar",
+        "h": "2*group2_dyb2_fw + 2*group2_dyb2_cg + group2_dyb2_cw",
+        "cutouts": [],
+        "label": "DYB2 CPW shorting bar",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_br3_copy_copy",
+        "kind": "bridge",
+        "layer": "bridge",
+        "cx": 129.2962677109061,
+        "cy": 477.80205259761306,
+        "cxExpr": "dyb2_jx + (dyb2_rbr)*cos(180*pi/180) - (0)*sin(180*pi/180) + 159.2963",
+        "cyExpr": "dyb2_jy + (dyb2_rbr)*sin(180*pi/180) + (0)*cos(180*pi/180) + 477.8021",
+        "rotation": "270",
+        "length": "2*dyb2_cg + dyb2_cw",
+        "width": "dyb2_brw",
+        "height": "h_clad",
+        "padLength": "dyb2_brp",
+        "thickness": "",
+        "w": "(2*group2_dyb2_cg + group2_dyb2_cw)",
+        "h": "(group2_dyb2_brw)",
+        "cutouts": [],
+        "label": "DYB2 bridge: CPW-in mouth",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_br1_copy_copy",
+        "kind": "bridge",
+        "layer": "bridge",
+        "cx": 174.2962677109061,
+        "cy": 503.7828147111462,
+        "cxExpr": "dyb2_jx + (dyb2_rbr)*cos(60*pi/180) - (0)*sin(60*pi/180) + 159.2963",
+        "cyExpr": "dyb2_jy + (dyb2_rbr)*sin(60*pi/180) + (0)*cos(60*pi/180) + 477.8021",
+        "rotation": "150",
+        "length": "2*dyb2_cg + dyb2_cw",
+        "width": "dyb2_brw",
+        "height": "h_clad",
+        "padLength": "dyb2_brp",
+        "thickness": "",
+        "w": "(2*group2_dyb2_cg + group2_dyb2_cw)",
+        "h": "(group2_dyb2_brw)",
+        "cutouts": [],
+        "label": "DYB2 bridge: CPW-open mouth",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_br5_copy_copy",
+        "kind": "bridge",
+        "layer": "bridge",
+        "cx": 174.2962677109061,
+        "cy": 451.8212904840799,
+        "cxExpr": "dyb2_jx + (dyb2_rbr)*cos(300*pi/180) - (0)*sin(300*pi/180) + 159.2963",
+        "cyExpr": "dyb2_jy + (dyb2_rbr)*sin(300*pi/180) + (0)*cos(300*pi/180) + 477.8021",
+        "rotation": "30",
+        "length": "2*dyb2_cg + dyb2_cw",
+        "width": "dyb2_brw",
+        "height": "h_clad",
+        "padLength": "dyb2_brp",
+        "thickness": "",
+        "w": "(2*group2_dyb2_cg + group2_dyb2_cw)",
+        "h": "(group2_dyb2_brw)",
+        "cutouts": [],
+        "label": "DYB2 bridge: CPW-short mouth",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_k34_copy_copy",
+        "kind": "polyshape",
+        "layer": "electrode",
+        "cx": 441.4188527210179,
+        "cy": 1162.476539470556,
+        "w": "0",
+        "h": "0",
+        "vertices": [
+          {
+            "kind": "snap",
+            "compId": "dyb2_f3a_copy_copy",
+            "anchor": "SE"
+          },
+          {
+            "kind": "snap",
+            "compId": "dyb2_f3a_copy_copy",
+            "anchor": "NE"
+          },
+          {
+            "kind": "rel",
+            "dx": "(((dyb2_cw/2 + dyb2_cg)/2 + (dyb2_ps/2))/sin(60*pi/180) - ((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))*cos(180*pi/180)",
+            "dy": "(((dyb2_cw/2 + dyb2_cg)/2 + (dyb2_ps/2))/sin(60*pi/180) - ((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))*sin(180*pi/180)"
+          },
+          {
+            "kind": "snap",
+            "compId": "dyb2_s4b_copy_copy",
+            "anchor": "NW"
+          },
+          {
+            "kind": "snap",
+            "compId": "dyb2_s4b_copy_copy",
+            "anchor": "SW"
+          },
+          {
+            "kind": "rel",
+            "dx": "(((dyb2_cw/2 + dyb2_cg + dyb2_fw))*cos(240*pi/180) + ((dyb2_ps/2 + dyb2_pw))*cos(180*pi/180))/sin(60*pi/180) - (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))*cos(240*pi/180) - ((dyb2_ps/2 + dyb2_pw))*sin(240*pi/180)",
+            "dy": "(((dyb2_ps/2 + dyb2_pw))*sin(180*pi/180) + ((dyb2_cw/2 + dyb2_cg + dyb2_fw))*sin(240*pi/180))/sin(60*pi/180) - (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))*sin(240*pi/180) + ((dyb2_ps/2 + dyb2_pw))*cos(240*pi/180)"
+          }
+        ],
+        "closed": true,
+        "cutouts": [],
+        "label": "DYB2 sector wedge (outer-edge crossing) k34",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_k23_copy_copy",
+        "kind": "polyshape",
+        "layer": "electrode",
+        "cx": 473.750467795637,
+        "cy": 1352.476539470556,
+        "w": "0",
+        "h": "0",
+        "vertices": [
+          {
+            "kind": "snap",
+            "compId": "dyb2_s2a_copy_copy",
+            "anchor": "NW"
+          },
+          {
+            "kind": "snap",
+            "compId": "dyb2_s2a_copy_copy",
+            "anchor": "SW"
+          },
+          {
+            "kind": "rel",
+            "dx": "(((dyb2_ps/2)/2 + (dyb2_cw/2 + dyb2_cg))/sin(60*pi/180) - ((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))*cos(120*pi/180)",
+            "dy": "(((dyb2_ps/2)/2 + (dyb2_cw/2 + dyb2_cg))/sin(60*pi/180) - ((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))*sin(120*pi/180)"
+          },
+          {
+            "kind": "snap",
+            "compId": "dyb2_f3b_copy_copy",
+            "anchor": "SE"
+          },
+          {
+            "kind": "snap",
+            "compId": "dyb2_f3b_copy_copy",
+            "anchor": "NE"
+          },
+          {
+            "kind": "rel",
+            "dx": "(((dyb2_ps/2 + dyb2_pw))*cos(180*pi/180) + ((dyb2_cw/2 + dyb2_cg + dyb2_fw))*cos(120*pi/180))/sin(60*pi/180) - (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))*cos(180*pi/180) - ((dyb2_cw/2 + dyb2_cg + dyb2_fw))*sin(180*pi/180)",
+            "dy": "(((dyb2_cw/2 + dyb2_cg + dyb2_fw))*sin(120*pi/180) + ((dyb2_ps/2 + dyb2_pw))*sin(180*pi/180))/sin(60*pi/180) - (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))*sin(180*pi/180) + ((dyb2_cw/2 + dyb2_cg + dyb2_fw))*cos(180*pi/180)"
+          }
+        ],
+        "closed": true,
+        "cutouts": [],
+        "label": "DYB2 sector wedge (outer-edge crossing) k23",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_k12_copy_copy",
+        "kind": "polyshape",
+        "layer": "electrode",
+        "cx": 602.4995778249233,
+        "cy": 1419.476539470556,
+        "w": "0",
+        "h": "0",
+        "vertices": [
+          {
+            "kind": "snap",
+            "compId": "dyb2_f1a_copy_copy",
+            "anchor": "NW"
+          },
+          {
+            "kind": "snap",
+            "compId": "dyb2_f1a_copy_copy",
+            "anchor": "SW"
+          },
+          {
+            "kind": "rel",
+            "dx": "(((dyb2_cw/2 + dyb2_cg)/2 + (dyb2_ps/2))/sin(60*pi/180) - ((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))*cos(60*pi/180)",
+            "dy": "(((dyb2_cw/2 + dyb2_cg)/2 + (dyb2_ps/2))/sin(60*pi/180) - ((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))*sin(60*pi/180)"
+          },
+          {
+            "kind": "snap",
+            "compId": "dyb2_s2b_copy_copy",
+            "anchor": "NW"
+          },
+          {
+            "kind": "snap",
+            "compId": "dyb2_s2b_copy_copy",
+            "anchor": "SW"
+          },
+          {
+            "kind": "rel",
+            "dx": "(((dyb2_cw/2 + dyb2_cg + dyb2_fw))*cos(120*pi/180) + ((dyb2_ps/2 + dyb2_pw))*cos(60*pi/180))/sin(60*pi/180) - (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))*cos(120*pi/180) - ((dyb2_ps/2 + dyb2_pw))*sin(120*pi/180)",
+            "dy": "(((dyb2_ps/2 + dyb2_pw))*sin(60*pi/180) + ((dyb2_cw/2 + dyb2_cg + dyb2_fw))*sin(120*pi/180))/sin(60*pi/180) - (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))*sin(120*pi/180) + ((dyb2_ps/2 + dyb2_pw))*cos(120*pi/180)"
+          }
+        ],
+        "closed": true,
+        "cutouts": [],
+        "label": "DYB2 sector wedge (outer-edge crossing) k12",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_k01_copy_copy",
+        "kind": "polyshape",
+        "layer": "electrode",
+        "cx": 750.8785970066574,
+        "cy": 1296.476539470556,
+        "w": "0",
+        "h": "0",
+        "vertices": [
+          {
+            "kind": "snap",
+            "compId": "dyb2_s0n_copy_copy",
+            "anchor": "NW"
+          },
+          {
+            "kind": "snap",
+            "compId": "dyb2_s0n_copy_copy",
+            "anchor": "SW"
+          },
+          {
+            "kind": "rel",
+            "dx": "(((dyb2_ps/2)/2 + (dyb2_cw/2 + dyb2_cg))/sin(60*pi/180) - ((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))*cos(0*pi/180)",
+            "dy": "(((dyb2_ps/2)/2 + (dyb2_cw/2 + dyb2_cg))/sin(60*pi/180) - ((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))*sin(0*pi/180)"
+          },
+          {
+            "kind": "snap",
+            "compId": "dyb2_f1b_copy_copy",
+            "anchor": "NW"
+          },
+          {
+            "kind": "snap",
+            "compId": "dyb2_f1b_copy_copy",
+            "anchor": "SW"
+          },
+          {
+            "kind": "rel",
+            "dx": "(((dyb2_ps/2 + dyb2_pw))*cos(60*pi/180) + ((dyb2_cw/2 + dyb2_cg + dyb2_fw))*cos(0*pi/180))/sin(60*pi/180) - (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))*cos(60*pi/180) - ((dyb2_cw/2 + dyb2_cg + dyb2_fw))*sin(60*pi/180)",
+            "dy": "(((dyb2_cw/2 + dyb2_cg + dyb2_fw))*sin(0*pi/180) + ((dyb2_ps/2 + dyb2_pw))*sin(60*pi/180))/sin(60*pi/180) - (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))*sin(60*pi/180) + ((dyb2_cw/2 + dyb2_cg + dyb2_fw))*cos(60*pi/180)"
+          }
+        ],
+        "closed": true,
+        "cutouts": [],
+        "label": "DYB2 sector wedge (outer-edge crossing) k01",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_k50_copy_copy",
+        "kind": "polyshape",
+        "layer": "electrode",
+        "cx": 744.5277440455714,
+        "cy": 1151.476539470556,
+        "w": "0",
+        "h": "0",
+        "vertices": [
+          {
+            "kind": "snap",
+            "compId": "dyb2_f5a_copy_copy",
+            "anchor": "NW"
+          },
+          {
+            "kind": "snap",
+            "compId": "dyb2_f5a_copy_copy",
+            "anchor": "SW"
+          },
+          {
+            "kind": "rel",
+            "dx": "(((dyb2_cw/2 + dyb2_cg)/2 + (dyb2_ps/2))/sin(60*pi/180) - ((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))*cos(300*pi/180)",
+            "dy": "(((dyb2_cw/2 + dyb2_cg)/2 + (dyb2_ps/2))/sin(60*pi/180) - ((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))*sin(300*pi/180)"
+          },
+          {
+            "kind": "snap",
+            "compId": "dyb2_s0s_copy_copy",
+            "anchor": "NW"
+          },
+          {
+            "kind": "snap",
+            "compId": "dyb2_s0s_copy_copy",
+            "anchor": "SW"
+          },
+          {
+            "kind": "rel",
+            "dx": "(((dyb2_cw/2 + dyb2_cg + dyb2_fw))*cos(360*pi/180) + ((dyb2_ps/2 + dyb2_pw))*cos(300*pi/180))/sin(60*pi/180) - (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))*cos(360*pi/180) - ((dyb2_ps/2 + dyb2_pw))*sin(360*pi/180)",
+            "dy": "(((dyb2_ps/2 + dyb2_pw))*sin(300*pi/180) + ((dyb2_cw/2 + dyb2_cg + dyb2_fw))*sin(360*pi/180))/sin(60*pi/180) - (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))*sin(360*pi/180) + ((dyb2_ps/2 + dyb2_pw))*cos(360*pi/180)"
+          }
+        ],
+        "closed": true,
+        "cutouts": [],
+        "label": "DYB2 sector wedge (outer-edge crossing) k50",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_k45_copy_copy",
+        "kind": "polyshape",
+        "layer": "electrode",
+        "cx": 563.8171097892184,
+        "cy": 1084.476539470556,
+        "w": "0",
+        "h": "0",
+        "vertices": [
+          {
+            "kind": "snap",
+            "compId": "dyb2_s4a_copy_copy",
+            "anchor": "NW"
+          },
+          {
+            "kind": "snap",
+            "compId": "dyb2_s4a_copy_copy",
+            "anchor": "SW"
+          },
+          {
+            "kind": "rel",
+            "dx": "(((dyb2_ps/2)/2 + (dyb2_cw/2 + dyb2_cg))/sin(60*pi/180) - ((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))*cos(240*pi/180)",
+            "dy": "(((dyb2_ps/2)/2 + (dyb2_cw/2 + dyb2_cg))/sin(60*pi/180) - ((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))*sin(240*pi/180)"
+          },
+          {
+            "kind": "snap",
+            "compId": "dyb2_f5b_copy_copy",
+            "anchor": "NW"
+          },
+          {
+            "kind": "snap",
+            "compId": "dyb2_f5b_copy_copy",
+            "anchor": "SW"
+          },
+          {
+            "kind": "rel",
+            "dx": "(((dyb2_ps/2 + dyb2_pw))*cos(300*pi/180) + ((dyb2_cw/2 + dyb2_cg + dyb2_fw))*cos(240*pi/180))/sin(60*pi/180) - (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))*cos(300*pi/180) - ((dyb2_cw/2 + dyb2_cg + dyb2_fw))*sin(300*pi/180)",
+            "dy": "(((dyb2_cw/2 + dyb2_cg + dyb2_fw))*sin(240*pi/180) + ((dyb2_ps/2 + dyb2_pw))*sin(300*pi/180))/sin(60*pi/180) - (((dyb2_cw/2 + dyb2_cg + dyb2_fw + dyb2_ps/2 + dyb2_pw)/sin(60*pi/180)))*sin(300*pi/180) + ((dyb2_cw/2 + dyb2_cg + dyb2_fw))*cos(300*pi/180)"
+          }
+        ],
+        "closed": true,
+        "cutouts": [],
+        "label": "DYB2 sector wedge (outer-edge crossing) k45",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      },
+      {
+        "transforms": [
+          {
+            "id": "t_mrr55a1b_qvp0",
+            "kind": "rotate",
+            "enabled": true,
+            "angle": "-90",
+            "pivot": "group"
+          }
+        ],
+        "id": "dyb2_bar1_copy_copy",
+        "kind": "rect",
+        "layer": "electrode",
+        "cx": 324.49242013361277,
+        "cy": 763.9301818086334,
+        "cxExpr": "dyb2_jx + (((dyb2_nd*cos(pi/6)) + dyb2_Lw + dyb2_og) + (dyb2_bar)/2)*cos(60*pi/180) - (0)*sin(60*pi/180) + 159.2963",
+        "cyExpr": "dyb2_jy + (((dyb2_nd*cos(pi/6)) + dyb2_Lw + dyb2_og) + (dyb2_bar)/2)*sin(60*pi/180) + (0)*cos(60*pi/180) + 477.8021",
+        "rotation": "60",
+        "w": "group2_dyb2_bar",
+        "h": "2*group2_dyb2_fw + 2*group2_dyb2_cg + group2_dyb2_cw",
+        "cutouts": [],
+        "label": "DYB2 CPW covered-open cover bar",
+        "conductorLayerId": "l_cond",
+        "group": "group2"
+      }
+    ],
+    "snaps": [
+      {
+        "id": "snap_1783517578373_2_ssy5",
+        "from": {
+          "compId": "cond22_copy2_copy",
+          "anchor": "NE"
+        },
+        "to": {
+          "compId": "cond22_copy_copy_copy",
+          "anchor": "NW"
+        },
+        "dx": "feedZ0_gap",
+        "dy": "0"
+      },
+      {
+        "id": "snap_1778614206634",
+        "from": {
+          "compId": "cond1",
+          "anchor": "SW"
+        },
+        "to": {
+          "compId": "cond1_copy",
+          "anchor": "NW"
+        },
+        "dx": "0",
+        "dy": "-cap_cap_gap"
+      },
+      {
+        "id": "snap_1778614242109",
+        "from": {
+          "compId": "cond1",
+          "anchor": "N"
+        },
+        "to": {
+          "compId": "cond3",
+          "anchor": "S"
+        },
+        "dx": "0",
+        "dy": "0"
+      },
+      {
+        "id": "snap_1778714849886",
+        "from": {
+          "compId": "cond1",
+          "anchor": "SW"
+        },
+        "to": {
+          "compId": "wg1",
+          "anchor": "NW"
+        },
+        "dx": "-(wg_L - canvas_w)/2",
+        "dy": "-(cap_gap/2 - w_wg/2)"
+      },
+      {
+        "id": "snap_1778760836914_iai1",
+        "from": {
+          "compId": "cond1_copy2",
+          "anchor": "SW"
+        },
+        "to": {
+          "compId": "cond1_copy_copy",
+          "anchor": "NW"
+        },
+        "dx": "0",
+        "dy": "-cap_cap_gap"
+      },
+      {
+        "id": "snap_1778761625429",
+        "from": {
+          "compId": "cond1_copy_copy",
+          "anchor": "S"
+        },
+        "to": {
+          "compId": "cond3_copy2",
+          "anchor": "N"
+        },
+        "dx": "gap_x2",
+        "dy": "gap_y2"
+      },
+      {
+        "id": "snap_1778764353484",
+        "from": {
+          "compId": "cond3_copy2",
+          "anchor": "SE"
+        },
+        "to": {
+          "compId": "cond5",
+          "anchor": "SW"
+        },
+        "dx": "gap_x4",
+        "dy": "gap_y4"
+      },
+      {
+        "id": "snap_1781844160744",
+        "from": {
+          "compId": "cond1_copy",
+          "anchor": "S"
+        },
+        "to": {
+          "compId": "cond1_copy2",
+          "anchor": "N"
+        },
+        "dx": "0",
+        "dy": "-(cap_d-cap_gap-2*cap_W)"
+      },
+      {
+        "id": "snap_1781891892550",
+        "from": {
+          "compId": "cond1_copy2",
+          "anchor": "NE"
+        },
+        "to": {
+          "compId": "cond16",
+          "anchor": "SE"
+        },
+        "dx": "gap_x8",
+        "dy": "gap_y8"
+      },
+      {
+        "id": "snap_1781892522296",
+        "from": {
+          "compId": "cond1_copy",
+          "anchor": "SW"
+        },
+        "to": {
+          "compId": "cond16_copy",
+          "anchor": "NW"
+        },
+        "dx": "gap_x10",
+        "dy": "gap_y10"
+      },
+      {
+        "id": "snap_1783018696426",
+        "from": {
+          "compId": "cond1_copy_copy",
+          "anchor": "SW"
+        },
+        "to": {
+          "compId": "cond16_copy_copy",
+          "anchor": "NW"
+        },
+        "dx": "gap_x7",
+        "dy": "gap_y7"
+      },
+      {
+        "id": "snap_1783018991425",
+        "from": {
+          "compId": "cond16_copy",
+          "anchor": "S"
+        },
+        "to": {
+          "compId": "bridge2",
+          "anchor": "E"
+        },
+        "dx": "gap_x9",
+        "dy": "gap_y9"
+      },
+      {
+        "id": "snap_1783019378307",
+        "from": {
+          "compId": "cond1",
+          "anchor": "NE"
+        },
+        "to": {
+          "compId": "cond16_copy_copy_copy",
+          "anchor": "SE"
+        },
+        "dx": "gap_x11",
+        "dy": "gap_y11"
+      },
+      {
+        "id": "snap_1783019392657",
+        "from": {
+          "compId": "cond16",
+          "anchor": "N"
+        },
+        "to": {
+          "compId": "bridge2_copy",
+          "anchor": "W"
+        },
+        "dx": "gap_x12",
+        "dy": "gap_y12"
+      },
+      {
+        "id": "snap_meander_meander_rail_U_j3d1",
+        "from": {
+          "compId": "meander_rail_L",
+          "anchor": "SW"
+        },
+        "to": {
+          "compId": "meander_rail_U",
+          "anchor": "SW"
+        },
+        "dx": "0",
+        "dy": "((meander_cell_s) + (meander_cell_w) + (meander_gap_s)) / 2"
+      },
+      {
+        "id": "snap_meander_meander_conL_inue",
+        "from": {
+          "compId": "meander_rail_L",
+          "anchor": "SW"
+        },
+        "to": {
+          "compId": "meander_conL",
+          "anchor": "SW"
+        },
+        "dx": "0",
+        "dy": "((meander_cell_s) + (meander_cell_w) - (meander_gap_s) - 2 * (meander_trace_w)) / 2"
+      },
+      {
+        "id": "snap_meander_meander_conR_7rdf",
+        "from": {
+          "compId": "meander_rail_L",
+          "anchor": "SW"
+        },
+        "to": {
+          "compId": "meander_conR",
+          "anchor": "SW"
+        },
+        "dx": "0",
+        "dy": "((meander_cell_s) + (meander_cell_w) + (meander_gap_s)) / 2"
+      },
+      {
+        "id": "snap_meander_meander_outBarL_qjo7",
+        "from": {
+          "compId": "meander_rail_L",
+          "anchor": "SW"
+        },
+        "to": {
+          "compId": "meander_outBarL",
+          "anchor": "SW"
+        },
+        "dx": "(meander_trace_w) + (meander_cell_d)",
+        "dy": "(meander_cell_s) / 2"
+      },
+      {
+        "id": "snap_meander_meander_outBarR_tnzt",
+        "from": {
+          "compId": "meander_rail_L",
+          "anchor": "SW"
+        },
+        "to": {
+          "compId": "meander_outBarR",
+          "anchor": "SW"
+        },
+        "dx": "(meander_trace_w) + (meander_cell_d)",
+        "dy": "((meander_cell_s) + (meander_cell_w) + (meander_gap_s)) / 2"
+      },
+      {
+        "id": "snap_meander_meander_frmL_uj8y",
+        "from": {
+          "compId": "meander_rail_L",
+          "anchor": "SW"
+        },
+        "to": {
+          "compId": "meander_frmL",
+          "anchor": "SW"
+        },
+        "dx": "(meander_trace_w) + (meander_cell_d)",
+        "dy": "(meander_cell_s) / 2"
+      },
+      {
+        "id": "snap_meander_meander_frmR_ho47",
+        "from": {
+          "compId": "meander_rail_L",
+          "anchor": "SW"
+        },
+        "to": {
+          "compId": "meander_frmR",
+          "anchor": "SW"
+        },
+        "dx": "(meander_trace_w) + (meander_cell_d)",
+        "dy": "((meander_cell_s) + 2 * (meander_cell_w) - 2 * (meander_trace_w)) / 2"
+      },
+      {
+        "id": "snap_meander_meander_inBar_iprb",
+        "from": {
+          "compId": "meander_rail_L",
+          "anchor": "SW"
+        },
+        "to": {
+          "compId": "meander_inBar",
+          "anchor": "SW"
+        },
+        "dx": "2 * (meander_trace_w) + (meander_cell_d) + (meander_cell_h)",
+        "dy": "(meander_cell_s) / 2"
+      },
+      {
+        "id": "snap_1783019838924",
+        "from": {
+          "compId": "cond3",
+          "anchor": "N"
+        },
+        "to": {
+          "compId": "meander",
+          "anchor": "SE"
+        },
+        "dx": "gap_x13",
+        "dy": "gap_y13"
+      },
+      {
+        "id": "snap_1783030084555",
+        "from": {
+          "compId": "meander",
+          "anchor": "SW",
+          "instanceIdx": 0
+        },
+        "to": {
+          "compId": "cond23",
+          "anchor": "NW"
+        },
+        "dx": "gap_x14",
+        "dy": "gap_y14"
+      },
+      {
+        "id": "snap_1783030113122",
+        "from": {
+          "compId": "cond23",
+          "anchor": "NE"
+        },
+        "to": {
+          "compId": "cond22",
+          "anchor": "SE"
+        },
+        "dx": "gap_x15",
+        "dy": "gap_y15"
+      },
+      {
+        "id": "snap_1783283086831",
+        "from": {
+          "compId": "cond22_copy",
+          "anchor": "SW"
+        },
+        "to": {
+          "compId": "cond23_copy_copy",
+          "anchor": "NW"
+        },
+        "dx": "gap_x5",
+        "dy": "gap_y5"
+      },
+      {
+        "id": "snap_1783283119800",
+        "from": {
+          "compId": "cond23",
+          "anchor": "E"
+        },
+        "to": {
+          "compId": "cond25",
+          "anchor": "W"
+        },
+        "dx": "gap_x6",
+        "dy": "gap_y6"
+      },
+      {
+        "id": "snap_1783523787156",
+        "from": {
+          "compId": "cond22_copy_copy_copy",
+          "anchor": "SW"
+        },
+        "to": {
+          "compId": "cond22_copy",
+          "anchor": "NW"
+        },
+        "dx": "gap_x17",
+        "dy": "gap_y17"
+      },
+      {
+        "id": "snap_1783523793083",
+        "from": {
+          "compId": "cond22",
+          "anchor": "NW"
+        },
+        "to": {
+          "compId": "cond22_copy2_copy",
+          "anchor": "SW"
+        },
+        "dx": "gap_x20",
+        "dy": "gap_y20"
+      },
+      {
+        "id": "snap_1784430522686",
+        "from": {
+          "compId": "cond22_copy_copy_copy",
+          "anchor": "NE"
+        },
+        "to": {
+          "compId": "dyb2_s0n_copy_copy",
+          "anchor": "NE"
+        },
+        "dx": "gap_x1",
+        "dy": "gap_y1"
+      }
+    ],
+    "mirrors": [],
+    "groups": [
+      {
+        "id": "group_mp310e9l",
+        "name": "cap",
+        "memberIds": [
+          "cond1",
+          "cond1_copy",
+          "cond3"
+        ],
+        "aliases": {
+          "cap_L": "cap_cap_L",
+          "cap_W": "cap_cap_W",
+          "feed_w": "cap_feed_w",
+          "feed_L": "cap_feed_L",
+          "cap_gap": "cap_cap_gap",
+          "gap_x2": "cap_gap_x2",
+          "gap_y2": "cap_gap_y2",
+          "gap_x3": "cap_gap_x3",
+          "gap_y3": "cap_gap_y3"
+        }
+      },
+      {
+        "id": "group_mrr552i9",
+        "name": "group2",
+        "memberIds": [
+          "dyb2_node_copy_copy",
+          "dyb2_c3_copy_copy",
+          "dyb2_f3a_copy_copy",
+          "dyb2_f3b_copy_copy",
+          "dyb2_portW_copy_copy",
+          "dyb2_barW_copy_copy",
+          "dyb2_s0n_copy_copy",
+          "dyb2_s0s_copy_copy",
+          "dyb2_c1_copy_copy",
+          "dyb2_f1a_copy_copy",
+          "dyb2_f1b_copy_copy",
+          "dyb2_s2a_copy_copy",
+          "dyb2_s2b_copy_copy",
+          "dyb2_bar2_copy_copy",
+          "dyb2_s4a_copy_copy",
+          "dyb2_s4b_copy_copy",
+          "dyb2_c5_copy_copy",
+          "dyb2_f5a_copy_copy",
+          "dyb2_f5b_copy_copy",
+          "dyb2_bar5_copy_copy",
+          "dyb2_br3_copy_copy",
+          "dyb2_br1_copy_copy",
+          "dyb2_br5_copy_copy",
+          "dyb2_k34_copy_copy",
+          "dyb2_k23_copy_copy",
+          "dyb2_k12_copy_copy",
+          "dyb2_k01_copy_copy",
+          "dyb2_k50_copy_copy",
+          "dyb2_k45_copy_copy",
+          "dyb2_bar1_copy_copy"
+        ],
+        "aliases": {
+          "dyb2_Lin": "group2_dyb2_Lin",
+          "dyb2_cw": "group2_dyb2_cw",
+          "dyb2_nd": "group2_dyb2_nd",
+          "dyb2_port": "group2_dyb2_port",
+          "dyb2_cg": "group2_dyb2_cg",
+          "dyb2_fw": "group2_dyb2_fw",
+          "dyb2_ps": "group2_dyb2_ps",
+          "dyb2_pw": "group2_dyb2_pw",
+          "dyb2_barw": "group2_dyb2_barw",
+          "dyb2_Lo": "group2_dyb2_Lo",
+          "dyb2_Lw": "group2_dyb2_Lw",
+          "dyb2_og": "group2_dyb2_og",
+          "dyb2_Lc": "group2_dyb2_Lc",
+          "dyb2_bar": "group2_dyb2_bar",
+          "dyb2_brw": "group2_dyb2_brw"
+        }
+      }
+    ],
+    "booleans": [],
+    "stack": [
+      {
+        "id": "l_si",
+        "name": "Silicon handle",
+        "thickness": "h_si",
+        "material": "silicon",
+        "color": "#5a6878",
+        "role": "substrate"
+      },
+      {
+        "id": "l_sio2",
+        "name": "Buried oxide",
+        "thickness": "h_sio2",
+        "material": "silicon_dioxide",
+        "color": "#8da0c0",
+        "role": "substrate"
+      },
+      {
+        "core_width": "w_wg",
+        "core_width_ref": "top",
+        "slab_height": "h_slab",
+        "slab_width": "w_slab",
+        "etch_angle": "etch_angle",
+        "id": "l_lt",
+        "name": "Lithium tantalate WG",
+        "thickness": "h_wg",
+        "material": "lithium_tantalate",
+        "color": "#86efac",
+        "role": "waveguide",
+        "coplanarGroup": "device_0"
+      },
+      {
+        "id": "l_clad",
+        "name": "Cladding (SiO2)",
+        "thickness": "h_clad",
+        "material": "air",
+        "color": "#ffffff",
+        "role": "cladding",
+        "coplanarGroup": "device_0"
+      },
+      {
+        "id": "l_cond",
+        "name": "Conductor",
+        "thickness": "h_cond",
+        "material": "gold",
+        "color": "#daa520",
+        "role": "conductor",
+        "coplanarGroup": "device_0",
+        "sheetRs": "0.004",
+        "sheetXs": "2*pi*Freq*80e-12"
+      }
+    ],
+    "stackName": "LTOI600_NbN_EPFL",
+    "simSetup": {
+      "fnominal": "6",
+      "solveFreq": "8",
+      "maxPasses": "17",
+      "maxDeltaS": "0.00001",
+      "sweepEnabled": true,
+      "sweepStart": "2",
+      "sweepStop": "20",
+      "sweepPoints": "500",
+      "sweepType": "Interpolating",
+      "padXNeg": "50",
+      "padXPos": "50",
+      "padYNeg": "50",
+      "padYPos": "50",
+      "airPad": "100",
+      "appendToActive": false,
+      "appendMode": "project"
+    },
+    "cells": {}
+  }
+}

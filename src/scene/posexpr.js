@@ -15,14 +15,41 @@
 // MERGED (25 then -25 returns to the pristine expression, constant term
 // dropped entirely), so drag residue never accumulates.
 
+import { evalExpr } from './params.js';
+import { expandTransforms } from './transforms.js';
+
 // Is the component's posExpr pair actually APPLIED by the solver?
 // Mirrors solveLayout's gate exactly: non-boolean, at least one non-empty
-// expr, and NOT the `to` of any snap (the snap wins; exprs are ignored).
-export function isPosExprActive(comp, snaps) {
+// expr, and NOT the `to` of any snap (the snap wins; exprs are ignored)
+// — EXCEPT the GROUP-RIGID child: a snapped group member whose transform
+// chain MOVES its instance-0 base (and whose snap parent is OUTSIDE the
+// group) has its posExpr applied by the solver as its intra-group
+// NATURAL pose. A group drag must therefore fold the child's exprs like
+// every other member's — skipping it folded 29 naturals but not the
+// child's, permanently deforming the assembly (real user bug). The rigid
+// probe needs the component pool + params; callers that can't supply
+// them keep the legacy inert answer.
+export function isPosExprActive(comp, snaps, components = null, paramValues = null) {
   if (!comp || comp.kind === 'boolean') return false;
   const has = (f) => typeof comp[f] === 'string' && comp[f].trim() !== '';
   if (!has('cxExpr') && !has('cyExpr')) return false;
-  return !(snaps || []).some(s => s && s.to && s.to.compId === comp.id);
+  const snap = (snaps || []).find(s => s && s.to && s.to.compId === comp.id);
+  if (!snap) return true;
+  // Snapped: active only for the group-rigid child (solver twin gate).
+  if (!comp.group || !components || !paramValues) return false;
+  const parent = components.find(c => c && c.id === snap.from.compId);
+  if (parent && parent.group === comp.group) return false;
+  if (!(comp.transforms || []).some(t => t && t.enabled !== false)) return false;
+  const w = typeof comp.w === 'number' ? comp.w : evalExpr(comp.w, paramValues);
+  const h = typeof comp.h === 'number' ? comp.h : evalExpr(comp.h, paramValues);
+  const insts = expandTransforms([{
+    ...comp,
+    w: Number.isFinite(w) ? w : 0,
+    h: Number.isFinite(h) ? h : 0,
+  }], paramValues, components);
+  const i0 = insts.find(i => i.idx === 0);
+  if (!i0 || !Number.isFinite(i0.cx) || !Number.isFinite(i0.cy)) return false;
+  return Math.abs(i0.cx - comp.cx) > 1e-9 || Math.abs(i0.cy - comp.cy) > 1e-9;
 }
 
 // Fold a numeric translation into a position expression. Merges into an

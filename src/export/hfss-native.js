@@ -5921,22 +5921,19 @@ oBoundarySetup = oDesign.GetModule("BoundarySetup")
       // follows the port through any subsequent parameter sweep.
       // Until you do that, re-export to refresh the IntLine after
       // changing snap-chain parameters.
-      const pw = evalExpr(comp.w, paramValues);
-      const ph = evalExpr(comp.h, paramValues);
-      const xMin = String(comp.cx - pw / 2);
-      const xMax = String(comp.cx + pw / 2);
-      const yMin = String(comp.cy - ph / 2);
-      const yMax = String(comp.cy + ph / 2);
-      const xMid = String(comp.cx);
-      const yMid = String(comp.cy);
+      // Endpoints come from the DETECTOR's line — computed on the port's
+      // RENDERED instance-0 extent (rotation-aware), which is where the
+      // chain-transformed sheet actually sits in HFSS. The old base-frame
+      // comp.cx ± w/2 endpoints missed a group-rotated port's final sheet
+      // entirely ("port line endpoints must lie on the port").
       const zStr = String(portZ_um);
       let sX, sY, eX, eY;
       if (det.direction === 'EW') {
-        sX = `${xMin}um`; sY = `${yMid}um`;
-        eX = `${xMax}um`; eY = `${yMid}um`;
+        sX = `${det.line.startX}um`; sY = `${det.line.midY}um`;
+        eX = `${det.line.endX}um`;   eY = `${det.line.midY}um`;
       } else {
-        sX = `${xMid}um`; sY = `${yMin}um`;
-        eX = `${xMid}um`; eY = `${yMax}um`;
+        sX = `${det.line.midX}um`; sY = `${det.line.startY}um`;
+        eX = `${det.line.midX}um`; eY = `${det.line.endY}um`;
       }
       const zRef = `${zStr}um`;
       // AssignLumpedPort arg structure matches HFSS's GUI-recorded

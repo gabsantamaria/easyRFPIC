@@ -2240,11 +2240,11 @@ export default function App() {
       return {
         ...prev,
         components: prev.components.map(c => moveSet.has(c.id)
-          ? translateWithPosExprs(c, c, dx, dy, isPosExprActive(c, prev.snaps))
+          ? translateWithPosExprs(c, c, dx, dy, isPosExprActive(c, prev.snaps, prev.components, paramValues))
           : c),
       };
     });
-  }, [selectedIds, updateScene]);
+  }, [selectedIds, updateScene, paramValues]);
 
   // Keyboard shortcuts (F = fit, ⇧F = zoom to selection, arrows = nudge,
   // ⌘D = duplicate, ⌘A = select all, Esc = clear selection,

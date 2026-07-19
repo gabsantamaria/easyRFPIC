@@ -320,3 +320,80 @@ describe('adversarial-review regressions (round 2)', () => {
     }
   });
 });
+
+describe('rigid-group interaction fixes (drag fold + port flankers)', () => {
+  const loadV2 = () => {
+    const d = JSON.parse(fs.readFileSync(new URL('./fixtures/ki-lumped-balun-v2.json', import.meta.url), 'utf8'));
+    return normalizeScene(d.scene);
+  };
+
+  it('group drag folds the rigid child natural too — assembly snaps back whole', async () => {
+    const { translateWithPosExprs, isPosExprActive } = await import('../src/scene/posexpr.js');
+    const scene = loadV2();
+    const pv = resolveParams(scene.params).values;
+    const solved0 = solveLayout(scene.components, scene.snaps, pv);
+    const insts0 = expandTransforms(solved0, pv);
+    const g2 = scene.components.filter(c => c.group === 'group2').map(c => c.id);
+    // the rigid CHILD's posExpr must be ACTIVE for the fold
+    const child = scene.components.find(c => c.id === 'dyb2_s0n_copy_copy');
+    expect(isPosExprActive(child, scene.snaps, scene.components, pv)).toBe(true);
+    // simulate the canvas group-drag commit: fold (50, 30) into every member
+    const comps2 = scene.components.map(c => g2.includes(c.id)
+      ? translateWithPosExprs(c, c, 50, 30, isPosExprActive(c, scene.snaps, scene.components, pv))
+      : c);
+    const solved1 = solveLayout(comps2, scene.snaps, pv);
+    const insts1 = expandTransforms(solved1, pv);
+    for (const id of g2) {
+      const a = insts0.find(i => i.compId === id && i.idx === 0);
+      const b = insts1.find(i => i.compId === id && i.idx === 0);
+      // snap-bound group: re-solve returns EVERY member to the constraint
+      // (1e-3 tolerance = foldPosExprDelta's 4-decimal mouse rounding)
+      expect(Math.hypot(b.cx - a.cx, b.cy - a.cy), id).toBeLessThan(1e-3);
+    }
+  });
+
+  it('lumped port on a group-rotated member finds flankers at the RENDERED pose', async () => {
+    const { detectPortIntegrationLine } = await import('../src/scene/lumpedPort.js');
+    const scene = loadV2();
+    const pv = resolveParams(scene.params).values;
+    const solved = solveLayout(scene.components, scene.snaps, pv);
+    const port = solved.find(c => c.id === 'dyb2_portW_copy_copy');
+    const det = detectPortIntegrationLine(port, solved, pv);
+    expect(det.direction).toBe('NS');
+    // IntLine endpoints must lie on the RENDERED port sheet
+    const insts = expandTransforms(solved, pv);
+    const p0 = insts.find(i => i.compId === port.id && i.idx === 0);
+    const rad = (p0.rotation || 0) * Math.PI / 180;
+    const wEff = Math.abs(Math.cos(rad)) * p0.w + Math.abs(Math.sin(rad)) * p0.h;
+    const hEff = Math.abs(Math.sin(rad)) * p0.w + Math.abs(Math.cos(rad)) * p0.h;
+    expect(det.line.midX).toBeCloseTo(p0.cx, 6);
+    expect(det.line.startY).toBeCloseTo(p0.cy - hEff / 2, 6);
+    expect(det.line.endY).toBeCloseTo(p0.cy + hEff / 2, 6);
+    expect(wEff).toBeGreaterThan(0);
+    // and the generated script emits the AssignLumpedPort with those endpoints
+    const script = generateHfssNative(scene, pv, {});
+    expect(script).toContain('AssignLumpedPort');
+    expect(script).toContain(`"${det.line.midX}um"`);
+    expect(script).not.toContain('Frequency sweep skipped');
+  });
+
+  it('unrotated legacy port detection is unchanged (regression)', async () => {
+    const { detectPortIntegrationLine } = await import('../src/scene/lumpedPort.js');
+    // simple EW: conductor | port | conductor, no transforms
+    const scene = normalizeScene({
+      params: {},
+      components: [
+        rect('L', -15, 0, {}),
+        { transforms: [], id: 'P', kind: 'rect', layer: 'port', cx: 0, cy: 0, w: '10', h: '10', cutouts: [], lumpedPort: { enabled: true, impedance: '50' } },
+        rect('R', 15, 0, {}),
+      ],
+      snaps: [],
+    });
+    const pv = {};
+    const solved = solveLayout(scene.components, scene.snaps, pv);
+    const det = detectPortIntegrationLine(solved.find(c => c.id === 'P'), solved, pv);
+    expect(det.direction).toBe('EW');
+    expect(det.from).toBe('L');
+    expect(det.to).toBe('R');
+  });
+});

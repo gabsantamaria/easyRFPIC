@@ -2619,7 +2619,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         // FOLD the delta into them — without this the part springs back
         // and an expression-positioned assembly is immovable by mouse.
         const raw = compById[cid] || c;
-        const exprActive = isPosExprActive(raw, scene.snaps);
+        const exprActive = isPosExprActive(raw, scene.snaps, scene.components, paramValues);
         coMovers.push({
           id: cid, startCx: c.cx, startCy: c.cy,
           ...(exprActive ? { posExprActive: true, startCxExpr: raw.cxExpr, startCyExpr: raw.cyExpr } : {}),

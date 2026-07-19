@@ -36,11 +36,21 @@ function instExtent(inst, paramValues) {
   const w = Number.isFinite(inst.w) ? inst.w : evalExpr(inst.w, paramValues);
   const h = Number.isFinite(inst.h) ? inst.h : evalExpr(inst.h, paramValues);
   if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return null;
+  // ROTATION-AWARE extent: a transform-chain instance carries a NUMERIC
+  // rotation (a −90° group rotate swaps a rect's axis-aligned span). Raw
+  // scene components carry a STRING first-class rotation — those keep the
+  // legacy unrotated extent (only numeric instance rotations apply).
+  const rotN = typeof inst.rotation === 'number' && Number.isFinite(inst.rotation) ? inst.rotation : 0;
+  const rad = rotN * Math.PI / 180;
+  const ca = Math.abs(Math.cos(rad));
+  const sa = Math.abs(Math.sin(rad));
+  const wEff = ca * w + sa * h;
+  const hEff = sa * w + ca * h;
   return {
     id: inst.id,
-    cx: inst.cx, cy: inst.cy, w, h,
-    xMin: inst.cx - w / 2, xMax: inst.cx + w / 2,
-    yMin: inst.cy - h / 2, yMax: inst.cy + h / 2,
+    cx: inst.cx, cy: inst.cy, w: wEff, h: hEff,
+    xMin: inst.cx - wEff / 2, xMax: inst.cx + wEff / 2,
+    yMin: inst.cy - hEff / 2, yMax: inst.cy + hEff / 2,
   };
 }
 
@@ -59,16 +69,22 @@ export function detectPortIntegrationLine(port, solved, paramValues) {
   if (!port || port.layer !== 'port' || port.kind !== 'rect') {
     return { direction: null };
   }
-  const p = instExtent(port, paramValues);
-  if (!p) return { direction: null };
-
   // Expand transforms so a `repeat`/`displace` on a conductor produces
   // copies that participate in adjacency checks. Expanded instances carry
   // `compId` only (no layer / id) — map each back to its source component
   // to recover those, keeping the instance's transformed cx/cy/w/h for
   // the extent math.
   const byId = new Map((solved || []).map(c => [c.id, c]));
-  const electrodes = expandTransforms(solved, paramValues)
+  const allInsts = expandTransforms(solved, paramValues);
+  // The PORT is tested at its RENDERED instance-0 pose, in the SAME frame
+  // as the electrode instances below. Testing the port at its raw BASE
+  // pose while electrodes sat at rendered poses made a group-rotated
+  // port (the −90° balun) find no flankers at all — and the emitted
+  // IntLine must lie on the FINAL (chain-transformed) sheet anyway.
+  const p0 = allInsts.find(i => i.compId === port.id && i.idx === 0);
+  const p = instExtent(p0 ? { ...p0, id: port.id, kind: port.kind } : port, paramValues);
+  if (!p) return { direction: null };
+  const electrodes = allInsts
     .map(inst => {
       const src = byId.get(inst.compId);
       if (!src || src.layer !== 'electrode' || src.id === port.id) return null;

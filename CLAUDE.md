@@ -321,7 +321,21 @@ snap that would double-constrain a rigid group; reRootSnaps routes
 moved-base endpoints through the numeric-correction path (childPoint
 measures the rendered instance-0 anchor). An UNGROUPED moved-base child
 (non-boolean) is BAKED at its solved pose in the HFSS export (+ caveat)
-— the legacy formula was off by the chain offset.
+— the legacy formula was off by the chain offset. TWO interaction twins
+keep the regime consistent (both real user bugs on the balun design):
+(1) `isPosExprActive` (posexpr.js) mirrors the NEW solver gate — a
+rigid-group CHILD's posExpr is ACTIVE (it is the intra-group natural),
+so a group drag folds the child's exprs like every other member's;
+skipping it folded 29 naturals but not the child's and permanently
+deformed the assembly. Callers pass (comp, snaps, components,
+paramValues) — without the pool/pv the legacy inert answer applies.
+(2) `detectPortIntegrationLine` (lumpedPort.js) evaluates the PORT at
+its RENDERED instance-0 pose in the SAME frame as the electrode
+instances, with ROTATION-AWARE extents (numeric instance rotation swaps
+a ±90° rect's span; raw string rotations keep legacy) — a group-rotated
+port found no flankers because it was tested at the base pose against
+rendered electrodes. The IntLine emitter uses det.line (rendered
+numerics), which is where the chain-transformed sheet actually sits.
 Canvas parity: `onAnchorClick` measures child-side offsets at the
 rendered instance-0 anchor for moved bases (movedBaseIds), and an idx-0
 instance-dot pick may REVERSE into the child role (only true replicas
