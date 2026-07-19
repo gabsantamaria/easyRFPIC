@@ -423,6 +423,20 @@ describe('group drag = external-root drag (no deformation)', () => {
       if (inc && !members.has(inc.from.compId)) { extRoot = findRoot(mid); break; }
     }
     expect(extRoot).toBe('cond1');
+    // The Canvas dragRootFor rule: EVERY member — including free ones
+    // like dyb2_c3_copy_copy (the reported deform entry point) — must
+    // map to the external root, never to itself. A self-mapping seed
+    // re-mixed the regimes and offset that member by the drag delta.
+    for (const mid of members) {
+      const grpExt = (() => {
+        for (const m2 of members) {
+          const inc = scene.snaps.find(sn => sn.to.compId === m2);
+          if (inc && !members.has(inc.from.compId)) return findRoot(m2);
+        }
+        return null;
+      })();
+      expect(grpExt ?? findRoot(mid), `dragRootFor(${mid})`).toBe('cond1');
+    }
     const solved0 = solveLayout(scene.components, scene.snaps, pv);
     const insts0 = expandTransforms(solved0, pv);
     const comps2 = scene.components.map(c => c.id === extRoot

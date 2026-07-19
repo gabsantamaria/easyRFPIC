@@ -2530,23 +2530,16 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       // so the boolean cluster moves as a single unit. Each co-mover is
       // remembered with its initial cx/cy so on mousemove we apply the
       // SAME (dx, dy) to all of them.
-      const cluster = booleanClusters.memberToCluster[id];
-      const coMoverIds = new Set([rootId]);
-      if (cluster) {
-        for (const memberId of cluster) {
-          coMoverIds.add(findSnapRoot(memberId));
-        }
-      }
       // GROUP WITH AN EXTERNAL SNAP: dragging it must co-move ONLY the
       // external chain ROOT — the snap constraint then carries the whole
       // group rigidly (exactly like dragging the capacitor/parent side).
       // Mixing regimes deformed the assembly: per-member translation
-      // folded 29 naturals by the drag delta while findSnapRoot(child)
-      // ALSO dragged the external root (moving the snap target), and the
-      // child's own natural never moved — the child ended up offset from
-      // its siblings by exactly the drag delta (real user bug on the
-      // balun). Returns the external root id, or null for a free /
-      // intra-group-only group (per-member co-move stays correct there).
+      // folded naturals by the drag delta while the snapped child's
+      // findSnapRoot walk ALSO dragged the external root (moving the
+      // snap target) — members ended up offset from each other by the
+      // drag delta (real user bug on the balun). Returns the external
+      // root id, or null for a free / intra-group-only group (per-member
+      // co-move stays correct there).
       const externalRootOfGroup = (members) => {
         for (const mid of members) {
           const inc = scene.snaps.find(sn => sn.to.compId === mid);
@@ -2554,6 +2547,30 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
         }
         return null;
       };
+      // ONE mapping for every co-mover contribution (the SEED included —
+      // clicking a FREE member of an externally-snapped group used to
+      // seed the set with the member itself before the group branch
+      // added the external root, re-mixing the regimes: that member then
+      // drifted by the drag delta while its siblings followed the root).
+      // Alt-drag keeps the raw walk (snap creation drags the clicked
+      // component alone).
+      const dragRootFor = (cid) => {
+        if (!e.altKey) {
+          const cGrp = groupsInfo.groupOfComp[cid];
+          if (cGrp) {
+            const ext = externalRootOfGroup(cGrp.members);
+            if (ext) return ext;
+          }
+        }
+        return findSnapRoot(cid);
+      };
+      const cluster = booleanClusters.memberToCluster[id];
+      const coMoverIds = new Set([dragRootFor(id)]);
+      if (cluster) {
+        for (const memberId of cluster) {
+          coMoverIds.add(dragRootFor(memberId));
+        }
+      }
       // Multi-selection co-drag: dragging an ALREADY-SELECTED member of a
       // multi-selection translates every selected root — matching the
       // arrow-nudge semantics (collectNudgeCluster expands ALL of
@@ -2568,9 +2585,7 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
       // and desync the alt preview from the committed single-comp snap.)
       if (!e.altKey && selectedIds.has(id) && selectedIds.size > 1) {
         for (const sid of selectedIds) {
-          const sGrp = groupsInfo.groupOfComp[sid];
-          const sExt = sGrp ? externalRootOfGroup(sGrp.members) : null;
-          coMoverIds.add(sExt ?? findSnapRoot(sid));
+          coMoverIds.add(dragRootFor(sid));
         }
       }
       // Whole-group click: co-move the external chain root when the group

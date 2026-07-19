@@ -333,9 +333,14 @@ And the Canvas GROUP-DRAG rule: a group with an EXTERNALLY-snapped
 member co-moves ONLY the external chain root (externalRootOfGroup in
 the drag-init; both the whole-group-click and multi-select branches) —
 the snap constraint then carries the whole group rigidly, exactly like
-dragging the parent side. Mixing regimes (per-member folds + the
-child's findSnapRoot walking OUT to the external root) offset the child
-from its 29 siblings by the drag delta every drag. Free /
+dragging the parent side. The mapping (`dragRootFor`) applies to EVERY
+co-mover contribution — the SEED (the clicked comp itself!), the
+boolean-cluster expansion, the multi-select branch, and the
+whole-group-click branch. A partial application re-mixed the regimes:
+clicking a FREE member seeded the set with the member itself before the
+group branch added the external root, so that one member drifted by
+the drag delta while its siblings followed the root (second real user
+bug, entry point dyb2_c3_copy_copy). Alt-drag keeps the raw walk. Free /
 intra-group-only groups keep per-member co-move.
 (2) `detectPortIntegrationLine` (lumpedPort.js) evaluates the PORT at
 its RENDERED instance-0 pose in the SAME frame as the electrode
