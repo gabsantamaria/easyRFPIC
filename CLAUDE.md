@@ -1587,7 +1587,12 @@ conductor LAYER's own `sheetRs`/`sheetXs` fields (LAYERS panel, shown
 only when the layer thickness matches the exporter's sheet gate
 `abs(t) < 1e-9` — keep the panel/TwoLineWizard gates aligned with that
 epsilon; verbatim HFSS exprs, `Freq`/`pi`/design vars allowed); (3)
-near-PEC default (0.001 + j0). `sheetRs`/`sheetXs` are registered in
+near-PEC default (0.001 + j0). TRUE PEC: when the RESOLVED Rs AND Xs
+are both LITERAL zero (pure-numeric '0' — identifier-bearing exprs
+never qualify, evalExpr would silently zero `Freq`), the group emits
+`AssignPerfectE` instead of a 0-ohm `AssignImpedance` (exact 0 is
+rejected as singular by some HFSS releases; same boundary name).
+`sheetRs`/`sheetXs` are registered in
 `rename-ident.js` STACK_EXPR_FIELDS and the deleteParam guard
 (PhotonicLayout.jsx) so param rename/delete can't silently orphan them —
 but deliberately NOT in `paramsForStack` (schema.js), which would
@@ -1641,7 +1646,20 @@ every expression rewritten via `renameIdentInScene` (the KEY is renamed by
 the caller — the walker rewrites references only); the group winner prefers
 the referenced name; all actions land in the safety-report NOTES.
 
-### Portless frequency sweeps
+### Waveguide relative CS + guide lines
+
+Every optical waveguide instance gets a relative coordinate system
+`<wg>_cs[_<k>]` at the guide START (centered, at slab top; X axis along
+the guide; parametric origin for the base + repeat/displace clones,
+numeric for rotated/mirrored clones), emitted LAST in the script with
+WCS forced to Global around each creation. Each CS ALSO gets a
+NON-MODEL guide line `<wg>_cs[_<k>]_line` — CreatePolyline from
+(0,0,0) to (L,0,0) IN that CS (L = the parametric wg length),
+`Flags:="NonModel#"`, `PartCoordinateSystem` bound to the CS so sweeps
+carry it along — a ready-made field-plot / integration path down the
+guide axis. Guard: tests/sweep-ui.test.js "PEC sheets + wg guide lines".
+
+## Portless frequency sweeps
 
 HFSS rejects frequency sweeps on problems with no excitations
 ("Interpolating sweeps are not supported for problems with no ports").
