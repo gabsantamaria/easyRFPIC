@@ -151,3 +151,28 @@ describe('PEC sheets + wg guide lines (D8)', () => {
     expect(script).toMatch(/PLPoint", "X:=", "0um", "Y:=", "0um", "Z:=", "0um"/);
   });
 });
+
+describe('zero-thickness native shapes (circle tuners on h_cond=0)', () => {
+  it('circle on a zero-thickness conductor: covered sheet, no sweep, in the boundary; nested subtract survivor keeps it', async () => {
+    const { makeDefaultScene, normalizeScene } = await import('../src/scene/schema.js');
+    const { resolveParams } = await import('../src/scene/params.js');
+    const { generateHfssNative } = await import('../src/export/hfss-native.js');
+    const sc = normalizeScene(makeDefaultScene());
+    sc.stack.find(l => l.role === 'conductor').thickness = '0';
+    sc.components.push(
+      { id: 'c1', kind: 'circle', layer: 'electrode', cx: 300, cy: 300, r: '20', w: '2*20', h: '2*20', cutouts: [], transforms: [], consumedBy: 'd1' },
+      { id: 'c2', kind: 'circle', layer: 'electrode', cx: 300, cy: 300, r: '12', w: '2*12', h: '2*12', cutouts: [], transforms: [], consumedBy: 'd1' },
+      { id: 'd1', kind: 'boolean', op: 'subtract', operandIds: ['c1', 'c2'], layer: 'electrode', cx: 300, cy: 300, w: '0', h: '0', cutouts: [], transforms: [] },
+    );
+    const script = generateHfssNative(sc, resolveParams(sc.params).values, {});
+    // the circle block must NOT sweep (zero vector = HFSS hard reject)
+    const c1block = script.slice(script.indexOf('Name:=", "c1"'), script.indexOf('Name:=", "c1"') + 900).split('except')[0];
+    expect(/SweepAlongVector/.test(c1block)).toBe(false);
+    expect(script).not.toMatch(/SweepVectorZ:=", "0\.0000um"/);
+    // the subtract survivor (renamed to the boolean id) carries the boundary
+    const m = script.match(/Assign(?:PerfectE|Impedance)\(\s*\["NAME:PEC_sheets\w*",\s*"Objects:=", \[([^\]]+)\]/);
+    expect(m).toBeTruthy();
+    expect(m[1]).toContain('"d1"');
+    expect(m[1]).not.toContain('"c2"'); // consumed tool must not linger
+  });
+});

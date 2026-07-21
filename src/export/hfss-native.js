@@ -2903,6 +2903,13 @@ except Exception as e:
       // primitive here is axis-aligned.
       const ppShape = parametricPos[c.id];
       const isPortSheet = (c.layer === 'port');
+      // ZERO-THICKNESS conductors: native shapes stay 2-D covered sheets
+      // (joining the PEC_sheets boundary) — sweeping by a zero vector is
+      // an HFSS hard reject ("Start point and end point cannot be the
+      // same"), which left the parts missing and cascaded into
+      // PK_ERROR_missing_geom on every boolean that consumed them (real
+      // user bug: circle tuners on an h_cond=0 layer).
+      const isSheetNS = (c.layer === 'electrode') && Math.abs(zSize) < 1e-9;
       const isNativeShape = (shapeKind === 'circle' || shapeKind === 'ellipse' || shapeKind === 'polygon');
 
       // ── POLYLINE TRACE (parametric CreatePolyline + XSection sweep) ──
@@ -3873,7 +3880,7 @@ except Exception as e:
         code += `set_var("${cyShapeVar}", "${cyValExpr}")\n`;
         code += `try:
     _delete_geom_if_exists("${id}")
-    ${createCall}${isPortSheet ? '' : `
+    ${createCall}${(isPortSheet || isSheetNS) ? '' : `
     oEditor.SweepAlongVector(
         ["NAME:Selections", "Selections:=", "${id}", "NewPartsModelFlag:=", "Model"],
         ["NAME:VectorSweepParameters",
@@ -3891,6 +3898,9 @@ except Exception as e:
         if (c.layer === 'electrode') emittedElecNames.push(id);
         else if (c.layer === 'waveguide') emittedWgNames.push(id);
         else if (c.layer === 'port') emittedPortNames.push(id);
+        // Zero-thickness native-shape sheets join the impedance/PEC
+        // boundary like every other conductor sheet.
+        if (isSheetNS) registerSheet(id, c);
         continue; // skip the tessellated-polyline path below
       }
 
@@ -3953,7 +3963,7 @@ except Exception as e:
          "Transparency:=", ${isPortSheet ? '0.5' : '0.0'},
          "PartCoordinateSystem:=", "Global",
          "MaterialValue:=", "\\"${ascii(materialName)}\\"",
-         "SolveInside:=", ${c.layer === 'waveguide' ? 'True' : (isPortSheet ? 'True' : 'False')}])${isPortSheet ? '' : `
+         "SolveInside:=", ${c.layer === 'waveguide' ? 'True' : (isPortSheet ? 'True' : 'False')}])${(isPortSheet || isSheetNS) ? '' : `
     oEditor.SweepAlongVector(
         ["NAME:Selections", "Selections:=", "${id}", "NewPartsModelFlag:=", "Model"],
         ["NAME:VectorSweepParameters",
@@ -3971,6 +3981,7 @@ except Exception as e:
       if (c.layer === 'electrode') emittedElecNames.push(id);
       else if (c.layer === 'waveguide') emittedWgNames.push(id);
       else if (c.layer === 'port') emittedPortNames.push(id);
+      if (isSheetNS) registerSheet(id, c);
       // For racetracks: the outer ring above is the OUTER perimeter of
       // the waveguide band. We also need to subtract an INNER cylinder-
       // like body so the result is the hollow band, not a filled disc.

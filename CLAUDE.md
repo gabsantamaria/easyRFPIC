@@ -1592,6 +1592,14 @@ are both LITERAL zero (pure-numeric '0' — identifier-bearing exprs
 never qualify, evalExpr would silently zero `Freq`), the group emits
 `AssignPerfectE` instead of a 0-ohm `AssignImpedance` (exact 0 is
 rejected as singular by some HFSS releases; same boundary name).
+NATIVE SHAPES on zero-thickness conductors (circle/ellipse/polygon +
+the tessellated racetrack fallback) stay 2-D covered sheets — the
+`isSheetNS` gate skips the SweepAlongVector (a zero sweep vector is an
+HFSS hard reject, "Start point and end point cannot be the same", which
+left the parts missing and cascaded PK_ERROR_missing_geom into every
+boolean consuming them — the circle-tuner bug) and registers them for
+the boundary; nested subtract chains keep the boundary on the final
+survivor via the existing base0Id rename rules.
 `sheetRs`/`sheetXs` are registered in
 `rename-ident.js` STACK_EXPR_FIELDS and the deleteParam guard
 (PhotonicLayout.jsx) so param rename/delete can't silently orphan them —
