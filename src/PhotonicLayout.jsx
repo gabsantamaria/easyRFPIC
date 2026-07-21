@@ -3310,6 +3310,29 @@ export default function App() {
         onClick: () => duplicateIds(multi ? selectedIds : new Set([compId])) },
       { label: multi ? `Download selection (${selectedIds.size})` : 'Download shape', icon: Download,
         onClick: () => handleDownloadSelection(multi ? selectedIds : new Set([compId])) },
+      // Export exclusion: canvas-only features (reference outlines,
+      // construction geometry, kept alternates). Excluded parts still
+      // solve/snap/render (dimmed) but no physical exporter emits them.
+      // Toggling acts on the whole selection, so a group click excludes
+      // the entire group in one action. Consumed operands are skipped —
+      // the consuming boolean's flag governs the cluster.
+      (() => {
+        const ids = multi ? selectedIds : new Set([compId]);
+        const targets = scene.components.filter(cc => ids.has(cc.id) && !cc.consumedBy);
+        const anyIncluded = targets.some(cc => !cc.exportExclude);
+        return {
+          label: anyIncluded
+            ? (targets.length > 1 ? `Exclude from export (${targets.length})` : 'Exclude from export')
+            : (targets.length > 1 ? `Include in export (${targets.length})` : 'Include in export'),
+          onClick: () => updateScene(prev => ({
+            ...prev,
+            components: prev.components.map(cc => (ids.has(cc.id) && !cc.consumedBy)
+              ? { ...cc, exportExclude: anyIncluded }
+              : cc),
+          })),
+          disabled: targets.length === 0,
+        };
+      })(),
       { divider: true },
       { label: multi ? `Delete (${selectedIds.size})` : 'Delete', icon: Trash2,
         onClick: () => deleteComp(multi ? selectedIds : new Set([compId])), hint: 'Del' },
@@ -5509,6 +5532,17 @@ export default function App() {
     // WITHOUT that operand (a subtract loses its hole; a union whose
     // operand[0] is unassigned inherits 'gdsundef' and drops the whole
     // cluster) while the canvas renders it. Assign a layer first.
+    // User-excluded shapes are non-model too — a boolean built on one
+    // would silently lose the operand in every exporter. Include it
+    // first, or exclude the finished boolean instead.
+    const exclOperand = ids.find(id => {
+      const cc = scene.components.find(x => x.id === id);
+      return cc && cc.exportExclude && !cc.consumedBy;
+    });
+    if (exclOperand) {
+      alertDialog(`"${exclOperand}" is excluded from export — it cannot participate in boolean operations (the exported boolean would silently lose this operand). Re-include it first, or exclude the finished boolean instead.`, 'Cannot combine');
+      return;
+    }
     const undefOperand = ids.find(id => scene.components.find(cc => cc.id === id)?.layer === 'gdsundef');
     if (undefOperand) {
       alertDialog(`"${undefOperand}" is an unassigned GDS import — assign it a canvas layer in the Inspector (GDS import block) before using it in a boolean, or the exported boolean would silently lose this operand.`, 'Cannot combine');
@@ -8842,6 +8876,44 @@ export default function App() {
                     </div>
                   );
                 })()}
+                {/* Export exclusion: canvas-only feature flag. Hidden for
+                    consumed operands (the consuming boolean's flag governs
+                    the whole cluster). The toggle applies to EVERY selected
+                    non-consumed component, so a whole-group selection
+                    excludes the group in one click. */}
+                {!selected.consumedBy && (
+                  <div className="mt-2">
+                    <label
+                      className="flex items-center gap-2 text-xs cursor-pointer select-none"
+                      title="Excluded components stay on the canvas (they solve, snap, and render dimmed) but are skipped by EVERY physical export: HFSS native, pyAEDT, GDS, gdsfactory, the 3-D preview, and the analysis wizards."
+                    >
+                      <input
+                        type="checkbox"
+                        checked={!!selected.exportExclude}
+                        onChange={(e) => {
+                          const flag = e.target.checked;
+                          const ids = selectedIds.size > 1 ? selectedIds : new Set([selected.id]);
+                          updateScene(prev => ({
+                            ...prev,
+                            components: prev.components.map(cc => (ids.has(cc.id) && !cc.consumedBy)
+                              ? { ...cc, exportExclude: flag }
+                              : cc),
+                          }));
+                        }}
+                        className="accent-amber-500"
+                      />
+                      <span className={selected.exportExclude ? 'text-amber-300' : 'text-slate-300'}>
+                        Exclude from export{selectedIds.size > 1 ? ` (${selectedIds.size} selected)` : ''}
+                      </span>
+                    </label>
+                    {selected.exportExclude && (
+                      <p className="text-[9px] text-amber-400 mt-1 leading-snug">
+                        Canvas-only: skipped by every physical export (HFSS, pyAEDT, GDS,
+                        3-D preview). Snaps through this shape still resolve parametrically.
+                      </p>
+                    )}
+                  </div>
+                )}
                 {selected.kind === 'boolean' ? (
                   // Derived boolean component: no editable w/h (geometry is
                   // determined by operands + boolean op). Show op + operands

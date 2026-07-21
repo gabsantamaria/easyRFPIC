@@ -865,7 +865,7 @@ panel eye (canvas-only, scene/exports untouched); deletion is the normal
 Delete-key / context-menu path like any component.
 
 **Non-model contract** (`isNonModelComponent(c)` in schema.js — layer ===
-'section' OR 'gdsundef'): every exporter filters it AFTER solving
+'section' OR 'gdsundef' OR `exportExclude`): every exporter filters it AFTER solving
 (`solvedAll` → `solved`; hfss-native computes
 `computeParametricPositions` on `solvedAll` so a child snapped to a
 non-model comp still resolves), scene3d skips it, figure SVG/PDF export
@@ -874,8 +874,18 @@ it before the cell build, `createBoolean` rejects it as an operand,
 `layerVisKey` gives each its own eye key ('section' / 'gdsundef').
 'section' is an annotation; 'gdsundef' is an UNASSIGNED GDS import
 (geometry-in-waiting — no stack layer ⇒ no Z/thickness/material; see
-"GDS import" below). Guard: tests/section-line.test.js +
-tests/gds-import.test.js.
+"GDS import" below); `exportExclude` is a USER-flagged canvas-only
+component (Inspector checkbox — applies to the whole selection, so a
+group click excludes the group — or the context-menu toggle; excluded
+shapes render ghosted at 0.35×, still solve/snap, and snap chains
+THROUGH them stay parametric in HFSS). CLUSTER RULE: normalizeScene
+SYNCS the flag from a boolean's TOP-LEVEL root down onto every consumed
+operand (set AND clear) — excluding a boolean removes its operand parts
+from the exports, and a stray operand flag self-heals (a half-excluded
+cluster would silently corrupt the exported boolean). createBoolean
+rejects an excluded operand for the same reason. Guard:
+tests/section-line.test.js + tests/gds-import.test.js +
+tests/export-exclude.test.js.
 
 **Cross-section extraction** (`src/scene/cross-section.js`, pure —
 tests/cross-section.test.js): `buildCrossSection(scene, pv, sectionCompId)`

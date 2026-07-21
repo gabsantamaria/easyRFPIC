@@ -37,7 +37,21 @@ import defaultSceneJson from './default-scene.json' with { type: 'json' };
 // where the canvas puts them, and hfss-native computes parametric
 // positions on the FULL solved list.)
 export function isNonModelComponent(c) {
-  return !!c && (c.layer === 'section' || c.layer === 'gdsundef');
+  // Three ways a component is CANVAS-ONLY (never emitted by any physical
+  // exporter — HFSS native, pyAEDT, GDS, gdsfactory, 3-D preview,
+  // two-line, Q2D/Q3D — while still solving, snapping, and rendering):
+  //   - 'section'  : cross-section cut annotation
+  //   - 'gdsundef' : unassigned GDS import (geometry-in-waiting)
+  //   - exportExclude: USER-flagged exclusion (Inspector checkbox /
+  //     context menu) — reference outlines, construction geometry,
+  //     alternates kept on canvas. The TOP-LEVEL consuming boolean's
+  //     flag governs a whole cluster: normalizeScene SYNCS the flag
+  //     down onto every consumed operand (set AND clear), so excluding
+  //     a boolean removes its operand parts from the exports too, and
+  //     an individually-flagged operand self-heals to its root's state
+  //     (a half-excluded cluster would silently corrupt the exported
+  //     boolean — same hazard class as 'gdsundef' operands).
+  return !!c && (c.layer === 'section' || c.layer === 'gdsundef' || !!c.exportExclude);
 }
 
 // ----------------------------------------------------------------------
@@ -579,6 +593,34 @@ export function normalizeScene(s) {
     simSetup.appendMode = simSetup.appendToActive ? 'design' : 'project';
   }
 
+  // exportExclude CLUSTER SYNC: every consumed operand mirrors its
+  // TOP-LEVEL consuming boolean's flag (set AND clear, nested booleans
+  // included, cycle-guarded). Excluding a boolean therefore removes its
+  // operand parts from every export, and a stray flag on an operand
+  // self-heals to the root's state — a half-excluded cluster would
+  // silently corrupt the exported boolean.
+  {
+    const byIdX = new Map(migratedComponents.map(c => [c.id, c]));
+    const rootFlag = (c) => {
+      let cur = c;
+      const seen = new Set();
+      while (cur && cur.consumedBy && !seen.has(cur.id)) {
+        seen.add(cur.id);
+        const parent = byIdX.get(cur.consumedBy);
+        if (!parent) break;
+        cur = parent;
+      }
+      return !!(cur && cur.exportExclude);
+    };
+    migratedComponents = migratedComponents.map(c => {
+      if (!c.consumedBy) return c;
+      const want = rootFlag(c);
+      if (!!c.exportExclude === want) return c;
+      const next = { ...c };
+      if (want) next.exportExclude = true; else delete next.exportExclude;
+      return next;
+    });
+  }
   return {
     params,
     components: migratedComponents,

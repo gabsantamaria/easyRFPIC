@@ -21,7 +21,7 @@
 // 2-ports don't couple. lineA's components are merged BEFORE lineB's, which —
 // because HFSS numbers lumped ports in creation (= component) order — fixes the
 // S-indices to 1,2 for line A and 3,4 for line B. The wizard verifies this.
-import { normalizeScene } from './schema.js';
+import { normalizeScene, isNonModelComponent } from './schema.js';
 import { makeCellFromSelection, instantiateCell } from './cells.js';
 import { resolveParams, evalExpr } from './params.js';
 import { solveLayout } from './solver.js';
@@ -396,7 +396,7 @@ export function buildTwoLineScene(scene, cfg) {
     }
   }
   const allIds = (src.components || [])
-    .filter((c) => c.layer !== 'section')
+    .filter((c) => !isNonModelComponent(c))
     .map((c) => c.id);
   if (allIds.length === 0) throw new Error('The design has no components to build a line from.');
 

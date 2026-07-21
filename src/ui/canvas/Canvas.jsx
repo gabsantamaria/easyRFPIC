@@ -4561,7 +4561,10 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
           // washed-out (Illustrator's dimmed context). Purely visual —
           // solver/export/snap targeting all still see the full scene.
           const isoDimB = isoMembers && !isoMembers.has(b.id) ? 0.16 : 1;
-          const fillOpacity = style.opacity * isoDimB;
+          // Export-excluded clusters read as ghosts: still editable and
+          // snappable, but visibly not part of the physical design.
+          const exclDimB = b.exportExclude ? 0.35 : 1;
+          const fillOpacity = style.opacity * isoDimB * exclDimB;
           const accent = b.op === 'union' ? '#10b981'
             : b.op === 'intersect' ? '#22d3ee'
             : '#f59e0b';
@@ -4873,7 +4876,10 @@ export function Canvas({ scene, updateScene, selectedId, selectedIds, setSelecti
                 // primitive still reads as the "primary" geometry the user
                 // can drag.
                 const isoDim = isoMembers && !isoMembers.has(c.id) ? 0.16 : 1;
-                const instOpacity = (isBase ? style.opacity : (style.opacity * 0.85)) * isoDim;
+                // Export-excluded shapes render ghosted (normalizeScene
+                // syncs the flag across boolean clusters from the root).
+                const exclDim = c.exportExclude ? 0.35 : 1;
+                const instOpacity = (isBase ? style.opacity : (style.opacity * 0.85)) * isoDim * exclDim;
                 const rotAttr = inst.rotation ? `rotate(${-inst.rotation} ${inst.cx} ${-inst.cy})` : undefined;
                 // Pick the right SVG primitive for this shape. Rect uses
                 // <rect> for crisp axis-aligned edges; everything else uses
