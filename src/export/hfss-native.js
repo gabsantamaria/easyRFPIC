@@ -2484,6 +2484,109 @@ except:
   // (CreateRelativeCS sets the new CS as active in some versions, which
   // would shift the interpretation of any later geometry's coordinates).
   const relativeCsDefs = [];
+  // ── Tangent subtract-tool pads ──────────────────────────────────────
+  // A subtract/punch TOOL rect whose edge sits EXACTLY on the blank's
+  // bbox extreme (tool dims parametrically tied to the blank — e.g. a
+  // split-ring tuner: a cut rect of height 2*tuner_R centered on a
+  // circle of r=tuner_R, or a slit rect of width tuner_R ending exactly
+  // at the circle's apex) makes the tool face exactly TANGENT to the
+  // blank's curved face. Parasolid rejects that boolean
+  // (PK_ERROR_missing_geom / "invalid parameters to Subtract") — a real
+  // shipped failure. Fix: inflate each tangent tool edge OUTWARD by
+  // 10 nm. Beyond the tangent point there is no blank material, so the
+  // subtract result is geometrically identical (same trick as the 3-D
+  // viewer's ±10 nm CSG inflation); because the tie is parametric, the
+  // constant pad stays valid under HFSS-side sweeps. Only unrotated,
+  // fillet-less, transform-less electrode rect tools are padded; every
+  // padded edge is surfaced in the safety report.
+  const TANGENT_TOOL_PAD_UM = 0.01;
+  const TANGENT_TOOL_EPS_UM = 1e-6;
+  const tangentToolPads = new Map(); // toolCompId -> {e,w,n,s}
+  {
+    const solvedById = new Map(solved.map((cc) => [cc.id, cc]));
+    const numDim = (v) => (Number.isFinite(v) ? v : evalExpr(String(v ?? '0'), paramValues));
+    // TRUE bbox of the blank, kind-aware. The stored w/h AABB can be
+    // STALE for circles/ellipses/polygons whose r was re-bound without
+    // re-deriving the '2*<auto-param>' w/h (real shipped design: circ66
+    // had r='tuner_R' but w='2*circ66_r' with the old auto-param) — the
+    // emitted HFSS geometry follows r, so the tangency test must too.
+    // Boolean blanks recurse: subtract/punch → base operand (removal
+    // can't grow the outer boundary), union → union of operand boxes.
+    const blankBboxOf = (p, depth = 0) => {
+      if (!p || depth > 8) return null;
+      // Enabled transforms bail for EVERY node — including a BOOLEAN
+      // blank: its chain (Move/Rotate/DuplicateAlongLine) is emitted
+      // BEFORE the outer boolean's Subtract, so the outer subtract
+      // operates on the TRANSFORMED blank while this test would run in
+      // the base frame — a false pad there cuts real material (and the
+      // genuine tangency at the transformed pose would go unflagged).
+      // Adversarial-review find, probe-confirmed.
+      if ((p.transforms || []).some((tr) => tr && tr.enabled !== false)) return null;
+      if (p.kind === 'boolean') {
+        const ops = (p.operandIds || []).map((oid) => solvedById.get(oid));
+        if (p.op === 'subtract' || p.op === 'punch') return blankBboxOf(ops[0], depth + 1);
+        if (p.op === 'union') {
+          let out = null;
+          for (const op of ops) {
+            const bb = blankBboxOf(op, depth + 1);
+            if (!bb) return null;
+            out = out
+              ? { x0: Math.min(out.x0, bb.x0), x1: Math.max(out.x1, bb.x1), y0: Math.min(out.y0, bb.y0), y1: Math.max(out.y1, bb.y1) }
+              : bb;
+          }
+          return out;
+        }
+        return null; // intersect: outer boundary not derivable from one operand
+      }
+      // Primitive: unrotated shapes only (conservative); the
+      // transform-less gate already ran above for every node.
+      const rotP = evalExpr(p.rotation ?? '0', paramValues);
+      if (Number.isFinite(rotP) && Math.abs(rotP) > 1e-9 && p.kind !== 'circle') return null;
+      let w, h;
+      if (p.kind === 'circle' || p.kind === 'polygon') {
+        const r = evalExpr(p.r ?? '0', paramValues);
+        if (!Number.isFinite(r) || r <= 0) return null;
+        w = 2 * r; h = 2 * r;
+      } else if (p.kind === 'ellipse') {
+        const rx = evalExpr(p.rx ?? '0', paramValues);
+        const ry = evalExpr(p.ry ?? '0', paramValues);
+        if (!Number.isFinite(rx) || !Number.isFinite(ry) || rx <= 0 || ry <= 0) return null;
+        w = 2 * rx; h = 2 * ry;
+      } else if (p.kind === 'rect') {
+        w = numDim(p.w); h = numDim(p.h);
+      } else {
+        return null; // path kinds / racetrack / via / bridge: skip
+      }
+      if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return null;
+      return { x0: p.cx - w / 2, x1: p.cx + w / 2, y0: p.cy - h / 2, y1: p.cy + h / 2 };
+    };
+    for (const b of solved) {
+      if (b.kind !== 'boolean' || (b.op !== 'subtract' && b.op !== 'punch')) continue;
+      const blank = solvedById.get((b.operandIds || [])[0]);
+      const bb = blankBboxOf(blank);
+      if (!bb) continue;
+      const bx0 = bb.x0, bx1 = bb.x1, by0 = bb.y0, by1 = bb.y1;
+      for (const tid of (b.operandIds || []).slice(1)) {
+        const t = solvedById.get(tid);
+        if (!t || t.kind !== 'rect' || t.layer !== 'electrode') continue;
+        const rotT = evalExpr(t.rotation ?? '0', paramValues);
+        if (Number.isFinite(rotT) && Math.abs(rotT) > 1e-9) continue;
+        const crT = evalExpr(t.cornerRadius ?? '0', paramValues);
+        if (Number.isFinite(crT) && Math.abs(crT) > 1e-9) continue;
+        if ((t.transforms || []).some((tr) => tr && tr.enabled !== false)) continue;
+        const tw = numDim(t.w);
+        const th = numDim(t.h);
+        if (!Number.isFinite(tw) || !Number.isFinite(th) || tw <= 0 || th <= 0) continue;
+        const pads = {
+          w: Math.abs((t.cx - tw / 2) - bx0) <= TANGENT_TOOL_EPS_UM,
+          e: Math.abs((t.cx + tw / 2) - bx1) <= TANGENT_TOOL_EPS_UM,
+          s: Math.abs((t.cy - th / 2) - by0) <= TANGENT_TOOL_EPS_UM,
+          n: Math.abs((t.cy + th / 2) - by1) <= TANGENT_TOOL_EPS_UM,
+        };
+        if (pads.e || pads.w || pads.n || pads.s) tangentToolPads.set(tid, pads);
+      }
+    }
+  }
   for (const c of solved) {
     // Boolean components are emitted separately AFTER all primitives are
     // built (see the Boolean operations section below). Their operands are
@@ -4070,8 +4173,8 @@ except Exception as e:
     const isMirrorTgt = mirrorTargetIds.has(c.id);
     const pp = parametricPos[c.id];
     const mpp = isMirrorTgt ? mirrorReflectedPos(c) : null;
-    const wExprUm = exprWithUm(c.w);
-    const hExprUm = exprWithUm(c.h);
+    let wExprUm = exprWithUm(c.w);
+    let hExprUm = exprWithUm(c.h);
     let cxExprUm, cyExprUm;
     if (!isMirrorTgt && pp) {
       cxExprUm = exprWithUm(pp.cxExpr);
@@ -4088,8 +4191,25 @@ except Exception as e:
         ? 'mirror target (asymmetric shape or source without chain) - position baked numerically'
         : 'position not derivable from snap chain - baked numerically');
     }
-    const xLoExprUm = `${cxExprUm} - ${wExprUm}/2`;
-    const yLoExprUm = `${cyExprUm} - ${hExprUm}/2`;
+    let xLoExprUm = `${cxExprUm} - ${wExprUm}/2`;
+    let yLoExprUm = `${cyExprUm} - ${hExprUm}/2`;
+    // Tangent subtract-tool pad (see the tangentToolPads build above):
+    // grow each flagged edge OUTWARD by 10 nm so the tool face clears
+    // the blank's tangent boundary. xLo/yLo are built from the UNPADDED
+    // dims first, then shifted only on min-side pads, so a single-side
+    // pad moves only that edge.
+    const tPads = tangentToolPads.get(c.id);
+    if (tPads) {
+      const d = TANGENT_TOOL_PAD_UM;
+      if (tPads.w) xLoExprUm = `${xLoExprUm} - ${d}um`;
+      if (tPads.s) yLoExprUm = `${yLoExprUm} - ${d}um`;
+      const wPad = (tPads.w ? d : 0) + (tPads.e ? d : 0);
+      const hPad = (tPads.s ? d : 0) + (tPads.n ? d : 0);
+      if (wPad > 0) wExprUm = `(${wExprUm}) + ${wPad}um`;
+      if (hPad > 0) hExprUm = `(${hExprUm}) + ${hPad}um`;
+      const edges = [tPads.w && 'W', tPads.e && 'E', tPads.s && 'S', tPads.n && 'N'].filter(Boolean).join(',');
+      noteCaveat(c.id, `subtract-tool edge(s) ${edges} inflated ${d}um outward past the blank's tangent boundary (Parasolid rejects exactly-tangent boolean faces; the pad removes no material)`);
+    }
 
     // ── Rect corner fillets (D3): covered + closed CreatePolyline ──────
     // A rect with cornerRadius > 0 can't be a CreateBox / CreateRectangle

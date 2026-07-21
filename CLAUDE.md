@@ -1457,6 +1457,27 @@ Transform chain emission uses the same logic as pyAEDT (separate helper `emitTra
 output-variable + report block before `oProject.Save()` (see "2-line method
 wizard"). Absent the option, output is byte-identical to before.
 
+**Tangent subtract-tool pads** (`tangentToolPads`, generateHfssNative): a
+subtract/punch TOOL rect whose edge sits EXACTLY on the blank's true bbox
+extreme (tool dims parametrically tied to the blank — a split-ring tuner
+cutting a circle r=`tuner_R` with a rect of height `2*tuner_R` (top/bottom
+faces tangent to the cylinder) or a slit rect of width `tuner_R` ending
+exactly at the circle's apex) makes Parasolid REJECT the boolean
+(`PK_ERROR_missing_geom` / "invalid parameters to Subtract" — a real
+shipped failure). The exporter inflates each tangent tool edge OUTWARD by
+10 nm (min-side pads also shift XStart/YStart −0.01um): beyond the tangent
+point there is no blank material, so the result is geometry-identical, and
+because the tie is parametric the constant pad stays valid under HFSS-side
+sweeps. Detection uses kind-aware TRUE dims (circle/polygon → `2*r`,
+ellipse → `2*rx/ry`) — the stored w/h AABB can be STALE when the user
+re-binds `r` without re-deriving the `'2*<auto-param>'` w/h (the shipped
+design had exactly that) — and recurses boolean blanks (subtract/punch →
+base operand, union → union of operand boxes; bails on intersect, rotated
+non-circle blanks, transform chains, path kinds). Only unrotated,
+fillet-less, transform-less electrode rect TOOLS are padded; every padded
+edge lands in the safety-report NOTES. Genuine cut edges (strictly inside
+the blank) are never touched. Guard: tests/tangent-tool-pad.test.js.
+
 **Export target mode** (`options.appendMode`, shared by `generateHfssNative`
 AND `generateQ2DExtractor`) — WHERE the generated script builds. TWO defaults
 by layer, deliberately different: the EXPORTER's no-option fallback stays
