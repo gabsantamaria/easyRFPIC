@@ -453,3 +453,47 @@ describe('group drag = external-root drag (no deformation)', () => {
     }
   });
 });
+
+describe('snap-pinned path vertices re-resolve after rigid placement', () => {
+  it('a polyshape pinned to the rigid child keeps stash === render', async () => {
+    const { shapeInstanceToRing, remapPointsToInstance } = await import('../src/geometry/rings.js');
+    const { tessellatePolylinePath } = await import('../src/geometry/polyline.js');
+    // Group: rigid child A (rotate pivot:'group', snapped to external P)
+    // + polyshape K whose first vertex is PINNED to A.NW. K is a free
+    // root, placed (and its verts stashed) BEFORE the snap loop moves A —
+    // without the final re-resolve, K's stashed ring sits at A's stale
+    // pose while the canvas re-tessellation shows the true one.
+    const scene = normalizeScene({
+      params: {},
+      components: [
+        rect('A', 999, 777, { group: 'g', transforms: [{ ...ROT_G }], cxExpr: '40', cyExpr: '10' }),
+        rect('B', 100, 0, { group: 'g', transforms: [{ ...ROT_G }], cxExpr: '100', cyExpr: '0' }),
+        {
+          transforms: [{ ...ROT_G }], id: 'K', kind: 'polyshape', layer: 'electrode',
+          cx: 0, cy: 0, w: '0', h: '0', closed: true, cutouts: [], group: 'g',
+          vertices: [
+            { kind: 'snap', compId: 'A', anchor: 'NW' },
+            { kind: 'rel', dx: '30', dy: '0' },
+            { kind: 'rel', dx: '0', dy: '20' },
+          ],
+        },
+        rect('P', 300, 200),
+      ],
+      snaps: [{ id: 's1', from: { compId: 'P', anchor: 'S' }, to: { compId: 'A', anchor: 'N' }, dx: '0', dy: '0' }],
+      groups: [{ id: 'gg', name: 'g', memberIds: ['A', 'B', 'K'], aliases: {} }],
+    });
+    const pv = {};
+    const solved = solveLayout(scene.components, scene.snaps, pv);
+    const insts = expandTransforms(solved, pv);
+    const byId = Object.fromEntries(solved.map(c => [c.id, c]));
+    const K = byId.K;
+    const inst = insts.find(i => i.compId === 'K' && i.idx === 0);
+    const render = remapPointsToInstance(tessellatePolylinePath(K, byId, pv, insts), inst, K.cx, K.cy);
+    const stashRing = shapeInstanceToRing(inst);
+    expect(stashRing.length).toBeGreaterThanOrEqual(3);
+    for (let i = 0; i < Math.min(render.length, stashRing.length); i++) {
+      expect(stashRing[i][0], `vx${i}`).toBeCloseTo(render[i][0], 9);
+      expect(stashRing[i][1], `vy${i}`).toBeCloseTo(render[i][1], 9);
+    }
+  });
+});

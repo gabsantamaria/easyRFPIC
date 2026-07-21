@@ -851,6 +851,26 @@ export function solveLayout(components, snaps, paramValues) {
     }
     if (!changed) break;
   }
+  // FINAL RE-RESOLVE of snap-pinned path vertices. A path comp is placed
+  // (and its _resolvedVerts/displayBbox stashed) as soon as ITS OWN
+  // position is known — possibly BEFORE a vertex-pin TARGET reaches its
+  // final pose (the rigid-group snap child is placed by the snap loop
+  // AFTER the free roots that pin to it). Cluster/rigid shifts only
+  // TRANSLATE the stash, which is wrong when the pin target moved by a
+  // DIFFERENT delta — the stale stash then desynced every stash consumer
+  // (3-D viewer, GDS, boolean masks, the displayBbox frame) from the
+  // canvas <path> render, which re-tessellates against the final map
+  // every frame (real user bug: dyb2_k01 pinned to the rigid child sat
+  // 67 µm off in the 3-D view only). Re-resolving against the FINAL
+  // solved state makes the stash and the render agree by construction.
+  for (const c of components) {
+    const p = byId[c.id];
+    if (!p || (p.kind !== 'polyline' && p.kind !== 'polyshape')) continue;
+    if (!(p.vertices || []).some(v => v && v.kind === 'snap')) continue;
+    if (p.kind === 'polyline') refreshPolylineBbox(p); else refreshPolyshapeBbox(p);
+    if (Number.isFinite(p.w)) workingPV[`_comp_${p.id}_w`] = p.w;
+    if (Number.isFinite(p.h)) workingPV[`_comp_${p.id}_h`] = p.h;
+  }
   return Object.values(byId);
 }
 
