@@ -1659,7 +1659,7 @@ NON-MODEL guide line `<wg>_cs[_<k>]_line` — CreatePolyline from
 carry it along — a ready-made field-plot / integration path down the
 guide axis. Guard: tests/sweep-ui.test.js "PEC sheets + wg guide lines".
 
-## Portless frequency sweeps
+### Portless frequency sweeps
 
 HFSS rejects frequency sweeps on problems with no excitations
 ("Interpolating sweeps are not supported for problems with no ports").
