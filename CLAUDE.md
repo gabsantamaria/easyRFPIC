@@ -1465,10 +1465,13 @@ faces tangent to the cylinder) or a slit rect of width `tuner_R` ending
 exactly at the circle's apex) makes Parasolid REJECT the boolean
 (`PK_ERROR_missing_geom` / "invalid parameters to Subtract" — a real
 shipped failure). The exporter inflates each tangent tool edge OUTWARD by
-10 nm (min-side pads also shift XStart/YStart −0.01um): beyond the tangent
+0.1 µm (min-side pads also shift XStart/YStart −0.1um): beyond the tangent
 point there is no blank material, so the result is geometry-identical, and
 because the tie is parametric the constant pad stays valid under HFSS-side
-sweeps. Detection uses kind-aware TRUE dims (circle/polygon → `2*r`,
+sweeps. PAD SIZE IS LOAD-BEARING: Parasolid's modeling tolerance is
+1e-8 m = 0.01 µm — a 10 nm pad sits exactly AT the tolerance, the kernel
+still treats the edge as coincident, and the boolean fails identically
+(shipped + observed on the real design before the bump to 0.1 µm). Detection uses kind-aware TRUE dims (circle/polygon → `2*r`,
 ellipse → `2*rx/ry`) — the stored w/h AABB can be STALE when the user
 re-binds `r` without re-deriving the `'2*<auto-param>'` w/h (the shipped
 design had exactly that) — and recurses boolean blanks (subtract/punch →

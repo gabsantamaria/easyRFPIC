@@ -7,9 +7,12 @@
 // tuner cut a circle (r=tuner_R) with a rect of height 2*tuner_R (top/
 // bottom tangent) and a slit rect of width tuner_R ending exactly at the
 // circle's apex. generateHfssNative inflates each tangent tool edge
-// OUTWARD by 10 nm — beyond the tangent point there is no blank material,
+// OUTWARD by 0.1 µm — beyond the tangent point there is no blank material,
 // so the subtract result is geometrically identical, and because the tie
 // is parametric the constant pad stays valid under HFSS-side sweeps.
+// 0.1 µm, NOT 10 nm: Parasolid's modeling tolerance is 1e-8 m = 0.01 µm,
+// and a pad exactly AT the tolerance is still treated as coincident (the
+// 10 nm version shipped and failed identically on the real design).
 //
 // Detection must use kind-aware TRUE dims (circle → 2*r), because the
 // stored w/h AABB can be stale (the shipped design had r='tuner_R' but
@@ -60,11 +63,11 @@ describe('tangent subtract-tool pads', () => {
       boolOp('d1', 'subtract', ['blank', 'tool']),
     ], { R0: { expr: '25', unit: 'µm' } });
     const r = recordFor(script, 'tool');
-    expect(r.h).toContain('+ 0.02um');       // both Y edges padded
-    expect(r.y).toContain('- 0.01um');       // min side shifted down
-    expect(r.w).not.toContain('0.01um');     // E edge is a REAL cut — untouched
-    expect(r.x).not.toContain('0.01um');
-    expect(script).toContain('tool: subtract-tool edge(s) S,N inflated 0.01um');
+    expect(r.h).toContain('+ 0.2um');       // both Y edges padded
+    expect(r.y).toContain('- 0.1um');       // min side shifted down
+    expect(r.w).not.toContain('0.1um');     // E edge is a REAL cut — untouched
+    expect(r.x).not.toContain('0.1um');
+    expect(script).toContain('tool: subtract-tool edge(s) S,N inflated 0.1um');
   });
 
   it('pads only the apex edge of a slit tool ending exactly at the circle apex, and survives a STALE w/h AABB', () => {
@@ -78,10 +81,10 @@ describe('tangent subtract-tool pads', () => {
       boolOp('d1', 'subtract', ['blank', 'slit']),
     ], { R0: { expr: '25', unit: 'µm' }, stale_r: { expr: '31.048', unit: 'µm' }, G0: { expr: '4', unit: 'µm' } });
     const r = recordFor(script, 'slit');
-    expect(r.w).toContain('+ 0.01um');       // apex edge only
-    expect(r.x).not.toContain('0.01um');     // W edge inside the blank — untouched
-    expect(r.h).not.toContain('0.01um');
-    expect(script).toContain('slit: subtract-tool edge(s) E inflated 0.01um');
+    expect(r.w).toContain('+ 0.1um');       // apex edge only
+    expect(r.x).not.toContain('0.1um');     // W edge inside the blank — untouched
+    expect(r.h).not.toContain('0.1um');
+    expect(script).toContain('slit: subtract-tool edge(s) E inflated 0.1um');
   });
 
   it('recurses chained subtract blanks to the base primitive', () => {
@@ -95,8 +98,8 @@ describe('tangent subtract-tool pads', () => {
       boolOp('d2', 'subtract', ['d1', 'cut2']),
     ], { R0: { expr: '25', unit: 'µm' }, G0: { expr: '4', unit: 'µm' } });
     const r = recordFor(script, 'cut2');
-    expect(r.w).toContain('+ 0.01um');
-    expect(script).toContain('cut2: subtract-tool edge(s) E inflated 0.01um');
+    expect(r.w).toContain('+ 0.1um');
+    expect(script).toContain('cut2: subtract-tool edge(s) E inflated 0.1um');
   });
 
   it('leaves non-tangent tools and non-subtract booleans byte-identical', () => {
@@ -137,7 +140,7 @@ describe('tangent subtract-tool pads', () => {
     expect(moved).not.toContain('subtract-tool edge');
     // Same chain DISABLED: genuine tangency again — pad required.
     const still = mk([{ id: 't1', kind: 'displace', enabled: false, dx: '10', dy: '0' }]);
-    expect(still).toContain('tool: subtract-tool edge(s) E inflated 0.01um');
+    expect(still).toContain('tool: subtract-tool edge(s) E inflated 0.1um');
   });
 
   it('skips rotated and transform-carrying tools (conservative gate)', () => {

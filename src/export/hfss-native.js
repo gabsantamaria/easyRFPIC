@@ -2493,13 +2493,18 @@ except:
   // blank's curved face. Parasolid rejects that boolean
   // (PK_ERROR_missing_geom / "invalid parameters to Subtract") — a real
   // shipped failure. Fix: inflate each tangent tool edge OUTWARD by
-  // 10 nm. Beyond the tangent point there is no blank material, so the
-  // subtract result is geometrically identical (same trick as the 3-D
-  // viewer's ±10 nm CSG inflation); because the tie is parametric, the
-  // constant pad stays valid under HFSS-side sweeps. Only unrotated,
-  // fillet-less, transform-less electrode rect tools are padded; every
-  // padded edge is surfaced in the safety report.
-  const TANGENT_TOOL_PAD_UM = 0.01;
+  // 0.1 µm. Beyond the tangent point there is no blank material, so the
+  // subtract result is geometrically identical; because the tie is
+  // parametric, the constant pad stays valid under HFSS-side sweeps.
+  // PAD SIZE IS LOAD-BEARING: Parasolid's modeling tolerance is 1e-8 m
+  // = 0.01 µm — a 10 nm pad sits EXACTLY at the tolerance, so the
+  // kernel still treats the padded edge as coincident and the boolean
+  // fails identically (shipped + observed on the real design). 0.1 µm
+  // = 10× kernel tolerance and well above the auto model-resolution of
+  // a few-mm chip. Only unrotated, fillet-less, transform-less
+  // electrode rect tools are padded; every padded edge is surfaced in
+  // the safety report.
+  const TANGENT_TOOL_PAD_UM = 0.1;
   const TANGENT_TOOL_EPS_UM = 1e-6;
   const tangentToolPads = new Map(); // toolCompId -> {e,w,n,s}
   {
