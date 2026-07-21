@@ -5865,9 +5865,60 @@ except Exception as e:
       const toolNames = [...toolSet];
       if (toolNames.length > 0) {
         const toolList = toolNames.join(',');
-        code += `oEditor.Subtract(
-    ["NAME:Selections", "Blank Parts:=", "${id}", "Tool Parts:=", "${toolList}"],
-    ["NAME:SubtractParameters", "KeepOriginals:=", True])
+        // CLONE + UNITE + SUBTRACT — never subtract the device parts
+        // directly when there is more than one. HFSS executes a
+        // multi-tool Subtract sequentially, and fractured GDS layers
+        // contain EXACTLY ABUTTING solids: once an earlier tool's cavity
+        // is cut, a later abutting tool's face lies exactly ON the
+        // cavity wall — a partial coincident-face boolean that Parasolid
+        // rejects (PK_ERROR_missing_geom) AND nulls the blank, leaving
+        // the design without its cladding (real shipped failure,
+        // localized by a per-tool diagnostic: gds1_12 abutting
+        // gds1_7/gds1_8). Uniting clones of the tools FIRST dissolves
+        // the shared faces, then ONE subtract of the united body is
+        // clean. Clone names are discovered at RUNTIME via a
+        // before/after object-list diff (clipboard Paste naming is
+        // release-dependent); the device parts themselves are untouched.
+        // Any failure falls back to the legacy direct multi-tool
+        // subtract so the script still degrades to the old behavior.
+        code += `try:
+    _clad_before = []
+    for _grp in ["Solids", "Sheets", "Unclassified"]:
+        try:
+            _clad_before += list(oEditor.GetObjectsInGroup(_grp))
+        except:
+            pass
+    oEditor.Copy(["NAME:Selections", "Selections:=", "${toolList}"])
+    oEditor.Paste()
+    _clad_new = []
+    for _grp in ["Solids", "Sheets", "Unclassified"]:
+        try:
+            _clad_new += [n for n in oEditor.GetObjectsInGroup(_grp) if n not in _clad_before and n not in _clad_new]
+        except:
+            pass
+    if len(_clad_new) == 0:
+        raise Exception("clipboard clone produced no parts")
+    if len(_clad_new) > 1:
+        oEditor.Unite(
+            ["NAME:Selections", "Selections:=", ",".join(_clad_new), "NewPartsModelFlag:=", "Model"],
+            ["NAME:UniteParameters", "KeepOriginals:=", False])
+    oEditor.Subtract(
+        ["NAME:Selections", "Blank Parts:=", "${id}", "Tool Parts:=", _clad_new[0]],
+        ["NAME:SubtractParameters", "KeepOriginals:=", False])
+except Exception as _e_clad:
+    try:
+        oDesktop.AddMessage("", "", 1, "Cladding clone-unite subtract failed (" + str(_e_clad) + "); falling back to direct subtract")
+    except:
+        pass
+    try:
+        oEditor.Subtract(
+            ["NAME:Selections", "Blank Parts:=", "${id}", "Tool Parts:=", "${toolList}"],
+            ["NAME:SubtractParameters", "KeepOriginals:=", True])
+    except Exception as _e_clad2:
+        try:
+            oDesktop.AddMessage("", "", 1, "Cladding subtract failed: " + str(_e_clad2))
+        except:
+            pass
 `;
       }
     }
