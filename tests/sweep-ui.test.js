@@ -107,3 +107,47 @@ describe('param.sweep metadata', () => {
     expect(out.params.gap_sig.sweep).toEqual(SWEEP);
   });
 });
+
+describe('PEC sheets + wg guide lines (D8)', () => {
+  it('literal Rs=0 Xs=0 zero-thickness layer emits AssignPerfectE (not impedance)', async () => {
+    const { makeDefaultScene, normalizeScene } = await import('../src/scene/schema.js');
+    const { resolveParams } = await import('../src/scene/params.js');
+    const { generateHfssNative } = await import('../src/export/hfss-native.js');
+    const sc = normalizeScene(makeDefaultScene());
+    const cond = sc.stack.find(l => l.role === 'conductor');
+    cond.thickness = '0';
+    cond.sheetRs = '0';
+    cond.sheetXs = '0';
+    const script = generateHfssNative(sc, resolveParams(sc.params).values, {});
+    expect(script).toContain('AssignPerfectE');
+    expect(script).not.toMatch(/AssignImpedance\(\s*\["NAME:PEC_sheets/);
+    // an EXPRESSION Xs (kinetic inductance) must never be misread as zero
+    const sc2 = normalizeScene(makeDefaultScene());
+    const c2 = sc2.stack.find(l => l.role === 'conductor');
+    c2.thickness = '0'; c2.sheetRs = '0'; c2.sheetXs = '2*pi*Freq*10e-12';
+    const s2 = generateHfssNative(sc2, resolveParams(sc2.params).values, {});
+    expect(s2).toContain('AssignImpedance');
+    expect(s2).not.toContain('AssignPerfectE');
+    // untyped default stays the near-PEC impedance sheet
+    const sc3 = normalizeScene(makeDefaultScene());
+    sc3.stack.find(l => l.role === 'conductor').thickness = '0';
+    const s3 = generateHfssNative(sc3, resolveParams(sc3.params).values, {});
+    expect(s3).toContain('AssignImpedance');
+    expect(s3).not.toContain('AssignPerfectE');
+  });
+
+  it('every waveguide CS gets a NonModel guide line spanning the wg length', async () => {
+    const { makeDefaultScene } = await import('../src/scene/schema.js');
+    const { resolveParams } = await import('../src/scene/params.js');
+    const { generateHfssNative } = await import('../src/export/hfss-native.js');
+    const scene = makeDefaultScene();
+    const script = generateHfssNative(scene, resolveParams(scene.params).values, {});
+    expect(script).toContain('Name:=", "wg1_cs_line"');
+    expect(script).toContain('Flags:=", "NonModel#"');
+    expect(script).toContain('Working Coordinate System:=", "wg1_cs"');
+    expect(script).toContain('PartCoordinateSystem:=", "wg1_cs"');
+    expect(script).toContain('_delete_geom_if_exists("wg1_cs_line")');
+    // starts at the CS origin
+    expect(script).toMatch(/PLPoint", "X:=", "0um", "Y:=", "0um", "Z:=", "0um"/);
+  });
+});

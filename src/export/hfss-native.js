@@ -4498,6 +4498,9 @@ except Exception as e:
       const baseCsOriginZExpr = `(${wgZExpr}) + ${slabHExprUm}`;
       const baseXAxis = axis === 'x' ? [1, 0, 0] : [0, 1, 0];
       const baseYAxis = axis === 'x' ? [0, 1, 0] : [-1, 0, 0];
+      // The CS X axis points along the waveguide; the guide line below
+      // spans the full wg length from the CS origin.
+      const wgLenExprCs = (axis === 'x') ? wExprUm : hExprUm;
       relativeCsDefs.push({
         name: baseCsName,
         originX: baseCsOriginXExpr,
@@ -4505,6 +4508,7 @@ except Exception as e:
         originZ: baseCsOriginZExpr,
         xAxis: baseXAxis,
         yAxis: baseYAxis,
+        lineLen: wgLenExprCs,
       });
       // Now expand the WG's transform chain and emit one CS per
       // non-base instance. We compose the instance's (scale →
@@ -4567,6 +4571,7 @@ except Exception as e:
               originX: `(${baseCsOriginXExpr}) + (${off.dxExpr})`,
               originY: `(${baseCsOriginYExpr}) + (${off.dyExpr})`,
               originZ: baseCsOriginZExpr,
+              lineLen: wgLenExprCs,
               xAxis: baseXAxis,
               yAxis: baseYAxis,
             });
@@ -4606,6 +4611,7 @@ except Exception as e:
               originZ: baseCsOriginZExpr,
               xAxis: xAxisWorld.map(v => v.toFixed(6)),
               yAxis: yAxisWorld.map(v => v.toFixed(6)),
+              lineLen: wgLenExprCs,
             });
           }
         }
@@ -5615,6 +5621,35 @@ except Exception as e:
         : (layerTyped ? `layer "${ascii(layer.name || lid)}"` : 'near-PEC default');
       const bname = multi ? `PEC_sheets_${(lid || 'default').replace(/[^A-Za-z0-9_]/g, '_')}` : 'PEC_sheets';
       const objList = names.map(n => `"${n}"`).join(', ');
+      // TRUE PEC: when the resolved Rs AND Xs are both LITERAL zero
+      // (pure-numeric 0 — expressions with identifiers never qualify,
+      // since evalExpr silently zeroes unknown idents like Freq), emit a
+      // PerfectE boundary instead of a 0-ohm impedance sheet: exact 0 is
+      // rejected as singular by some HFSS releases, and PerfE is the
+      // physically-intended boundary anyway.
+      const isLiteralZero = (v) => {
+        const t = String(v ?? '').trim();
+        if (!t || !/^[-+0-9.eE\s]+$/.test(t)) return false;
+        const n = Number(t);
+        return Number.isFinite(n) && n === 0;
+      };
+      if (isLiteralZero(rsExpr) && isLiteralZero(xsExpr)) {
+        code += `# ${bname}: Rs = 0, Xs = 0 (${ascii(src)}) -> TRUE PEC boundary (PerfectE)
+try:
+    oBoundarySetup_imp = oDesign.GetModule("BoundarySetup")
+    _delete_boundary_if_exists("${bname}")
+    oBoundarySetup_imp.AssignPerfectE(
+        ["NAME:${bname}",
+         "Objects:=", [${objList}],
+         "InfGroundPlane:=", False])
+except Exception as e:
+    try:
+        oDesktop.AddMessage("", "", 1, "Failed to assign PerfectE boundary ${bname}: " + str(e))
+    except:
+        pass
+`;
+        continue;
+      }
       code += `# ${bname}: Rs = ${ascii(rsExpr)}, Xs = ${ascii(xsExpr)} (${ascii(src)})
 try:
     oBoundarySetup_imp = oDesign.GetModule("BoundarySetup")
@@ -6336,6 +6371,54 @@ except Exception as e:
     except:
         pass
 `;
+      // NON-MODEL guide line: from the CS origin (the waveguide's start,
+      // centered, at slab top) along the CS X axis for the full waveguide
+      // length. NonModel — never meshed/solved — but selectable in HFSS
+      // as a field-plot / integration path along the guide. Created WITH
+      // the wg CS active so its two points are (0,0,0) -> (L,0,0) in
+      // that CS and the PartCoordinateSystem binds to the CS: HFSS-side
+      // sweeps that move the CS carry the line along. WCS is restored to
+      // Global right after (same discipline as the CS block itself).
+      if (cs.lineLen) {
+        const lineName = `${cs.name}_line`;
+        code += `try:
+    oEditor.SetWCS(
+        ["NAME:SetWCS Parameter",
+         "Working Coordinate System:=", "${cs.name}",
+         "RegionDepCSOk:=", False])
+    _delete_geom_if_exists("${lineName}")
+    oEditor.CreatePolyline(
+        ["NAME:PolylineParameters",
+         "IsPolylineCovered:=", True,
+         "IsPolylineClosed:=", False,
+         ["NAME:PolylinePoints",
+          ["NAME:PLPoint", "X:=", "0um", "Y:=", "0um", "Z:=", "0um"],
+          ["NAME:PLPoint", "X:=", "${cs.lineLen}", "Y:=", "0um", "Z:=", "0um"]],
+         ["NAME:PolylineSegments",
+          ["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", 0, "NoOfPoints:=", 2]],
+         ["NAME:PolylineXSection",
+          "XSectionType:=", "None",
+          "XSectionOrient:=", "Auto",
+          "XSectionWidth:=", "0um",
+          "XSectionTopWidth:=", "0um",
+          "XSectionHeight:=", "0um",
+          "XSectionNumSegments:=", "0",
+          "XSectionBendType:=", "Corner"]],
+        ["NAME:Attributes",
+         "Name:=", "${lineName}", "Flags:=", "NonModel#",
+         "Color:=", "(0 255 128)", "Transparency:=", 0.0,
+         "PartCoordinateSystem:=", "${cs.name}",
+         "MaterialValue:=", "\\"vacuum\\"",
+         "SolveInside:=", True])
+    _set_wcs_global()
+except Exception as e:
+    try:
+        _set_wcs_global()
+        oDesktop.AddMessage("", "", 1, "Failed to create guide line ${lineName}: " + str(e))
+    except:
+        pass
+`;
+      }
     }
   }
 
