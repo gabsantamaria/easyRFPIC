@@ -628,3 +628,76 @@ export function miterBandRing(pts, halfW) {
   }
   return [...left, ...right.reverse()];
 }
+
+// ── Band PIECES for a constant-width trace (paint-union semantics) ───────
+// Returns { pieces } — per-segment quads plus per-joint miter patches.
+// Their UNION is exactly the region an SVG miter-joined stroke paints
+// (miter limit 4, bevel beyond — the canvas rendering), and every piece
+// is individually convex/simple, so emitting them as overlapping
+// same-layer polygons is valid GDS for ANY bend tightness. A single
+// band OUTLINE (miterBandRing) folds over itself when the width is
+// comparable to a bend's opening — the choke-trace artifact: KLayout
+// rendered wedge/chamfer garbage where the canvas showed a clean U.
+// Consecutive duplicate points are dropped (a trailing zero-length
+// vertex corrupted the outline's normals). `closed` adds the wrap
+// segment and a joint at every vertex.
+export function bandPieces(ptsIn, halfW, closed = false) {
+  const pieces = [];
+  if (!(halfW > 0) || !Array.isArray(ptsIn)) return { pieces };
+  const pts = [];
+  for (const p of ptsIn) {
+    const prev = pts[pts.length - 1];
+    if (!prev || Math.hypot(p[0] - prev[0], p[1] - prev[1]) > 1e-9) pts.push(p);
+  }
+  if (closed && pts.length > 1) {
+    const a = pts[0], b = pts[pts.length - 1];
+    if (Math.hypot(a[0] - b[0], a[1] - b[1]) <= 1e-9) pts.pop();
+  }
+  const n = pts.length;
+  if (n < 2) return { pieces };
+  const segCount = closed ? n : n - 1;
+  const dirs = [];
+  for (let i = 0; i < segCount; i++) {
+    const p = pts[i], q = pts[(i + 1) % n];
+    const dx = q[0] - p[0], dy = q[1] - p[1];
+    const len = Math.hypot(dx, dy) || 1;
+    dirs.push([dx / len, dy / len]);
+    const nx = -dy / len, ny = dx / len;
+    pieces.push([
+      [p[0] + nx * halfW, p[1] + ny * halfW],
+      [q[0] + nx * halfW, q[1] + ny * halfW],
+      [q[0] - nx * halfW, q[1] - ny * halfW],
+      [p[0] - nx * halfW, p[1] - ny * halfW],
+    ]);
+  }
+  // Joint patches: cover the OUTER wedge between consecutive segments
+  // (the inner side is covered by the quads' own overlap).
+  const joints = [];
+  if (closed) { for (let i = 0; i < n; i++) joints.push(i); }
+  else { for (let i = 1; i < n - 1; i++) joints.push(i); }
+  for (const i of joints) {
+    const d1 = dirs[(i - 1 + segCount) % segCount];
+    const d2 = dirs[i % segCount];
+    const cross = d1[0] * d2[1] - d1[1] * d2[0];
+    if (Math.abs(cross) < 1e-12) continue; // collinear — no wedge
+    const P = pts[i];
+    // Outer normals: right side for a left turn, left side for a right turn.
+    const s1 = cross > 0 ? -1 : 1;
+    const no1 = [-d1[1] * s1, d1[0] * s1];
+    const no2 = [-d2[1] * s1, d2[0] * s1];
+    const A = [P[0] + no1[0] * halfW, P[1] + no1[1] * halfW];
+    const B = [P[0] + no2[0] * halfW, P[1] + no2[1] * halfW];
+    let mx = no1[0] + no2[0], my = no1[1] + no2[1];
+    const mlen = Math.hypot(mx, my);
+    if (mlen < 1e-9) { pieces.push([P, A, B]); continue; } // 180° reversal — bevel
+    mx /= mlen; my /= mlen;
+    const cosHalf = Math.max(mx * no1[0] + my * no1[1], 1e-6);
+    const s = halfW / cosHalf;
+    if (s > halfW * 4) {
+      pieces.push([P, A, B]); // SVG miterlimit-4 bevel fallback
+    } else {
+      pieces.push([P, A, [P[0] + mx * s, P[1] + my * s], B]);
+    }
+  }
+  return { pieces };
+}

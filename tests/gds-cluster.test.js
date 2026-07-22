@@ -315,3 +315,54 @@ describe('canvas F3 override parity for mirrored clusters with rotated operands'
     expect(ringsEq(canvasRing, match.ring), 'canvas ring == scene3d ring').toBe(true);
   });
 });
+
+describe('constant-width band paint-union (choke fold fix)', () => {
+  it('tight U-bend with a trailing duplicate vertex emits simple polygons covering the painted band', async () => {
+    // The shipped choke: width == bend depth (2 um) + a zero-length final
+    // vertex. The single miter OUTLINE folded over itself — KLayout
+    // rendered wedge/chamfer artifacts. bandPieces + rectilinearUnion
+    // must produce simple polygons whose union covers every point within
+    // halfW of the centerline.
+    const { ringSelfIntersects, tessellatePolylinePath } = await import('../src/geometry/polyline.js');
+    const scene = normalizeScene({
+      params: {}, snaps: [],
+      components: [{
+        id: 'choke', kind: 'polyline', layer: 'electrode', cx: 0, cy: 0, w: '0', h: '0',
+        width: '2', cutouts: [], transforms: [],
+        vertices: [
+          { kind: 'rel', dx: '0', dy: '0' },
+          { kind: 'rel', dx: '0', dy: '-2' },
+          { kind: 'rel', dx: '5', dy: '0' },
+          { kind: 'rel', dx: '0', dy: '2' },
+          { kind: 'rel', dx: '0', dy: '0' }, // zero-length trailing vertex (as shipped)
+        ],
+      }],
+    });
+    const { values } = resolveParams(scene.params);
+    const shapes = gdsShapes(scene, values).filter((s) => s.datatype === 0);
+    expect(shapes.length).toBeGreaterThan(0);
+    for (const sh of shapes) {
+      const ring = sh.pts[0][0] === sh.pts[sh.pts.length - 1][0] && sh.pts[0][1] === sh.pts[sh.pts.length - 1][1]
+        ? sh.pts.slice(0, -1) : sh.pts;
+      expect(ringSelfIntersects(ring), 'simple polygon').toBe(false);
+    }
+    // Paint-coverage: sample within halfW*0.98 of the centerline.
+    const solved = scene.components[0];
+    const center = tessellatePolylinePath(solved, { choke: solved }, values);
+    const inPoly = (px, py, ring) => { let ins = false; for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) { const [xi, yi] = ring[i], [xj, yj] = ring[j]; if ((yi > py) !== (yj > py) && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi) ins = !ins; } return ins; };
+    // INTERIOR projection only: butt end caps (canvas + GDS semantics)
+    // do not paint beyond the segment ends, so endpoint-region samples
+    // must not count toward required coverage.
+    const dSeg = (p, a, b) => { const dx = b[0] - a[0], dy = b[1] - a[1]; const L2 = dx * dx + dy * dy || 1; const t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L2; if (t < 0.02 || t > 0.98) return Infinity; return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy); };
+    let missed = 0;
+    for (let x = -1.5; x <= 6.5; x += 0.07) {
+      for (let y = -3.5; y <= 1.5; y += 0.07) {
+        let d = 1e9;
+        for (let i = 0; i + 1 < center.length; i++) d = Math.min(d, dSeg([x, y], center[i], center[i + 1]));
+        if (d > 0.98) continue;
+        if (!shapes.some((sh) => inPoly(x, y, sh.pts))) missed++;
+      }
+    }
+    expect(missed).toBe(0);
+  });
+});

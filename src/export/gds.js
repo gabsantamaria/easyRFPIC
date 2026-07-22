@@ -20,7 +20,8 @@ import { evalExpr } from '../scene/params.js';
 import { isNonModelComponent } from '../scene/schema.js';
 import { solveLayout, applyMirrors, resolveBooleanBboxes } from '../scene/solver.js';
 import { expandTransforms } from '../scene/transforms.js';
-import { tessellatePolylinePath, taperedBandQuads, polylineIsTapered, miterBandRing } from '../geometry/polyline.js';
+import { tessellatePolylinePath, taperedBandQuads, polylineIsTapered, bandPieces } from '../geometry/polyline.js';
+import { rectilinearUnion, isRectilinearRing } from './rect-union.js';
 import { shapeInstanceToRing, remapPointsToInstance } from '../geometry/rings.js';
 import { effectiveConductorLayerId } from '../scene/conductor-binding.js';
 import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/racetrack.js';
@@ -286,25 +287,37 @@ export function generateGDS(scene, paramValues) {
       // subtract tool drawn on another layer (a port-layer punch) must
       // cut the metal it punches, not decorate its own layer.
       const layer = layerOverride ?? gdsLayerForComponent(c);
-      // Constant-width polyline: emit the metal BAND (shared
-      // miterBandRing / offsetCenterlineToBand — the exact geometry
-      // scene3d builds and the canvas strokes). The old fallback
-      // emitted the zero-area CENTERLINE as the boundary: a 4 µm trace
-      // exported as no metal at all (review find, pre-existing).
+      // Constant-width polyline: emit the metal BAND as PAINT-UNION
+      // pieces (bandPieces: per-segment quads + miter joint patches —
+      // exactly the region the canvas's miter-joined SVG stroke
+      // paints). A single band OUTLINE (miterBandRing) folds over
+      // itself when the trace width is comparable to a bend's opening —
+      // the choke-trace artifact: KLayout rendered wedge/chamfer
+      // garbage where the canvas showed a clean U (real user bug); a
+      // trailing zero-length vertex additionally corrupted the outline
+      // normals. Overlapping same-layer DATATYPE-0 polygons are valid
+      // GDS (fab tools merge); when the path is RECTILINEAR the pieces
+      // are exactly merged into clean outlines via rectilinearUnion
+      // (self-guarded — any doubt falls back to the raw pieces).
+      // The old fallback emitted the zero-area CENTERLINE as the
+      // boundary: a 4 µm trace exported as no metal at all.
       if (isPathBand) {
         const widthN = Number.isFinite(inst.width) ? inst.width : evalExpr(c.width ?? '0', paramValues);
         if (!Number.isFinite(widthN) || widthN <= 0) continue; // nothing physical to fabricate
         const base = tessellatePolylinePath(c, byIdSolved, paramValues);
         if (base.length < 2) continue;
         const pts = remapPointsToInstance(base, inst, c.cx, c.cy);
-        if (c.closed && pts.length >= 3) {
-          const { outer, inner } = offsetCenterlineToBand(pts, widthN / 2);
-          emitBoundary(layer, dtMain, outer, xfs);
-          if (inner.length >= 3) emitBoundary(layer, 1, inner, xfs);
-        } else {
-          const ring = miterBandRing(pts, widthN / 2);
-          if (ring) emitBoundary(layer, dtMain, ring, xfs);
+        const { pieces } = bandPieces(pts, widthN / 2, !!c.closed);
+        if (pieces.length === 0) continue;
+        const rectilinear = pieces.every((ring) => isRectilinearRing(ring));
+        if (rectilinear) {
+          const u = rectilinearUnion(pieces);
+          if (u.ok) {
+            for (const ring of u.rings) emitBoundary(layer, dtMain, ring, xfs);
+            continue;
+          }
         }
+        for (const ring of pieces) emitBoundary(layer, dtMain, ring, xfs);
         continue;
       }
       // shapeInstanceToRing returns the perimeter ring already accounting

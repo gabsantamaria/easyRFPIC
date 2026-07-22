@@ -1758,11 +1758,20 @@ as overlapping DATATYPE-0 polygons; subtract/punch TOOLS emit DATATYPE-1
 on the BLANK's layer (leafLayerOf — a port-layer punch must cut the
 metal layer it punches); a NESTED subtract used as a tool re-adds its
 kept island as DATATYPE-0 (exact when the island lies inside outer blank
-metal). Constant-width polylines emit the metal BAND (shared
-`miterBandRing` from geometry/polyline.js — canonical home, also used by
-scene3d + cross-section; closed loops via offsetCenterlineToBand outer +
-DATATYPE-1 inner) — the old fallback emitted the zero-area CENTERLINE
-(a 4 µm trace exported as no metal). The consumed-operand skip requires
+metal). Constant-width polylines emit the metal BAND as PAINT-UNION
+pieces (`bandPieces` in geometry/polyline.js: per-segment quads + miter
+joint patches — exactly the region the canvas's miter-joined SVG stroke
+paints, SVG miterlimit-4 bevel fallback included; consecutive duplicate
+vertices dropped). A single band OUTLINE (miterBandRing — still the
+scene3d/cross-section approximation) FOLDS OVER ITSELF when the trace
+width is comparable to a bend's opening — the choke-trace artifact:
+KLayout rendered wedge/chamfer garbage where the canvas showed a clean
+U (real user bug; a trailing zero-length vertex also corrupted the
+outline normals). Overlapping same-layer DATATYPE-0 pieces are valid
+GDS; RECTILINEAR paths are exactly merged into clean outlines via
+rectilinearUnion (self-guarded fallback to raw pieces). The old
+fallback emitted the zero-area CENTERLINE (a 4 µm trace exported as no
+metal). The consumed-operand skip requires
 the consumedBy BACK-POINTER to round-trip (consumer is a boolean whose
 operandIds lists the comp — canvas parity); anything dangling emits
 standalone. WYSIWYG guard: the canvas F3 override builder negates a
