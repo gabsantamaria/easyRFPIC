@@ -26,7 +26,7 @@ describe('missing-material guard', () => {
     expect(code).toContain('DoesMaterialExist');
     expect(code).toContain('AddMaterial');
     expect(code).toContain('created a DUMMY material with VACUUM properties');
-    const calls = [...code.matchAll(/_ensure_material\("([^"]+)"\)/g)].map((m) => m[1]);
+    const calls = [...code.matchAll(/_ensure_material\("([^"]+)"(?:, \[[^\]]*\])?\)/g)].map((m) => m[1]);
     // Custom conductor material + every stack material actually assigned.
     expect(calls).toContain('NbTiN_20nm');
     // One call per name, no duplicates.
@@ -42,6 +42,34 @@ describe('missing-material guard', () => {
     expect(defIdx).toBeGreaterThan(-1);
     expect(callIdx).toBeGreaterThan(defIdx);
     expect(geomIdx).toBeGreaterThan(callIdx);
+  });
+
+  it('never dummies stock materials, and flips SolveInside on conductors that DO get a dummy', () => {
+    // On some releases DoesMaterialExist only sees PROJECT definitions
+    // and returns False for library materials - the guard then created a
+    // vacuum dummy named 'gold' that SHADOWED the real one, and every
+    // conductor's CREATION failed ("zero-conductivity material must have
+    // Solve Inside enabled") - real shipped failure. Positive answers
+    // are trusted; negatives only believed for names outside the stock
+    // whitelist. Genuinely-missing conductor materials flip their
+    // objects to SolveInside=True alongside the dummy.
+    const stack = base.stack.map((l) => l.role === 'conductor' ? { ...l, material: 'NbTiN_20nm' } : l);
+    const { values } = resolveParams(base.params);
+    const code = generateHfssNative({ ...base, stack }, values);
+    // Whitelist backstop present and covers the shipped victims.
+    expect(code).toContain('_AEDT_STOCK_MATERIALS');
+    for (const stockName of ['gold', 'air', 'silicon', 'silicon_dioxide', 'vacuum']) {
+      expect(code).toMatch(new RegExp(`"${stockName}",`));
+    }
+    expect(code).toContain('if mat_name.lower() in _AEDT_STOCK_MATERIALS:');
+    // The custom conductor's ensure call lists its SolveInside=False object.
+    const call = code.match(/_ensure_material\("NbTiN_20nm", \[([^\]]*)\]\)/);
+    expect(call).toBeTruthy();
+    expect(call[1]).toContain('"el"');
+    // The dummy branch carries the SolveInside flip.
+    expect(code).toContain('["NAME:Solve Inside", "Value:=", True]');
+    // Un-shadow guidance in the warning.
+    expect(code).toContain('delete the dummy from the project');
   });
 
   it('vacuum-property dummy creation and warning are inside the helper, guarded', () => {

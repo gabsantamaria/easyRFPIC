@@ -2391,31 +2391,57 @@ def _delete_boundary_if_exists(name):
     except:
         pass
 
-def _ensure_material(mat_name):
+# Stock AEDT system-library material names (lowercase). On some releases
+# DoesMaterialExist only sees PROJECT definitions and returns False for
+# library materials - creating a vacuum dummy named 'gold' then SHADOWS
+# the real one (project definitions win by name) and every conductor
+# fails with "zero-conductivity material must have Solve Inside enabled"
+# (real shipped failure). A positive existence answer is trusted; a
+# negative one is only believed for names outside this list.
+_AEDT_STOCK_MATERIALS = set([
+    "vacuum", "air", "pec", "gold", "silver", "copper", "aluminum",
+    "brass", "bronze", "chromium", "graphite", "iron", "lead",
+    "magnesium", "molybdenum", "nickel", "palladium", "platinum",
+    "silicon", "solder", "steel_stainless", "tin", "titanium",
+    "tungsten", "zinc", "silicon_dioxide", "sapphire", "alumina_92pct",
+    "alumina_96pct", "quartz_glass", "glass", "mica", "polyimide",
+    "gallium_arsenide", "germanium", "fr4_epoxy", "bakelite", "diamond",
+    "diamond_hi_pres", "diamond_pl_cvd", "ferrite", "cast_iron",
+    "polyethylene", "polyester", "marble", "porcelain", "rubber_hard",
+    "teflon_based", "water_distilled", "water_fresh", "water_sea",
+    "glass_ceramic", "indium", "cobalt", "beryllium", "boron_nitride",
+    "duraluminum", "polystyrene", "plexiglass", "perfect_conductor",
+])
+
+def _ensure_material(mat_name, si_false_objs=None):
     # If mat_name resolves nowhere (project materials or any loaded
     # library), create a DUMMY project material with that name and
     # VACUUM properties so every assignment in this script succeeds.
     # A warning is posted so the dummy is impossible to miss - edit its
-    # properties (Tools > Edit Libraries / project Materials) or replace
-    # it with the real definition and re-solve; the geometry keeps
-    # referencing the same name either way.
+    # properties (project Materials) or replace it with the real
+    # definition and re-solve; the geometry keeps referencing the same
+    # name either way. Objects that were emitted with SolveInside=False
+    # (conductors) are flipped to SolveInside=True when their material
+    # gets a dummy - HFSS rejects zero-conductivity materials on
+    # solve-inside-disabled objects at CREATION time otherwise.
     try:
         oDefinitionManager = oProject.GetDefinitionManager()
     except:
         return
+    # Trust a positive answer; distrust negatives (see _AEDT_STOCK_MATERIALS).
     try:
         if oDefinitionManager.DoesMaterialExist(mat_name):
             return
     except:
-        # Older releases without DoesMaterialExist: fall back to the
-        # project material list only (library materials may be re-created
-        # as dummies there, which is harmless - project wins by name).
-        try:
-            existing = [str(m).lower() for m in oDefinitionManager.GetProjectMaterialNames()]
-            if mat_name.lower() in existing:
-                return
-        except:
-            pass
+        pass
+    try:
+        existing = [str(m).lower() for m in oDefinitionManager.GetProjectMaterialNames()]
+        if mat_name.lower() in existing:
+            return
+    except:
+        pass
+    if mat_name.lower() in _AEDT_STOCK_MATERIALS:
+        return
     try:
         oDefinitionManager.AddMaterial(
             ["NAME:" + mat_name,
@@ -2427,9 +2453,19 @@ def _ensure_material(mat_name):
              "conductivity:=", "0",
              "dielectric_loss_tangent:=", "0"])
         try:
-            oDesktop.AddMessage("", "", 1, "Material '" + mat_name + "' not found in any library - created a DUMMY material with VACUUM properties under that name. Define/edit the real material and re-solve.")
+            oDesktop.AddMessage("", "", 1, "Material '" + mat_name + "' not found - created a DUMMY material with VACUUM properties under that name. Define/edit the real material (then restore Solve Inside on its conductors) and re-solve. If the material DOES exist in one of your libraries, delete the dummy from the project's Materials to un-shadow it.")
         except:
             pass
+        for _obj in (si_false_objs or []):
+            try:
+                oEditor.ChangeProperty(
+                    ["NAME:AllTabs",
+                     ["NAME:Geometry3DAttributeTab",
+                      ["NAME:PropServers", _obj],
+                      ["NAME:ChangedProps",
+                       ["NAME:Solve Inside", "Value:=", True]]]])
+            except:
+                pass
     except Exception as e:
         try:
             oDesktop.AddMessage("", "", 1, "Material '" + mat_name + "' not found and dummy creation failed: " + str(e))
@@ -6961,9 +6997,29 @@ except Exception as e:
   // dies on assignment; the user then defines the real material under
   // the same name.
   {
+    // Per material: the objects emitted with SolveInside=False (metal
+    // idiom). If the material ends up dummy'd (vacuum properties), those
+    // objects must flip to SolveInside=True or HFSS rejects their very
+    // creation ("zero-conductivity material must have Solve Inside
+    // enabled" - the shipped failure mode when stock 'gold' got
+    // shadowed). Transform-chain clones inherit the flag from their base
+    // and are best-effort (not in creation records).
     const matNames = new Set();
+    const siFalseByMat = new Map();
+    for (const m of code.matchAll(/"Name:=",\s*"([^"]+)"[\s\S]{0,600}?"MaterialValue:=",\s*"\\"([^"\\]+)\\"",\s*"SolveInside:=",\s*(True|False)/g)) {
+      matNames.add(m[2]);
+      if (m[3] === 'False') {
+        if (!siFalseByMat.has(m[2])) siFalseByMat.set(m[2], new Set());
+        siFalseByMat.get(m[2]).add(m[1]);
+      }
+    }
     for (const m of code.matchAll(/"MaterialValue:=",\s*"\\"([^"\\]+)\\""/g)) matNames.add(m[1]);
-    const calls = [...matNames].sort().map((n) => `_ensure_material("${n}")`).join('\n');
+    const calls = [...matNames].sort().map((n) => {
+      const objs = [...(siFalseByMat.get(n) || [])].sort();
+      return objs.length
+        ? `_ensure_material("${n}", [${objs.map((o) => `"${o}"`).join(', ')}])`
+        : `_ensure_material("${n}")`;
+    }).join('\n');
     code = code.replace('# __ENSURE_MATERIALS__', () =>
       `# Pre-flight: make sure every referenced material resolves (dummy\n# vacuum-property materials are created for missing ones, with a warning).\n${calls}`);
   }
