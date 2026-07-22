@@ -106,15 +106,20 @@ export function rectilinearUnion(rings) {
 
   // Covered cells: even-odd test at cell centers. Exact for rectilinear
   // inputs — every input edge lies on a grid line, so a cell is either
-  // fully inside or fully outside each ring.
+  // fully inside or fully outside each ring. Per-ring bbox prefilter
+  // keeps a large fractured cluster from going O(cells × rings × len)
+  // (adversarial-review perf find).
+  const rbbs = rings.map(ringBbox);
   const covered = new Uint8Array(nx * ny);
   let coveredArea = 0;
   for (let i = 0; i < nx; i++) {
     const cxm = (xs[i] + xs[i + 1]) / 2;
     for (let j = 0; j < ny; j++) {
       const cym = (ys[j] + ys[j + 1]) / 2;
-      for (const r of rings) {
-        if (pointInRing(cxm, cym, r)) {
+      for (let k = 0; k < rings.length; k++) {
+        const bb = rbbs[k];
+        if (cxm < bb[0] || cxm > bb[2] || cym < bb[1] || cym > bb[3]) continue;
+        if (pointInRing(cxm, cym, rings[k])) {
           covered[i * ny + j] = 1;
           coveredArea += (xs[i + 1] - xs[i]) * (ys[j + 1] - ys[j]);
           break;
@@ -185,6 +190,16 @@ export function rectilinearUnion(rings) {
         curK = takeEdge(curK, dir);
       }
       if (curK !== startK) return { ok: false, reason: 'open boundary trace' };
+      // PINCH GUARD (adversarial-review find, probe-confirmed): a cavity
+      // connected to the outside through a single grid CORNER makes the
+      // trace pass through that node twice and close as ONE self-touching
+      // loop — positive area, even-odd-consistent, so BOTH the hole check
+      // and the area self-check pass, yet the emitted covered polyline is
+      // non-simple and AEDT rejects it (silently dropping the whole
+      // cluster's cavity). Any revisited node ⇒ bail to the direct path.
+      if (new Set(loop).size !== loop.length) {
+        return { ok: false, reason: 'union produces a pinch (self-touching boundary)' };
+      }
       // Grid-node loop -> world ring, merging collinear runs.
       const raw = loop.map((k) => {
         const yj = k % (ny + 1), xi = (k - yj) / (ny + 1);
@@ -220,6 +235,63 @@ export function rectilinearUnion(rings) {
     return { ok: false, reason: 'area self-check failed' };
   }
   return { ok: true, rings: outers, area: outArea };
+}
+
+// Do two rings share a collinear boundary segment (edge-on-edge overlap
+// of positive length)? THIS — not mere bbox contact or transversal
+// overlap — is the Parasolid coincident-face hazard: two solids whose
+// footprints only cross transversally boolean fine and must NOT be
+// merged (merging would needlessly freeze their parametric cavities —
+// adversarial-review find). Works for arbitrary segment orientations.
+export function ringsShareEdge(a, b, tol = EPS) {
+  if (!ringsTouch(a, b, tol)) return false;
+  const segs = (r) => r.map((p, i) => [p, r[(i + 1) % r.length]]);
+  for (const [p1, p2] of segs(a)) {
+    const dx = p2[0] - p1[0], dy = p2[1] - p1[1];
+    const len = Math.hypot(dx, dy);
+    if (len < tol) continue;
+    const ux = dx / len, uy = dy / len;
+    for (const [q1, q2] of segs(b)) {
+      const ex = q2[0] - q1[0], ey = q2[1] - q1[1];
+      const elen = Math.hypot(ex, ey);
+      if (elen < tol) continue;
+      // Parallel?
+      if (Math.abs(ux * ey - uy * ex) > tol * elen) continue;
+      // Collinear? (q1 must lie on a's line)
+      if (Math.abs((q1[0] - p1[0]) * uy - (q1[1] - p1[1]) * ux) > tol) continue;
+      // Overlap of the projections along the shared line, positive length.
+      const t1 = 0, t2 = len;
+      const s1 = (q1[0] - p1[0]) * ux + (q1[1] - p1[1]) * uy;
+      const s2 = (q2[0] - p1[0]) * ux + (q2[1] - p1[1]) * uy;
+      const lo = Math.max(Math.min(t1, t2), Math.min(s1, s2));
+      const hi = Math.min(Math.max(t1, t2), Math.max(s1, s2));
+      if (hi - lo > tol) return true;
+    }
+  }
+  return false;
+}
+
+// Cluster rings into connected groups by SHARED collinear boundary
+// segments (transitive) — the actual coincident-face hazard predicate.
+export function clusterRingsByEdgeShare(rings, tol = EPS) {
+  const n = rings.length;
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const find = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (ringsShareEdge(rings[i], rings[j], tol)) {
+        const a = find(i), b = find(j);
+        if (a !== b) parent[a] = b;
+      }
+    }
+  }
+  const groups = new Map();
+  for (let i = 0; i < n; i++) {
+    const r = find(i);
+    if (!groups.has(r)) groups.set(r, []);
+    groups.get(r).push(i);
+  }
+  return [...groups.values()];
 }
 
 // Cluster rings into connected groups by bbox touch/overlap (transitive).

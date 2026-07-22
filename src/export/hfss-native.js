@@ -24,7 +24,7 @@ import { ringSelfIntersects } from '../geometry/polyline.js';
 import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/racetrack.js';
 import { instanceChainOffsetExpr, chainOwnerForInstance, instanceFrameCenter } from '../scene/instance-positions.js';
 import { renameIdentInScene } from '../scene/rename-ident.js';
-import { rectilinearUnion, clusterRingsByTouch } from './rect-union.js';
+import { rectilinearUnion, clusterRingsByEdgeShare, ringsShareEdge } from './rect-union.js';
 import { simplifyExpr, degToRad, stripUnaryPlus } from '../scene/expr-simplify.js';
 import { twoLineOutputVariables } from '../scene/twoLine.js';
 import { generateQ3DCombinedBlock } from './q3d.js';
@@ -2370,6 +2370,53 @@ def _delete_boundary_if_exists(name):
     except:
         pass
 
+def _ensure_material(mat_name):
+    # If mat_name resolves nowhere (project materials or any loaded
+    # library), create a DUMMY project material with that name and
+    # VACUUM properties so every assignment in this script succeeds.
+    # A warning is posted so the dummy is impossible to miss - edit its
+    # properties (Tools > Edit Libraries / project Materials) or replace
+    # it with the real definition and re-solve; the geometry keeps
+    # referencing the same name either way.
+    try:
+        oDefinitionManager = oProject.GetDefinitionManager()
+    except:
+        return
+    try:
+        if oDefinitionManager.DoesMaterialExist(mat_name):
+            return
+    except:
+        # Older releases without DoesMaterialExist: fall back to the
+        # project material list only (library materials may be re-created
+        # as dummies there, which is harmless - project wins by name).
+        try:
+            existing = [str(m).lower() for m in oDefinitionManager.GetProjectMaterialNames()]
+            if mat_name.lower() in existing:
+                return
+        except:
+            pass
+    try:
+        oDefinitionManager.AddMaterial(
+            ["NAME:" + mat_name,
+             "CoordinateSystemType:=", "Cartesian",
+             "BulkOrSurfaceType:=", 1,
+             ["NAME:PhysicsTypes", "set:=", ["Electromagnetic"]],
+             "permittivity:=", "1",
+             "permeability:=", "1",
+             "conductivity:=", "0",
+             "dielectric_loss_tangent:=", "0"])
+        try:
+            oDesktop.AddMessage("", "", 1, "Material '" + mat_name + "' not found in any library - created a DUMMY material with VACUUM properties under that name. Define/edit the real material and re-solve.")
+        except:
+            pass
+    except Exception as e:
+        try:
+            oDesktop.AddMessage("", "", 1, "Material '" + mat_name + "' not found and dummy creation failed: " + str(e))
+        except:
+            pass
+
+# __ENSURE_MATERIALS__
+
 def _relative_cs_exists(name):
     # Probe whether a relative CS already exists. Used to skip re-creating
     # it on a subsequent APPEND-mode run. We deliberately do NOT attempt
@@ -2458,13 +2505,25 @@ except:
   const emittedWgNames = [];
   const emittedElecNames = [];
   // Prism-tool metadata for the cladding subtract's abutment merge:
-  // part name -> { compId, ring: [[x,y]…] (numeric world), bandKey }.
-  // Only simple untransformed prisms (plain rect boxes, line-only
-  // polyshapes) register; anything else stays a direct subtract tool.
-  // bandKey is the STRING pair zBottomExpr|zSizeExpr — expr equality ⇒
-  // same z-band, no numeric evaluation needed (conservative: equal-but-
-  // differently-written bands simply don't pool, which is safe).
+  // BASE part name -> { comp, ring: [[x,y]…] (numeric world), bandKey }.
+  // Only simple prisms (plain unrotated rect boxes, line-only
+  // polyshapes) register; translation-only transform chains are
+  // expanded into per-clone rings at the cladding block; anything else
+  // stays a direct subtract tool. bandKey is the STRING pair
+  // zBottomExpr|zSizeExpr — expr equality ⇒ same z-band, no numeric
+  // evaluation needed (conservative: equal-but-differently-written
+  // bands simply don't pool, which is safe).
   const cladPrismMeta = new Map();
+  // Synthetic merged-tool naming: ONE counter across every cladding
+  // layer (a per-layer reset re-used _cladmrg_0 — review find), and a
+  // prefix guaranteed not to collide with any component id (ids are
+  // user-controllable via JSON upload / AI generation).
+  let cladMergeN = 0;
+  const cladMergePrefix = (() => {
+    let p = '_cladmrg_';
+    while (solved.some((sc2) => String(sc2.id).startsWith(p))) p = `_${p}`;
+    return p;
+  })();
   const emittedPortNames = [];
   // Names of conductor objects emitted as ZERO-THICKNESS SHEETS rather
   // than 3D boxes. Triggered when their conductor layer's thickness
@@ -3850,16 +3909,19 @@ except Exception as e:
         if (isSheet && c.layer === 'electrode') {
           registerSheet(id, c);
         }
-        // Register straight-edge untransformed polyshape prisms for the
-        // cladding abutment merge (fractured GDS imports are this class).
+        // Register straight-edge polyshape prisms for the cladding
+        // abutment merge (fractured GDS imports are this class). Comps
+        // WITH transform chains register too — the cladding block
+        // expands translation-only chains into per-clone rings (a
+        // repeat with pitch == width produces exactly-abutting replicas,
+        // the same kernel hazard) and drops anything else.
         if (isPolyshape && !isSheet &&
             (c.layer === 'waveguide' || c.layer === 'electrode') &&
-            !(c.transforms || []).some((tr) => tr && tr.enabled !== false) &&
             vertMeta.every((m2) => m2.kind === 'line') &&
             Array.isArray(c._resolvedVerts) && c._resolvedVerts.length >= 3 &&
             c._resolvedVerts.every((p2) => Array.isArray(p2) && Number.isFinite(p2[0]) && Number.isFinite(p2[1]))) {
           cladPrismMeta.set(id, {
-            compId: c.id,
+            comp: c,
             ring: c._resolvedVerts.map((p2) => [p2[0], p2[1]]),
             bandKey: `${zBottomExpr}|${zSizeExpr}`,
             zBottomExpr, zSizeExpr,
@@ -4887,17 +4949,17 @@ except Exception as e:
       // zBottom (applies to both the 3-D box and the 0-thickness sheet).
       const elecZ_um = withZOffset((elecLayer && layerZ[elecLayer.id]?.zBottomExpr) || `${elecZ.toFixed(4)}um`, c);
       const elecT_um = (elecLayer && layerZ[elecLayer.id]?.thicknessExpr) || `${elecThickness.toFixed(4)}um`;
-      // Register plain untransformed, unrotated rect boxes for the
-      // cladding abutment merge (a drawn electrode abutting GDS metal is
-      // the same Parasolid coincident-face hazard as fractured GDS).
+      // Register plain unrotated rect boxes for the cladding abutment
+      // merge (a drawn electrode abutting GDS metal is the same
+      // Parasolid coincident-face hazard as fractured GDS). Transform
+      // chains are expanded per-clone in the cladding block.
       {
         const rotRect = evalExpr(c.rotation ?? '0', paramValues);
         if (shapeKind === 'rect' && Math.abs(elecThickness) >= 1e-9 &&
             Number.isFinite(rotRect) && Math.abs(rotRect) < 1e-9 &&
-            !(c.transforms || []).some((tr) => tr && tr.enabled !== false) &&
             Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
           cladPrismMeta.set(id, {
-            compId: c.id,
+            comp: c,
             ring: [[cx - w / 2, cy - h / 2], [cx + w / 2, cy - h / 2], [cx + w / 2, cy + h / 2], [cx - w / 2, cy + h / 2]],
             bandKey: `${elecZ_um}|${elecT_um}`,
             zBottomExpr: elecZ_um, zSizeExpr: elecT_um,
@@ -5921,33 +5983,123 @@ except Exception as e:
         // region is emitted as ONE disposable numeric tool, subtracted
         // and consumed. Groups the union cannot handle exactly keep the
         // legacy direct subtract plus a loud safety-report caveat.
-        const pooled = toolNames.filter((n) => cladPrismMeta.has(n));
+        // Per-PART ring records. Base metas expand through translation-
+        // only transform chains into per-clone rings (a repeat with
+        // pitch == width produces exactly-abutting replicas — the same
+        // kernel hazard); chains carrying rotation/mirror are skipped.
+        // partRing: partName -> { ring, bandKey, z exprs, mergeable }
+        const partRing = new Map();
+        for (const [baseName, m2] of cladPrismMeta) {
+          if (!toolSet.has(baseName)) continue;
+          const comp = m2.comp;
+          const hasChain = (comp.transforms || []).some((tr) => tr && tr.enabled !== false);
+          if (!hasChain) {
+            partRing.set(baseName, { ...m2, mergeable: true });
+            continue;
+          }
+          const insts = expandTransforms([comp], paramValues, solved);
+          const parts = allPartsForBase.get(baseName) || [baseName];
+          const translationOnly = insts.every((inst) =>
+            Math.abs(Number(inst.rotation || 0)) < 1e-9 &&
+            (inst.sx == null || inst.sx === 1) && (inst.sy == null || inst.sy === 1));
+          if (!translationOnly || insts.length !== parts.length) continue;
+          const bcx = Number.isFinite(comp.cx) ? comp.cx : 0;
+          const bcy = Number.isFinite(comp.cy) ? comp.cy : 0;
+          for (let k = 0; k < parts.length; k++) {
+            const ddx = insts[k].cx - bcx, ddy = insts[k].cy - bcy;
+            if (!Number.isFinite(ddx) || !Number.isFinite(ddy)) continue;
+            if (!toolSet.has(parts[k])) continue;
+            partRing.set(parts[k], { ...m2, ring: m2.ring.map(([px, py]) => [px + ddx, py + ddy]), mergeable: true });
+          }
+        }
+        // Waveguide SLAB footprints join as DETECTION-ONLY rings (never
+        // merged — the wg build is deeply parametric and freezing its
+        // cavity would silently break length sweeps): a drawn waveguide
+        // flush against imported GDS film is the probed scope-hole from
+        // the adversarial review, and deserves at least a loud caveat.
+        for (const c2 of solved) {
+          if (c2.kind !== 'rect' || c2.layer !== 'waveguide') continue;
+          const w2 = evalExpr(c2.w, paramValues);
+          const h2 = evalExpr(c2.h, paramValues);
+          const wSlab = evalExpr('w_slab', paramValues);
+          if (![w2, h2, wSlab, c2.cx, c2.cy].every(Number.isFinite)) continue;
+          const alongX = w2 >= h2;
+          const sw = alongX ? w2 : wSlab;
+          const sh = alongX ? wSlab : h2;
+          const slabRing = [
+            [c2.cx - sw / 2, c2.cy - sh / 2], [c2.cx + sw / 2, c2.cy - sh / 2],
+            [c2.cx + sw / 2, c2.cy + sh / 2], [c2.cx - sw / 2, c2.cy + sh / 2]];
+          const baseName = `${c2.id}_wg_slab`;
+          const parts = allPartsForBase.get(baseName) || [baseName];
+          const insts = expandTransforms([c2], paramValues, solved);
+          for (let k = 0; k < Math.min(parts.length, insts.length); k++) {
+            if (!toolSet.has(parts[k])) continue;
+            const ddx = insts[k].cx - c2.cx, ddy = insts[k].cy - c2.cy;
+            if (!Number.isFinite(ddx) || !Number.isFinite(ddy)) continue;
+            partRing.set(parts[k], {
+              ring: slabRing.map(([px, py]) => [px + ddx, py + ddy]),
+              bandKey: `wg-slab`, mergeable: false,
+            });
+          }
+        }
         const directSet = new Set(toolNames);
         const synthTools = [];   // { name, ring, zBottomExpr, zSizeExpr }
-        let synthN = 0;
         const byBand = new Map();
-        for (const n of pooled) {
-          const m2 = cladPrismMeta.get(n);
-          if (!byBand.has(m2.bandKey)) byBand.set(m2.bandKey, []);
-          byBand.get(m2.bandKey).push(n);
+        for (const [n, rec] of partRing) {
+          if (!rec.mergeable) continue;
+          if (!byBand.has(rec.bandKey)) byBand.set(rec.bandKey, []);
+          byBand.get(rec.bandKey).push(n);
         }
         for (const members of byBand.values()) {
           if (members.length < 2) continue;
-          const rings = members.map((n) => cladPrismMeta.get(n).ring);
-          for (const cluster of clusterRingsByTouch(rings)) {
+          const rings = members.map((n) => partRing.get(n).ring);
+          // Cluster by ACTUAL shared collinear boundary segments — the
+          // coincident-face predicate. Merely-overlapping (transversal)
+          // parts boolean fine and stay direct + parametric (review
+          // find: bbox-touch clustering froze cavities needlessly).
+          for (const cluster of clusterRingsByEdgeShare(rings)) {
             if (cluster.length < 2) continue; // isolated part — direct subtract is safe
             const clusterNames = cluster.map((i2) => members[i2]);
             const u = rectilinearUnion(cluster.map((i2) => rings[i2]));
             if (!u.ok) {
-              noteCaveat(clusterNames.join(','), `cladding tools touch each other but could not be merged (${u.reason}) - the direct subtract may hit Parasolid's coincident-face reject`);
+              noteCaveat(clusterNames.join(','), `cladding tools share coincident edges but could not be merged (${u.reason}) - the direct subtract may hit Parasolid's coincident-face reject; separate the parts or exclude them`);
               continue;
             }
-            const { zBottomExpr: zb, zSizeExpr: zs } = cladPrismMeta.get(clusterNames[0]);
+            const { zBottomExpr: zb, zSizeExpr: zs } = partRing.get(clusterNames[0]);
+            const regionNames = [];
             for (const ring of u.rings) {
-              synthTools.push({ name: `_cladmrg_${synthN++}`, ring, zBottomExpr: zb, zSizeExpr: zs });
+              const nm = `${cladMergePrefix}${cladMergeN++}`;
+              regionNames.push(nm);
+              synthTools.push({ name: nm, ring, zBottomExpr: zb, zSizeExpr: zs });
             }
             for (const n of clusterNames) directSet.delete(n);
+            // Track merged regions for the abutment-detection pass below.
+            for (let r2 = 0; r2 < u.rings.length; r2++) {
+              partRing.set(regionNames[r2], { ring: u.rings[r2], bandKey: 'merged', mergeable: false, merged: true });
+            }
             noteCaveat(clusterNames.join(','), 'exactly-abutting solids merged into a single cladding-cavity tool (Parasolid rejects coincident-face booleans); merged footprint frozen at export values');
+          }
+        }
+        // Detection pass: any remaining coincident-edge contact that the
+        // merge could NOT absorb (wg slabs, merged regions vs direct
+        // tools) gets a LOUD caveat — the direct subtract may fail with
+        // the kernel's coincident-face reject and null the cladding.
+        {
+          const entries = [...partRing.entries()];
+          for (let i2 = 0; i2 < entries.length; i2++) {
+            for (let j2 = i2 + 1; j2 < entries.length; j2++) {
+              const [na, ra] = entries[i2];
+              const [nb, rb] = entries[j2];
+              // Only pairs where at least one side could NOT be merged,
+              // and both still participate in a subtract.
+              const aActive = ra.merged || directSet.has(na);
+              const bActive = rb.merged || directSet.has(nb);
+              if (!aActive || !bActive) continue;
+              if (ra.mergeable && rb.mergeable && ra.bandKey === rb.bandKey) continue; // same-band mergeables were handled above
+              if (ringsShareEdge(ra.ring, rb.ring)) {
+                noteCaveat(`${na},${nb}`, 'cladding tools share a coincident edge that the abutment merge cannot absorb - Parasolid may reject the subtract; verify the cladding survives, or separate/exclude one of the parts');
+              }
+            }
           }
         }
         const fmtC = (v) => String(Math.round(v * 1e6) / 1e6);
@@ -6018,6 +6170,14 @@ except Exception as _e_clad2:
         oDesktop.AddMessage("", "", 1, "Cladding merged-tool subtract failed: " + str(_e_clad2))
     except:
         pass
+    # Clean up the disposable tools so a failed subtract does not leave
+    # stray Model vacuum solids overlapping the device geometry (they
+    # would fail design validation as intersecting objects).
+    for _nm in [${synthTools.map((s2) => `"${s2.name}"`).join(', ')}]:
+        try:
+            oEditor.Delete(["NAME:Selections", "Selections:=", _nm])
+        except:
+            pass
 `;
         }
       }
@@ -6769,6 +6929,22 @@ except Exception as e:
     }
     lines.push('# ==========================================');
     code = code.replace('#__PARAMETRIC_REPORT__', () => lines.join('\n'));
+  }
+  // ── Missing-material guard ────────────────────────────────────────
+  // Collect every distinct material name the script assigns (scanned
+  // from the emitted MaterialValue attributes, so every current AND
+  // future emission site is covered automatically) and emit one
+  // _ensure_material call per name at the marker — BEFORE any geometry
+  // is created. A name that resolves nowhere in HFSS gets a DUMMY
+  // vacuum-property material + a warning message, so the import never
+  // dies on assignment; the user then defines the real material under
+  // the same name.
+  {
+    const matNames = new Set();
+    for (const m of code.matchAll(/"MaterialValue:=",\s*"\\"([^"\\]+)\\""/g)) matNames.add(m[1]);
+    const calls = [...matNames].sort().map((n) => `_ensure_material("${n}")`).join('\n');
+    code = code.replace('# __ENSURE_MATERIALS__', () =>
+      `# Pre-flight: make sure every referenced material resolves (dummy\n# vacuum-property materials are created for missing ones, with a warning).\n${calls}`);
   }
   // Final ASCII pass over the WHOLE script: IronPython 2.7 inside HFSS must
   // never see non-ASCII bytes (em-dashes / lambda / approx signs sneak in

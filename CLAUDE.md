@@ -1472,18 +1472,44 @@ register footprint+z-band metadata (`cladPrismMeta`; bandKey = the
 STRING pair zBottomExpr|zSizeExpr); at the cladding subtract, same-band
 tools are clustered by bbox-touch and each ≥2 cluster is EXACTLY
 unioned by `rectilinearUnion` (compressed-grid scanline — exact for
-rectilinear inputs, self-guarded: non-rectilinear / holed / area-
-mismatch clusters bail to the legacy direct subtract with a LOUD
+rectilinear inputs, self-guarded: non-rectilinear / holed / PINCHED /
+area-mismatch clusters bail to the legacy direct subtract with a LOUD
 safety-report caveat). Each union region emits ONE disposable numeric
 `_cladmrg_<k>` polyline prism (z exprs stay parametric), subtracted
-CONSUMED in a second Subtract call; non-pooled tools (wg slab/rib,
-bridges, native shapes, transformed comps) keep the direct
+CONSUMED in a second Subtract call (whose except branch DELETES the
+strays — a failed subtract must not leave Model vacuum solids
+overlapping the device); non-mergeable tools (wg slab/rib, bridges,
+native shapes, rotate/mirror chains) keep the direct
 KeepOriginals=True subtract — full-face stacked coincidence (rib on
-slab) is kernel-safe, only PARTIAL abutment is not. Merged footprints
-are frozen at export values (caveat noted). KNOWN GAP: a pooled part
-abutting a NON-pooled tool (e.g. a drawn wg slab flush against GDS
-metal) is not merged and would still trip the kernel. Guard:
-tests/clad-abut-merge.test.js.
+slab) is kernel-safe, only PARTIAL abutment is not. Adversarial-review
+hardening (all probe-confirmed): clustering is by ACTUAL shared
+collinear boundary segments (`clusterRingsByEdgeShare`/`ringsShareEdge`
+— bbox-touch merged merely-OVERLAPPING parts that boolean fine,
+needlessly freezing their parametric cavities); the boundary trace
+BAILS on revisited grid nodes (a keyhole cavity connected through one
+corner traced as a self-touching loop that passed BOTH the hole check
+and the — provably vacuous, Green's theorem — area self-check, and
+AEDT would reject the non-simple polyline, silently dropping the whole
+cluster's cavity); translation-only transform chains expand into
+per-clone rings that DO merge (repeat pitch == width = exactly-abutting
+replicas); wg SLAB footprints join as DETECTION-ONLY rings and any
+edge-coincidence the merge cannot absorb gets a loud caveat; the
+`_cladmrg_` prefix is collision-checked against component ids and the
+counter is global across cladding layers. Merged footprints are frozen
+at export values (caveat noted). Guard: tests/clad-abut-merge.test.js.
+
+**Missing-material guard** (generateHfssNative): the script defines
+`_ensure_material(name)` — GetDefinitionManager().DoesMaterialExist
+(fallback: GetProjectMaterialNames), and if the name resolves nowhere,
+AddMaterial creates a DUMMY project material under that name with
+VACUUM properties (eps_r=1, mu_r=1, sigma=0, tanD=0) + a WARNING
+AddMessage, so assignments never fail on a not-yet-defined material;
+the user then defines the real material under the same name and
+re-solves. The per-material calls are emitted at the
+`# __ENSURE_MATERIALS__` marker (before any geometry) and are COLLECTED
+by scanning the fully-emitted script for MaterialValue attributes — so
+every current and future emission site is covered automatically. Guard:
+tests/ensure-material.test.js.
 
 **Tangent subtract-tool pads** (`tangentToolPads`, generateHfssNative): a
 subtract/punch TOOL rect whose edge sits EXACTLY on the blank's true bbox
