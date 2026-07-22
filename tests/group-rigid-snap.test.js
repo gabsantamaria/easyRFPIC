@@ -538,3 +538,41 @@ describe('group-pivot variables um-tag folded posExpr constants', () => {
     expect(py[1]).not.toMatch(/\+ 609\.5048(?![\d*])/);
   });
 });
+
+describe('posExpr roots um-tag at ADOPTION (rootPosExpr), not only at emission', () => {
+  it('a child snapped to a posExpr parent inherits tagged constants at every depth', async () => {
+    // exprWithUm only tags depth-0 terms of the final emitted expr — a
+    // posExpr embedded deeper by a child's snap chain (or a rotate wrap
+    // or centroid mean) hides its bare "+ 148.9045" fold constant where
+    // the tagger can't reach, and AEDT resolves it in METERS (real
+    // shipped failure: port4 snapped to a −90° group member landed
+    // ~148 m off its baked IntLine). rootPosExpr must sanitize the
+    // piece at adoption so every downstream composition inherits it.
+    const { generateHfssNative } = await import('../src/export/hfss-native.js');
+    const scene = normalizeScene({
+      params: { g_w: { expr: '10', unit: 'µm' } },
+      components: [
+        { id: 'root', kind: 'rect', layer: 'electrode', cx: 158.9045, cy: 619.5048, w: 'g_w', h: '5',
+          cxExpr: 'g_w + 148.9045', cyExpr: 'g_w + 609.5048', cutouts: [], transforms: [] },
+        { id: 'child', kind: 'rect', layer: 'electrode', cx: 158.9045, cy: 632.0048, w: 'g_w', h: '20', cutouts: [], transforms: [] },
+      ],
+      snaps: [{ id: 's1', from: { compId: 'root', anchor: 'N' }, to: { compId: 'child', anchor: 'S' }, dx: '0', dy: '0' }],
+    });
+    const { values } = resolveParams(scene.params);
+    const solved = solveLayout(scene.components, scene.snaps, values);
+    for (const c of scene.components) {
+      const s = solved.find(x => x.id === c.id);
+      c.cx = s.cx; c.cy = s.cy;
+    }
+    const code = generateHfssNative(scene, values);
+    // The CHILD's emitted position embeds the root's posExpr — the fold
+    // constants must be length-typed there, never bare (meters).
+    const rec = code.match(/"Name:=", "child"/);
+    expect(rec).toBeTruthy();
+    const seg = code.slice(Math.max(0, rec.index - 2000), rec.index);
+    expect(seg).toContain('148.9045*1um');
+    expect(seg).toContain('609.5048*1um');
+    expect(seg).not.toMatch(/\+ 148\.9045(?![\d*])/);
+    expect(seg).not.toMatch(/\+ 609\.5048(?![\d*])/);
+  });
+});

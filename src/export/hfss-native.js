@@ -346,7 +346,18 @@ export function computeParametricPositions(components, snaps, paramValues = {}, 
     const s = String(expr).trim();
     if (s === '' || !Number.isFinite(evalExpr(s, paramValues))) return fallback;
     if (/^-?\d+(?:\.\d+)?$/.test(s)) return `${s}um`;
-    return `(${s})`;
+    // um-tag the piece's bare additive constants NOW, at adoption — not
+    // only at final emission. exprWithUm tags depth-0 terms of the WHOLE
+    // emitted expr, but a posExpr embedded deeper by any downstream
+    // composition (a child's snap chain, a rotate-pivot wrap, a centroid
+    // mean) hides its "+ 148.9045" drag-fold constant inside parens
+    // where the tagger can't reach — AEDT then resolves it in METERS
+    // (real shipped failure: port4 snapped to a −90° group member landed
+    // ~148 m off its baked IntLine → "port lines must lie on the port").
+    // sanRigidPiece is idempotent on um-bearing exprs; downstream
+    // numeric guards strip the tags (stripUnitsForGuard / cross-section
+    // stripUm both handle *1um).
+    return `(${sanRigidPiece(s)})`;
   };
   // Optional 4th arg `rotExpr`: the owning component's first-class
   // rotation expression (degrees, CCW). When present, the offsets are

@@ -71,7 +71,15 @@ scene = {
                // mouse — the solver re-pinned it every frame. Guard:
                // tests/posexpr-drag.test.js. Non-finite evaluation keeps the numeric cx/cy and
                // surfaces a 'nan-pos-expr' solve diagnostic. HFSS native COM
-               // export keeps them LIVE (rootPosExpr — the whole downstream
+               // export keeps them LIVE (rootPosExpr — which um-tags the
+               // piece's bare fold constants AT ADOPTION via sanRigidPiece:
+               // exprWithUm only tags depth-0 terms of the final emitted
+               // expr, so a posExpr embedded deeper by a child's snap
+               // chain / rotate-pivot wrap / centroid mean hid "+ 148.9045"
+               // where AEDT read it in METERS — port4 snapped to a −90°
+               // group member landed ~148 m off its IntLine, and the
+               // grp_pivot means flung all members outside Parasolid's
+               // size box; both real v34 failures. The whole downstream
                // snap chain inherits the referenced params); pyAEDT bakes them
                // numerically with a pointer comment to the native export.
 // where kind is one of:
