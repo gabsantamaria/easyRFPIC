@@ -589,3 +589,42 @@ export function ringSelfIntersects(pts) {
   }
   return false;
 }
+
+// ── Mitered constant-width band around an OPEN centerline ────────────────
+// Returns one ring (left side then reversed right side, butt end caps).
+// Miter length is clamped to 4× halfW so near-reversals don't explode.
+// Canonical home — scene3d, cross-section, and the GDS export all share
+// this exact band so a constant-width trace means the same metal
+// everywhere (the GDS previously emitted the zero-area CENTERLINE as the
+// boundary: a 4 µm trace exported as no metal at all).
+export function miterBandRing(pts, halfW) {
+  const n = pts.length;
+  if (n < 2 || !(halfW > 0)) return null;
+  const dirs = [];
+  for (let i = 0; i + 1 < n; i++) {
+    const dx = pts[i + 1][0] - pts[i][0];
+    const dy = pts[i + 1][1] - pts[i][1];
+    const len = Math.hypot(dx, dy) || 1;
+    dirs.push([dx / len, dy / len]);
+  }
+  const left = [];
+  const right = [];
+  for (let i = 0; i < n; i++) {
+    const dPrev = dirs[Math.max(0, i - 1)];
+    const dNext = dirs[Math.min(dirs.length - 1, i)];
+    // Normals point "left" of travel.
+    const n1 = [-dPrev[1], dPrev[0]];
+    const n2 = [-dNext[1], dNext[0]];
+    let mx = n1[0] + n2[0];
+    let my = n1[1] + n2[1];
+    const mlen = Math.hypot(mx, my);
+    if (mlen < 1e-9) { mx = n2[0]; my = n2[1]; }
+    else { mx /= mlen; my /= mlen; }
+    // Miter scale: 1/cos(θ/2), clamped.
+    const dot = Math.max(0.25, mx * n2[0] + my * n2[1]);
+    const s = Math.min(halfW / dot, halfW * 4);
+    left.push([pts[i][0] + mx * s, pts[i][1] + my * s]);
+    right.push([pts[i][0] - mx * s, pts[i][1] - my * s]);
+  }
+  return [...left, ...right.reverse()];
+}

@@ -45,7 +45,7 @@ import { evalExpr, resolveParams, tokenizeIdents, RESERVED_IDENTS } from './para
 import { solveLayout, applyMirrors, resolveBooleanBboxes } from './solver.js';
 import { expandTransforms } from './transforms.js';
 import { shapeInstanceToRing, remapPointsToInstance } from '../geometry/rings.js';
-import { resolvePolylineVertices, tessellatePolylinePath, taperedBandQuads, polylineIsTapered } from '../geometry/polyline.js';
+import { resolvePolylineVertices, tessellatePolylinePath, taperedBandQuads, polylineIsTapered, miterBandRing } from '../geometry/polyline.js';
 import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/racetrack.js';
 import { computeNumericLayerZ } from './layer-z.js';
 import { effectiveConductorLayerId } from './conductor-binding.js';
@@ -243,37 +243,6 @@ const negExpr = (a) => {
   return A === '0' ? '0' : `-(${A})`;
 };
 
-// Mitered constant-width band ring around an OPEN centerline — verbatim
-// twin of scene3d's module-local helper (kept in lockstep: same clamp).
-function miterBandRing(pts, halfW) {
-  const n = pts.length;
-  if (n < 2 || !(halfW > 0)) return null;
-  const dirs = [];
-  for (let i = 0; i + 1 < n; i++) {
-    const dx = pts[i + 1][0] - pts[i][0];
-    const dy = pts[i + 1][1] - pts[i][1];
-    const len = Math.hypot(dx, dy) || 1;
-    dirs.push([dx / len, dy / len]);
-  }
-  const left = [];
-  const right = [];
-  for (let i = 0; i < n; i++) {
-    const dPrev = dirs[Math.max(0, i - 1)];
-    const dNext = dirs[Math.min(dirs.length - 1, i)];
-    const n1 = [-dPrev[1], dPrev[0]];
-    const n2 = [-dNext[1], dNext[0]];
-    let mx = n1[0] + n2[0];
-    let my = n1[1] + n2[1];
-    const mlen = Math.hypot(mx, my);
-    if (mlen < 1e-9) { mx = n2[0]; my = n2[1]; }
-    else { mx /= mlen; my /= mlen; }
-    const dot = Math.max(0.25, mx * n2[0] + my * n2[1]);
-    const s = Math.min(halfW / dot, halfW * 4);
-    left.push([pts[i][0] + mx * s, pts[i][1] + my * s]);
-    right.push([pts[i][0] - mx * s, pts[i][1] - my * s]);
-  }
-  return [...left, ...right.reverse()];
-}
 
 // ── buildCrossSection ─────────────────────────────────────────────────────
 // opts is reserved (v1 takes no options); accepted for contract stability.

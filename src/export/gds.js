@@ -18,10 +18,10 @@
 // Extracted from PhotonicLayout.jsx as Stage 2.1 of the planned refactor.
 import { evalExpr } from '../scene/params.js';
 import { isNonModelComponent } from '../scene/schema.js';
-import { solveLayout, applyMirrors } from '../scene/solver.js';
+import { solveLayout, applyMirrors, resolveBooleanBboxes } from '../scene/solver.js';
 import { expandTransforms } from '../scene/transforms.js';
-import { tessellatePolylinePath, taperedBandQuads, polylineIsTapered } from '../geometry/polyline.js';
-import { shapeInstanceToRing } from '../geometry/rings.js';
+import { tessellatePolylinePath, taperedBandQuads, polylineIsTapered, miterBandRing } from '../geometry/polyline.js';
+import { shapeInstanceToRing, remapPointsToInstance } from '../geometry/rings.js';
 import { effectiveConductorLayerId } from '../scene/conductor-binding.js';
 import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/racetrack.js';
 
@@ -47,7 +47,15 @@ export function viaGdsLayerMap(components) {
 
 export function generateGDS(scene, paramValues) {
   const { components, mirrors, snaps, stack } = scene;
-  const solvedAll = applyMirrors(solveLayout(components, snaps, paramValues), mirrors);
+  // resolveBooleanBboxes gives every boolean a NUMERIC cx/cy/w/h — the
+  // cluster walk below expands the BOOLEAN's transform chain, and
+  // expandTransforms needs the solved bbox to place instances (scene3d
+  // does exactly the same; without it a boolean's raw w='0' collapses
+  // its chain to the base pose).
+  const solvedAll = resolveBooleanBboxes(
+    applyMirrors(solveLayout(components, snaps, paramValues), mirrors),
+    paramValues,
+  );
   // Non-model components (section lines) are solver-visible — a child
   // snapped to one must land where the canvas puts it — but never emit
   // geometry. Parametric positions are computed on the FULL solved list
@@ -207,28 +215,98 @@ export function generateGDS(scene, paramValues) {
   writeInt2(BGNSTR, dateInt2);
   writeAscii(STRNAME, 'TOP');
 
-  // Each component → BOUNDARY record (rectangle as 5-vertex polygon, closed).
-  // Per-component transforms are expanded so each instance becomes its own
-  // boundary record. Rotated rectangles are emitted as a 5-vertex polygon
-  // with the corners pre-rotated (since GDS doesn't have a rotation
-  // attribute on BOUNDARY records). Note: GDS booleans (union/intersect/
-  // subtract) are NOT applied here — the operands are emitted as separate
-  // polygons on the same layer. A real polygon-clipping pass would require
-  // a clipper library; out of scope for now.
+  // Each leaf component → BOUNDARY record(s). Per-component transforms are
+  // expanded so each instance becomes its own boundary record; rotated
+  // rectangles are emitted as pre-rotated polygons (GDS BOUNDARY has no
+  // rotation attribute).
+  //
+  // BOOLEAN CLUSTERS (scene3d parity — the "meander missing its replicas"
+  // fix): a boolean's OWN transform chain (repeat / rotate / mirror /
+  // duplicate_mirror on the union) multiplies the WHOLE operand cluster.
+  // The walk below expands the boolean's chain into per-instance cluster
+  // transforms (exactly scene3d's emitComponent xfs) and emits every
+  // operand's rings through them — previously the boolean was skipped
+  // outright, so only the base-pose operands landed in the GDS.
+  // Boolean OPS are still not polygon-clipped: 'union'/'intersect'
+  // operands emit as overlapping DATATYPE-0 polygons (fab tools merge
+  // same-layer overlap), while 'subtract'/'punch' TOOL operands emit as
+  // DATATYPE-1 polygons — the same cutout convention the racetrack inner
+  // ring and component cutouts already use.
   // Keyed-lookup map for polyline SNAP-VERTEX resolution — built from the
   // FULL solved list: a physical trace's vertex may be pinned to a section
   // line's anchor (draw-mode magnetism offers them), and resolving against
   // the geometry-filtered list returned [NaN,NaN] — silent origin-spikes /
   // dropped segments in the output while the canvas looked right.
   const byIdSolved = Object.fromEntries(solvedAll.map(c => [c.id, c]));
-  for (const c of solved) {
-    if (c.kind === 'boolean') continue; // booleans don't have GDS geometry of their own
+  // Cluster transforms — one entry per boolean instance: translate by
+  // (dx, dy), mirror about (cx, cy) when sx/sy = -1, rotate about (cx, cy)
+  // by rot degrees. Applied POINT-WISE to emitted world coordinates
+  // (exact rigid transform of the composed cluster; scene3d's math).
+  const applyXfPoint = (xf, p) => {
+    let tx = p[0] + xf.dx;
+    let ty = p[1] + xf.dy;
+    if (xf.sx === -1) tx = 2 * xf.cx - tx;
+    if (xf.sy === -1) ty = 2 * xf.cy - ty;
+    if (xf.rot) {
+      const rad = (xf.rot * Math.PI) / 180;
+      const ca = Math.cos(rad);
+      const sa = Math.sin(rad);
+      const rx = tx - xf.cx;
+      const ry = ty - xf.cy;
+      tx = xf.cx + rx * ca - ry * sa;
+      ty = xf.cy + rx * sa + ry * ca;
+    }
+    return [tx, ty];
+  };
+  const xfPoint = (xfs, p) => xfs.reduce((q, xf) => applyXfPoint(xf, q), p);
+  const toNm = (v) => Math.round(v * 1000);
+  // One closed BOUNDARY from world points, mapped through the cluster xfs.
+  const emitBoundary = (layer, datatype, pts, xfs) => {
+    if (!pts || pts.length < 3) return;
+    writeNoData(BOUNDARY);
+    writeInt2(LAYER, [layer]);
+    writeInt2(DATATYPE, [datatype]);
+    const xys = [];
+    for (const p of pts) {
+      const [px, py] = xfs.length ? xfPoint(xfs, p) : p;
+      xys.push(toNm(px), toNm(py));
+    }
+    xys.push(xys[0], xys[1]); // close
+    writeInt4(XY, xys);
+    writeNoData(ENDEL);
+  };
+  const emitShapeInstances = (c, xfs, role, layerOverride = null) => {
+    const dtMain = role === 'tool' ? 1 : 0;
     const insts = expandTransforms([c], paramValues, solvedAll);
     for (const inst of insts) {
       const w = inst.w, h = inst.h;
-      if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) continue;
-      const layer = gdsLayerForComponent(c);
-      const toNm = (v) => Math.round(v * 1000);
+      const isPathBand = c.kind === 'polyline' && !polylineIsTapered(c);
+      if (!isPathBand && (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0)) continue;
+      // TOOL holes land on the BLANK's layer (layerOverride) — a
+      // subtract tool drawn on another layer (a port-layer punch) must
+      // cut the metal it punches, not decorate its own layer.
+      const layer = layerOverride ?? gdsLayerForComponent(c);
+      // Constant-width polyline: emit the metal BAND (shared
+      // miterBandRing / offsetCenterlineToBand — the exact geometry
+      // scene3d builds and the canvas strokes). The old fallback
+      // emitted the zero-area CENTERLINE as the boundary: a 4 µm trace
+      // exported as no metal at all (review find, pre-existing).
+      if (isPathBand) {
+        const widthN = Number.isFinite(inst.width) ? inst.width : evalExpr(c.width ?? '0', paramValues);
+        if (!Number.isFinite(widthN) || widthN <= 0) continue; // nothing physical to fabricate
+        const base = tessellatePolylinePath(c, byIdSolved, paramValues);
+        if (base.length < 2) continue;
+        const pts = remapPointsToInstance(base, inst, c.cx, c.cy);
+        if (c.closed && pts.length >= 3) {
+          const { outer, inner } = offsetCenterlineToBand(pts, widthN / 2);
+          emitBoundary(layer, dtMain, outer, xfs);
+          if (inner.length >= 3) emitBoundary(layer, 1, inner, xfs);
+        } else {
+          const ring = miterBandRing(pts, widthN / 2);
+          if (ring) emitBoundary(layer, dtMain, ring, xfs);
+        }
+        continue;
+      }
       // shapeInstanceToRing returns the perimeter ring already accounting
       // for the instance's rotation and shape (rect/circle/ellipse/polygon).
       // Circles/ellipses are tessellated to CIRCLE_TESSELATION vertices —
@@ -253,17 +331,12 @@ export function generateGDS(scene, paramValues) {
         const gsx = inst.scaleX ?? 1, gsy = inst.scaleY ?? 1; // mirror chains
         for (const ring of (c.rings || [])) {
           if (!Array.isArray(ring) || ring.length < 6) continue;
-          writeNoData(BOUNDARY);
-          writeInt2(LAYER, [layer]);
-          writeInt2(DATATYPE, [0]);
-          const xys = [];
+          const pts = [];
           for (let i = 0; i < ring.length; i += 2) {
             const lx = ring[i] * gsx, ly = ring[i + 1] * gsy; // scale FIRST (rings.js order)
-            xys.push(toNm(inst.cx + lx * caG - ly * saG), toNm(inst.cy + lx * saG + ly * caG));
+            pts.push([inst.cx + lx * caG - ly * saG, inst.cy + lx * saG + ly * caG]);
           }
-          xys.push(xys[0], xys[1]); // close
-          writeInt4(XY, xys);
-          writeNoData(ENDEL);
+          emitBoundary(layer, dtMain, pts, xfs);
         }
         continue;
       }
@@ -278,14 +351,7 @@ export function generateGDS(scene, paramValues) {
             const ly = (vy - c.cy) * sy0;
             return [inst.cx + lx * ca0 - ly * sa0, inst.cy + lx * sa0 + ly * ca0];
           });
-          writeNoData(BOUNDARY);
-          writeInt2(LAYER, [layer]);
-          writeInt2(DATATYPE, [0]);
-          const xys = [];
-          for (const [px, py] of pts) { xys.push(toNm(px), toNm(py)); }
-          xys.push(toNm(pts[0][0]), toNm(pts[0][1]));
-          writeInt4(XY, xys);
-          writeNoData(ENDEL);
+          emitBoundary(layer, dtMain, pts, xfs);
         }
         continue;
       }
@@ -304,14 +370,7 @@ export function generateGDS(scene, paramValues) {
             const ly = (vy - c.cy) * sy;
             return [inst.cx + lx * ca - ly * sa, inst.cy + lx * sa + ly * ca];
           });
-          writeNoData(BOUNDARY);
-          writeInt2(LAYER, [layer]);
-          writeInt2(DATATYPE, [0]);
-          const xys = [];
-          for (const [px, py] of pts) { xys.push(toNm(px), toNm(py)); }
-          xys.push(toNm(pts[0][0]), toNm(pts[0][1]));
-          writeInt4(XY, xys);
-          writeNoData(ENDEL);
+          emitBoundary(layer, dtMain, pts, xfs);
         }
         continue;
       }
@@ -322,15 +381,7 @@ export function generateGDS(scene, paramValues) {
         ? { ...inst, w: inst.w + 2 * inst.padLength }
         : inst;
       const worldPts = shapeInstanceToRing(gdsInst);
-      writeNoData(BOUNDARY);
-      writeInt2(LAYER, [layer]);
-      writeInt2(DATATYPE, [0]);
-      const xys = [];
-      for (const [px, py] of worldPts) { xys.push(toNm(px), toNm(py)); }
-      // Close the polygon: first vertex repeated.
-      xys.push(toNm(worldPts[0][0]), toNm(worldPts[0][1]));
-      writeInt4(XY, xys);
-      writeNoData(ENDEL);
+      emitBoundary(layer, dtMain, worldPts, xfs);
 
       // Racetrack: the outer ring above is just the outer perimeter of
       // the waveguide band. Emit the INNER perimeter on the same layer
@@ -354,14 +405,7 @@ export function generateGDS(scene, paramValues) {
             inst.cx + lx * ca2 - ly * sa2,
             inst.cy + lx * sa2 + ly * ca2,
           ]);
-          writeNoData(BOUNDARY);
-          writeInt2(LAYER, [layer]);
-          writeInt2(DATATYPE, [1]);
-          const ixys = [];
-          for (const [px, py] of innerPts) { ixys.push(toNm(px), toNm(py)); }
-          ixys.push(toNm(innerPts[0][0]), toNm(innerPts[0][1]));
-          writeInt4(XY, ixys);
-          writeNoData(ENDEL);
+          emitBoundary(layer, 1, innerPts, xfs);
         }
       }
       // Cutouts only emitted for the BASE instance (transform-instance copies
@@ -380,19 +424,67 @@ export function generateGDS(scene, paramValues) {
         const cx1 = inst.cx + cdx + cw / 2;
         const cy0 = inst.cy + cdy - ch / 2;
         const cy1 = inst.cy + cdy + ch / 2;
-        writeNoData(BOUNDARY);
-        writeInt2(LAYER, [layer]);
-        writeInt2(DATATYPE, [1]);
-        writeInt4(XY, [
-          toNm(cx0), toNm(cy0),
-          toNm(cx1), toNm(cy0),
-          toNm(cx1), toNm(cy1),
-          toNm(cx0), toNm(cy1),
-          toNm(cx0), toNm(cy0),
-        ]);
-        writeNoData(ENDEL);
+        emitBoundary(layer, 1, [[cx0, cy0], [cx1, cy0], [cx1, cy1], [cx0, cy1]], xfs);
       }
     }
+  };
+
+  // Boolean-cluster walk (scene3d's emitComponent, GDS flavor): expand
+  // the boolean's OWN transform chain into per-instance cluster
+  // transforms, recurse into operands. subtract/punch TOOLS emit as
+  // DATATYPE-1 cutouts; union/intersect operands emit as overlapping
+  // solids on the operand's own layer.
+  // Layer of the first LEAF under a boolean chain — where a subtract's
+  // holes must land (the blank's mask layer).
+  const leafLayerOf = (comp, depth = 0) => {
+    if (!comp) return null;
+    if (comp.kind === 'boolean' && depth < 16) {
+      return leafLayerOf(byIdSolved[(comp.operandIds || [])[0]], depth + 1);
+    }
+    return gdsLayerForComponent(comp);
+  };
+  const emitComponentGds = (c, xfs, role, depth = 0, layerOverride = null) => {
+    if (!c || depth > 16) return;
+    if (c.kind !== 'boolean') { emitShapeInstances(c, xfs, role, layerOverride); return; }
+    const ops = (c.operandIds || []).map(id => byIdSolved[id]).filter(Boolean);
+    if (ops.length === 0) return;
+    const bInsts = expandTransforms([c], paramValues, solvedAll);
+    for (const bInst of bInsts) {
+      const dx = bInst.cx - c.cx;
+      const dy = bInst.cy - c.cy;
+      const rot = bInst.rotation || 0;
+      const sx = bInst.scaleX ?? 1;
+      const sy = bInst.scaleY ?? 1;
+      const identity = !dx && !dy && !rot && sx === 1 && sy === 1;
+      const instXfs = identity ? xfs : [{ dx, dy, cx: bInst.cx, cy: bInst.cy, rot, sx, sy }, ...xfs];
+      if (c.op === 'subtract' || c.op === 'punch') {
+        emitComponentGds(ops[0], instXfs, role, depth + 1, layerOverride);
+        // Tool holes land on the BLANK's layer. NESTED subtract used as
+        // a tool: the inner blank removes material (dt 1) but the inner
+        // tool's region is KEPT — flat dt algebra can only re-add it
+        // (dt 0), which is exact whenever the kept island lies inside
+        // outer blank metal (the punch/port idiom).
+        const toolRole = role === 'tool' ? 'solid' : 'tool';
+        const toolLayer = layerOverride ?? leafLayerOf(ops[0]);
+        for (const op of ops.slice(1)) emitComponentGds(op, instXfs, toolRole, depth + 1, toolLayer);
+      } else {
+        for (const op of ops) emitComponentGds(op, instXfs, role, depth + 1, layerOverride);
+      }
+    }
+  };
+  for (const c of solved) {
+    // Consumed operands emit through their boolean's cluster walk (which
+    // applies the boolean's transform chain). The skip requires the
+    // BACK-POINTER to round-trip — same rule as the canvas renderer: a
+    // consumedBy pointing at a deleted comp, a non-boolean, or a boolean
+    // that doesn't list this comp falls back to standalone emission
+    // (review find: existence-only checking silently dropped
+    // canvas-visible geometry on inconsistent scenes).
+    const consumer = c.consumedBy ? byIdSolved[c.consumedBy] : null;
+    const consumed = !!(consumer && consumer.kind === 'boolean' &&
+      Array.isArray(consumer.operandIds) && consumer.operandIds.includes(c.id));
+    if (consumed) continue;
+    emitComponentGds(c, [], 'solid');
   }
 
   writeNoData(ENDSTR);

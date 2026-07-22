@@ -1744,7 +1744,32 @@ so they can't break the emitted Python literal.
 
 ### GDS-II (`generateGDS`)
 
-Custom REAL8 binary encoder. Each component emits BOUNDARY records using `shapeInstanceToRing` for the perimeter. Racetracks emit outer perimeter as DATATYPE=0 and inner perimeter as DATATYPE=1 (cutout convention). Booleans skip GDS emission (they're CAD-only constructs; GDS is the final flattened layout).
+Custom REAL8 binary encoder. Each leaf component emits BOUNDARY records
+using `shapeInstanceToRing` for the perimeter. Racetracks emit outer
+perimeter as DATATYPE=0 and inner as DATATYPE=1 (cutout convention).
+**BOOLEAN CLUSTERS are walked recursively with scene3d's exact cluster
+math** (solvedAll goes through `resolveBooleanBboxes`; the boolean's OWN
+transform chain expands into per-instance {dx,dy,cx,cy,rot,sx,sy}
+transforms applied point-wise to every operand ring) — previously
+booleans were skipped outright, so a meander union's repeat/rotate/
+duplicate_mirror replicas were entirely MISSING from the GDS (real user
+bug). Ops are still not polygon-clipped: union/intersect operands emit
+as overlapping DATATYPE-0 polygons; subtract/punch TOOLS emit DATATYPE-1
+on the BLANK's layer (leafLayerOf — a port-layer punch must cut the
+metal layer it punches); a NESTED subtract used as a tool re-adds its
+kept island as DATATYPE-0 (exact when the island lies inside outer blank
+metal). Constant-width polylines emit the metal BAND (shared
+`miterBandRing` from geometry/polyline.js — canonical home, also used by
+scene3d + cross-section; closed loops via offsetCenterlineToBand outer +
+DATATYPE-1 inner) — the old fallback emitted the zero-area CENTERLINE
+(a 4 µm trace exported as no metal). The consumed-operand skip requires
+the consumedBy BACK-POINTER to round-trip (consumer is a boolean whose
+operandIds lists the comp — canvas parity); anything dangling emits
+standalone. WYSIWYG guard: the canvas F3 override builder negates a
+first-class operand rotation under a SINGLE-axis cluster mirror
+(reflect∘rot(θ) = rot(−θ)∘reflect — canvas used to draw +θ while
+GDS/scene3d/HFSS build −θ). Parity guard: tests/gds-cluster.test.js
+(centroid/area matching vs buildScene3D across chain flavors).
 
 ### HFSS variable names are CASE-INSENSITIVE
 

@@ -793,11 +793,21 @@ export function buildBoolOverridesForInstance(b, bInst, bBaseCx, bBaseCy, compBy
     const ry = my - bInst.cy;
     const newCx = rot ? bInst.cx + rx * ca - ry * sa : mx;
     const newCy = rot ? bInst.cy + rx * sa + ry * ca : my;
+    // A SINGLE-axis cluster reflection flips the operand's own rotation
+    // SENSE: rings.js applies scale FIRST, then rotation, so
+    // reflect∘rot(θ) must be recorded as rot(−θ)∘reflect — the same rule
+    // expandTransforms' own 'mirror' branch applies. Both axes flipped is
+    // a point reflection (= rot 180), sense preserved. Without this the
+    // canvas drew a first-class-rotated operand at +θ inside a mirrored
+    // cluster while GDS/scene3d/HFSS all build −θ (adversarial-review
+    // find, 11 µm vertex deviation on a 30°-rotated operand).
+    const mirrorOnce = (bSx === -1) !== (bSy === -1);
+    const baseRot = mirrorOnce ? -(base.rotation || 0) : (base.rotation || 0);
     overrides[c.id] = {
       ...base,
       cx: newCx,
       cy: newCy,
-      rotation: (base.rotation || 0) + rot,
+      rotation: baseRot + rot,
       scaleX: opSx,
       scaleY: opSy,
     };
