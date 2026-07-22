@@ -1507,13 +1507,25 @@ counter is global across cladding layers. Merged footprints are frozen
 at export values (caveat noted). Guard: tests/clad-abut-merge.test.js.
 
 **Missing-material guard** (generateHfssNative): the script defines
-`_ensure_material(name)` — GetDefinitionManager().DoesMaterialExist
-(fallback: GetProjectMaterialNames), and if the name resolves nowhere,
-AddMaterial creates a DUMMY project material under that name with
-VACUUM properties (eps_r=1, mu_r=1, sigma=0, tanD=0) + a WARNING
+`_ensure_material(name, si_false_objs)` — and if the name resolves
+nowhere, AddMaterial creates a DUMMY project material under that name
+with VACUUM properties (eps_r=1, mu_r=1, sigma=0, tanD=0) + a WARNING
 AddMessage, so assignments never fail on a not-yet-defined material;
 the user then defines the real material under the same name and
-re-solves. The per-material calls are emitted at the
+re-solves. EXISTENCE IS ASYMMETRIC (real shipped failure): on some
+AEDT releases `DoesMaterialExist` only sees PROJECT definitions and
+returns False for LIBRARY materials — the guard then dummy-shadowed
+stock 'gold'/'air'/'silicon'/'silicon_dioxide' (project definitions
+win by name) and every conductor's CREATION failed with
+"zero-conductivity material must have 'Solve Inside' enabled". So:
+trust a POSITIVE DoesMaterialExist, distrust negatives — a name must
+also miss GetProjectMaterialNames AND the `_AEDT_STOCK_MATERIALS`
+whitelist (~60 stock names, lowercase) before a dummy is created. When
+a dummy IS created, the objects emitted with SolveInside=False for
+that material (collected per material at export) are flipped to
+SolveInside=True so the placeholder validates; the warning explains
+how to un-shadow a library-defined material (delete the dummy from the
+project's Materials). The per-material calls are emitted at the
 `# __ENSURE_MATERIALS__` marker (before any geometry) and are COLLECTED
 by scanning the fully-emitted script for MaterialValue attributes — so
 every current and future emission site is covered automatically. Guard:
