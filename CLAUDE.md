@@ -1457,21 +1457,33 @@ Transform chain emission uses the same logic as pyAEDT (separate helper `emitTra
 output-variable + report block before `oProject.Save()` (see "2-line method
 wizard"). Absent the option, output is byte-identical to before.
 
-**Cladding subtract = clone + unite + subtract** (generateHfssNative): the
-device solids are NEVER subtracted from the cladding box directly as a
-multi-tool list. HFSS executes a multi-tool Subtract SEQUENTIALLY, and a
-fractured GDS layer contains EXACTLY ABUTTING solids — once an earlier
-tool's cavity is cut, a later abutting tool's face lies exactly ON the
-cavity wall, a partial coincident-face boolean that Parasolid rejects
-(PK_ERROR_missing_geom) AND that NULLS the blank (the design loses its
-cladding entirely; real shipped failure, localized by a per-tool split
-diagnostic to gds1_12 abutting gds1_7/gds1_8). The emitted script clones
-every tool at RUNTIME (Copy+Paste; clone names discovered via a
-before/after GetObjectsInGroup diff — Paste naming is release-dependent),
-Unites the clones into ONE body (dissolving the shared faces), and
-subtracts that single body with KeepOriginals=False. Device parts are
-never consumed; any failure falls back to the legacy direct multi-tool
-subtract (KeepOriginals=True). Guard: tests/clad-clone-unite.test.js.
+**Cladding abutment merge** (generateHfssNative + `src/export/rect-union.js`):
+Parasolid CANNOT boolean EXACTLY-ABUTTING solids AT ALL — the sequential
+multi-tool Subtract fails once a later tool's face lands exactly ON the
+cavity wall an earlier abutting tool left (partial coincident-face →
+PK_ERROR_missing_geom AND the blank is NULLED, silently deleting the
+cladding), and the obvious clone+Unite workaround fails IDENTICALLY
+inside the Unite (PSUnite PK_boolean_result_failed_c — both observed on
+the shipped KI-lumped design, localized by a per-tool split diagnostic
+to fractured GDS rects gds1_12 abutting gds1_7/gds1_8). The ONLY robust
+fix is geometric, at export: simple untransformed prisms (plain
+unrotated rect boxes, line-only polyshapes — the fractured-GDS class)
+register footprint+z-band metadata (`cladPrismMeta`; bandKey = the
+STRING pair zBottomExpr|zSizeExpr); at the cladding subtract, same-band
+tools are clustered by bbox-touch and each ≥2 cluster is EXACTLY
+unioned by `rectilinearUnion` (compressed-grid scanline — exact for
+rectilinear inputs, self-guarded: non-rectilinear / holed / area-
+mismatch clusters bail to the legacy direct subtract with a LOUD
+safety-report caveat). Each union region emits ONE disposable numeric
+`_cladmrg_<k>` polyline prism (z exprs stay parametric), subtracted
+CONSUMED in a second Subtract call; non-pooled tools (wg slab/rib,
+bridges, native shapes, transformed comps) keep the direct
+KeepOriginals=True subtract — full-face stacked coincidence (rib on
+slab) is kernel-safe, only PARTIAL abutment is not. Merged footprints
+are frozen at export values (caveat noted). KNOWN GAP: a pooled part
+abutting a NON-pooled tool (e.g. a drawn wg slab flush against GDS
+metal) is not merged and would still trip the kernel. Guard:
+tests/clad-abut-merge.test.js.
 
 **Tangent subtract-tool pads** (`tangentToolPads`, generateHfssNative): a
 subtract/punch TOOL rect whose edge sits EXACTLY on the blank's true bbox

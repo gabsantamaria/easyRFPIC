@@ -24,6 +24,7 @@ import { ringSelfIntersects } from '../geometry/polyline.js';
 import { buildRacetrackCenterline, offsetCenterlineToBand } from '../geometry/racetrack.js';
 import { instanceChainOffsetExpr, chainOwnerForInstance, instanceFrameCenter } from '../scene/instance-positions.js';
 import { renameIdentInScene } from '../scene/rename-ident.js';
+import { rectilinearUnion, clusterRingsByTouch } from './rect-union.js';
 import { simplifyExpr, degToRad, stripUnaryPlus } from '../scene/expr-simplify.js';
 import { twoLineOutputVariables } from '../scene/twoLine.js';
 import { generateQ3DCombinedBlock } from './q3d.js';
@@ -2456,6 +2457,14 @@ except:
   // WGs are named "<id>_rib", electrodes are named "<id>".
   const emittedWgNames = [];
   const emittedElecNames = [];
+  // Prism-tool metadata for the cladding subtract's abutment merge:
+  // part name -> { compId, ring: [[x,y]…] (numeric world), bandKey }.
+  // Only simple untransformed prisms (plain rect boxes, line-only
+  // polyshapes) register; anything else stays a direct subtract tool.
+  // bandKey is the STRING pair zBottomExpr|zSizeExpr — expr equality ⇒
+  // same z-band, no numeric evaluation needed (conservative: equal-but-
+  // differently-written bands simply don't pool, which is safe).
+  const cladPrismMeta = new Map();
   const emittedPortNames = [];
   // Names of conductor objects emitted as ZERO-THICKNESS SHEETS rather
   // than 3D boxes. Triggered when their conductor layer's thickness
@@ -3841,6 +3850,21 @@ except Exception as e:
         if (isSheet && c.layer === 'electrode') {
           registerSheet(id, c);
         }
+        // Register straight-edge untransformed polyshape prisms for the
+        // cladding abutment merge (fractured GDS imports are this class).
+        if (isPolyshape && !isSheet &&
+            (c.layer === 'waveguide' || c.layer === 'electrode') &&
+            !(c.transforms || []).some((tr) => tr && tr.enabled !== false) &&
+            vertMeta.every((m2) => m2.kind === 'line') &&
+            Array.isArray(c._resolvedVerts) && c._resolvedVerts.length >= 3 &&
+            c._resolvedVerts.every((p2) => Array.isArray(p2) && Number.isFinite(p2[0]) && Number.isFinite(p2[1]))) {
+          cladPrismMeta.set(id, {
+            compId: c.id,
+            ring: c._resolvedVerts.map((p2) => [p2[0], p2[1]]),
+            bandKey: `${zBottomExpr}|${zSizeExpr}`,
+            zBottomExpr, zSizeExpr,
+          });
+        }
         if (!polyHasFrozenVertex) {
           notePara(c.id, hasArc
             ? 'pos, vertices, width, arc centers + sweep angles'
@@ -4863,6 +4887,23 @@ except Exception as e:
       // zBottom (applies to both the 3-D box and the 0-thickness sheet).
       const elecZ_um = withZOffset((elecLayer && layerZ[elecLayer.id]?.zBottomExpr) || `${elecZ.toFixed(4)}um`, c);
       const elecT_um = (elecLayer && layerZ[elecLayer.id]?.thicknessExpr) || `${elecThickness.toFixed(4)}um`;
+      // Register plain untransformed, unrotated rect boxes for the
+      // cladding abutment merge (a drawn electrode abutting GDS metal is
+      // the same Parasolid coincident-face hazard as fractured GDS).
+      {
+        const rotRect = evalExpr(c.rotation ?? '0', paramValues);
+        if (shapeKind === 'rect' && Math.abs(elecThickness) >= 1e-9 &&
+            Number.isFinite(rotRect) && Math.abs(rotRect) < 1e-9 &&
+            !(c.transforms || []).some((tr) => tr && tr.enabled !== false) &&
+            Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
+          cladPrismMeta.set(id, {
+            compId: c.id,
+            ring: [[cx - w / 2, cy - h / 2], [cx + w / 2, cy - h / 2], [cx + w / 2, cy + h / 2], [cx - w / 2, cy + h / 2]],
+            bandKey: `${elecZ_um}|${elecT_um}`,
+            zBottomExpr: elecZ_um, zSizeExpr: elecT_um,
+          });
+        }
+      }
       // If the conductor layer's thickness is zero, emit the trace as a
       // 2D SHEET (rectangle on the XY plane) instead of a 3D box. We
       // track the name so the impedance-boundary block at the end of
@@ -5864,62 +5905,121 @@ except Exception as e:
       }
       const toolNames = [...toolSet];
       if (toolNames.length > 0) {
-        const toolList = toolNames.join(',');
-        // CLONE + UNITE + SUBTRACT — never subtract the device parts
-        // directly when there is more than one. HFSS executes a
-        // multi-tool Subtract sequentially, and fractured GDS layers
-        // contain EXACTLY ABUTTING solids: once an earlier tool's cavity
-        // is cut, a later abutting tool's face lies exactly ON the
-        // cavity wall — a partial coincident-face boolean that Parasolid
-        // rejects (PK_ERROR_missing_geom) AND nulls the blank, leaving
-        // the design without its cladding (real shipped failure,
-        // localized by a per-tool diagnostic: gds1_12 abutting
-        // gds1_7/gds1_8). Uniting clones of the tools FIRST dissolves
-        // the shared faces, then ONE subtract of the united body is
-        // clean. Clone names are discovered at RUNTIME via a
-        // before/after object-list diff (clipboard Paste naming is
-        // release-dependent); the device parts themselves are untouched.
-        // Any failure falls back to the legacy direct multi-tool
-        // subtract so the script still degrades to the old behavior.
-        code += `try:
-    _clad_before = []
-    for _grp in ["Solids", "Sheets", "Unclassified"]:
-        try:
-            _clad_before += list(oEditor.GetObjectsInGroup(_grp))
-        except:
-            pass
-    oEditor.Copy(["NAME:Selections", "Selections:=", "${toolList}"])
-    oEditor.Paste()
-    _clad_new = []
-    for _grp in ["Solids", "Sheets", "Unclassified"]:
-        try:
-            _clad_new += [n for n in oEditor.GetObjectsInGroup(_grp) if n not in _clad_before and n not in _clad_new]
-        except:
-            pass
-    if len(_clad_new) == 0:
-        raise Exception("clipboard clone produced no parts")
-    if len(_clad_new) > 1:
-        oEditor.Unite(
-            ["NAME:Selections", "Selections:=", ",".join(_clad_new), "NewPartsModelFlag:=", "Model"],
-            ["NAME:UniteParameters", "KeepOriginals:=", False])
-    oEditor.Subtract(
-        ["NAME:Selections", "Blank Parts:=", "${id}", "Tool Parts:=", _clad_new[0]],
-        ["NAME:SubtractParameters", "KeepOriginals:=", False])
-except Exception as _e_clad:
+        // ── ABUTMENT MERGE (Parasolid coincident-face guard) ────────
+        // HFSS executes a multi-tool Subtract SEQUENTIALLY, and this
+        // kernel cannot boolean EXACTLY-ABUTTING solids at all: once an
+        // earlier tool's cavity is cut, a later abutting tool's face
+        // lies exactly ON the cavity wall — a partial coincident-face
+        // boolean that fails (PK_ERROR_missing_geom) AND nulls the
+        // blank, deleting the cladding (real shipped failure: fractured
+        // GDS rects gds1_12/gds1_7/gds1_8). Uniting clones in HFSS
+        // fails IDENTICALLY (PSUnite PK_boolean_result_failed_c,
+        // observed) — the merge has to happen HERE, geometrically:
+        // same-z-band simple prisms (plain rects, line-only polyshapes)
+        // whose footprints touch are unioned EXACTLY (rect-union.js,
+        // exact for rectilinear inputs, self-guarded) and each merged
+        // region is emitted as ONE disposable numeric tool, subtracted
+        // and consumed. Groups the union cannot handle exactly keep the
+        // legacy direct subtract plus a loud safety-report caveat.
+        const pooled = toolNames.filter((n) => cladPrismMeta.has(n));
+        const directSet = new Set(toolNames);
+        const synthTools = [];   // { name, ring, zBottomExpr, zSizeExpr }
+        let synthN = 0;
+        const byBand = new Map();
+        for (const n of pooled) {
+          const m2 = cladPrismMeta.get(n);
+          if (!byBand.has(m2.bandKey)) byBand.set(m2.bandKey, []);
+          byBand.get(m2.bandKey).push(n);
+        }
+        for (const members of byBand.values()) {
+          if (members.length < 2) continue;
+          const rings = members.map((n) => cladPrismMeta.get(n).ring);
+          for (const cluster of clusterRingsByTouch(rings)) {
+            if (cluster.length < 2) continue; // isolated part — direct subtract is safe
+            const clusterNames = cluster.map((i2) => members[i2]);
+            const u = rectilinearUnion(cluster.map((i2) => rings[i2]));
+            if (!u.ok) {
+              noteCaveat(clusterNames.join(','), `cladding tools touch each other but could not be merged (${u.reason}) - the direct subtract may hit Parasolid's coincident-face reject`);
+              continue;
+            }
+            const { zBottomExpr: zb, zSizeExpr: zs } = cladPrismMeta.get(clusterNames[0]);
+            for (const ring of u.rings) {
+              synthTools.push({ name: `_cladmrg_${synthN++}`, ring, zBottomExpr: zb, zSizeExpr: zs });
+            }
+            for (const n of clusterNames) directSet.delete(n);
+            noteCaveat(clusterNames.join(','), 'exactly-abutting solids merged into a single cladding-cavity tool (Parasolid rejects coincident-face booleans); merged footprint frozen at export values');
+          }
+        }
+        const fmtC = (v) => String(Math.round(v * 1e6) / 1e6);
+        for (const st of synthTools) {
+          const pts = [...st.ring, st.ring[0]];
+          const ptList = pts.map((p) =>
+            `["NAME:PLPoint", "X:=", "${fmtC(p[0])}um", "Y:=", "${fmtC(p[1])}um", "Z:=", "${st.zBottomExpr}"]`).join(',\n          ');
+          const segList = st.ring.map((_, i2) =>
+            `["NAME:PLSegment", "SegmentType:=", "Line", "StartIndex:=", ${i2}, "NoOfPoints:=", 2]`).join(',\n          ');
+          code += `# ${st.name}: merged cladding-cavity tool (exactly-abutting prisms unioned at export)
+try:
+    _delete_geom_if_exists("${st.name}")
+    oEditor.CreatePolyline(
+        ["NAME:PolylineParameters",
+         "IsPolylineCovered:=", True,
+         "IsPolylineClosed:=", True,
+         ["NAME:PolylinePoints",
+          ${ptList}],
+         ["NAME:PolylineSegments",
+          ${segList}],
+         ["NAME:PolylineXSection",
+          "XSectionType:=", "None",
+          "XSectionOrient:=", "Auto",
+          "XSectionWidth:=", "0um",
+          "XSectionTopWidth:=", "0um",
+          "XSectionHeight:=", "0um",
+          "XSectionNumSegments:=", "0",
+          "XSectionBendType:=", "Corner"]],
+        ["NAME:Attributes",
+         "Name:=", "${st.name}", "Flags:=", "", "Color:=", "(128 128 128)",
+         "Transparency:=", 0.0, "PartCoordinateSystem:=", "Global",
+         "MaterialValue:=", "\\"vacuum\\"", "SolveInside:=", True])
+    oEditor.SweepAlongVector(
+        ["NAME:Selections", "Selections:=", "${st.name}", "NewPartsModelFlag:=", "Model"],
+        ["NAME:VectorSweepParameters",
+         "DraftAngle:=", "0deg", "DraftType:=", "Round",
+         "CheckFaceFaceIntersection:=", False,
+         "SweepVectorX:=", "0um",
+         "SweepVectorY:=", "0um",
+         "SweepVectorZ:=", "${st.zSizeExpr}"])
+except Exception as e:
     try:
-        oDesktop.AddMessage("", "", 1, "Cladding clone-unite subtract failed (" + str(_e_clad) + "); falling back to direct subtract")
+        oDesktop.AddMessage("", "", 1, "Failed to build merged cladding tool ${st.name}: " + str(e))
     except:
         pass
-    try:
-        oEditor.Subtract(
-            ["NAME:Selections", "Blank Parts:=", "${id}", "Tool Parts:=", "${toolList}"],
-            ["NAME:SubtractParameters", "KeepOriginals:=", True])
-    except Exception as _e_clad2:
-        try:
-            oDesktop.AddMessage("", "", 1, "Cladding subtract failed: " + str(_e_clad2))
-        except:
-            pass
 `;
+        }
+        const directTools = toolNames.filter((n) => directSet.has(n));
+        if (directTools.length > 0) {
+          code += `try:
+    oEditor.Subtract(
+        ["NAME:Selections", "Blank Parts:=", "${id}", "Tool Parts:=", "${directTools.join(',')}"],
+        ["NAME:SubtractParameters", "KeepOriginals:=", True])
+except Exception as _e_clad:
+    try:
+        oDesktop.AddMessage("", "", 1, "Cladding subtract failed: " + str(_e_clad))
+    except:
+        pass
+`;
+        }
+        if (synthTools.length > 0) {
+          code += `try:
+    oEditor.Subtract(
+        ["NAME:Selections", "Blank Parts:=", "${id}", "Tool Parts:=", "${synthTools.map((s2) => s2.name).join(',')}"],
+        ["NAME:SubtractParameters", "KeepOriginals:=", False])
+except Exception as _e_clad2:
+    try:
+        oDesktop.AddMessage("", "", 1, "Cladding merged-tool subtract failed: " + str(_e_clad2))
+    except:
+        pass
+`;
+        }
       }
     }
   }
