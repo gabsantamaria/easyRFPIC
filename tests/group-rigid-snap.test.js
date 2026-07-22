@@ -497,3 +497,44 @@ describe('snap-pinned path vertices re-resolve after rigid placement', () => {
     }
   });
 });
+
+describe('group-pivot variables um-tag folded posExpr constants', () => {
+  it('a bare drag-fold constant in a member posExpr is um-tagged in grp_pivot_* (meters bug)', async () => {
+    // Every member of the −90°-rotated group is a posExpr root whose
+    // exprs end in a bare folded-drag constant. The pivot mean used the
+    // RAW posExprs: evalExpr's round-trip guard is unit-blind, but AEDT
+    // resolved "+ 148.9045" in METERS — the translate-rotate-translate
+    // flung all members outside Parasolid's size box (real shipped
+    // failure, v34 balun-only design). sanRigidPiece must tag each
+    // member piece before composition, exactly like the δ vars.
+    const { generateHfssNative } = await import('../src/export/hfss-native.js');
+    const rot = [{ id: 't1', kind: 'rotate', enabled: true, angle: '-90', pivot: 'group' }];
+    const scene = normalizeScene({
+      params: { g_w: { expr: '10', unit: 'µm' } },
+      components: [
+        { id: 'A', kind: 'rect', layer: 'electrode', cx: 158.9045, cy: 629.5048, w: 'g_w', h: '5',
+          cxExpr: 'g_w + 148.9045', cyExpr: '2*g_w + 609.5048', cutouts: [], transforms: rot, group: 'gp' },
+        { id: 'B', kind: 'rect', layer: 'electrode', cx: 178.9045, cy: 659.5048, w: 'g_w', h: '5',
+          cxExpr: '3*g_w + 148.9045', cyExpr: '5*g_w + 609.5048', cutouts: [], transforms: rot, group: 'gp' },
+      ],
+      snaps: [],
+      groups: [{ id: 'gg', name: 'gp', memberIds: ['A', 'B'], aliases: {} }],
+    });
+    const { values } = resolveParams(scene.params);
+    const solved = solveLayout(scene.components, scene.snaps, values);
+    for (const c of scene.components) {
+      const s = solved.find(x => x.id === c.id);
+      c.cx = s.cx; c.cy = s.cy;
+    }
+    const code = generateHfssNative(scene, values);
+    const px = code.match(/set_var\("grp_pivot_gp_x", "([^"]*)"\)/);
+    const py = code.match(/set_var\("grp_pivot_gp_y", "([^"]*)"\)/);
+    expect(px, 'pivot x var emitted').toBeTruthy();
+    expect(py, 'pivot y var emitted').toBeTruthy();
+    // The folded constants must be length-typed — never bare (meters).
+    expect(px[1]).toContain('148.9045*1um');
+    expect(py[1]).toContain('609.5048*1um');
+    expect(px[1]).not.toMatch(/\+ 148\.9045(?![\d*])/);
+    expect(py[1]).not.toMatch(/\+ 609\.5048(?![\d*])/);
+  });
+});

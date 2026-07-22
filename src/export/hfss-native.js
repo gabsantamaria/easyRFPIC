@@ -1524,8 +1524,18 @@ export function generateHfssNative(scene, paramValues, options = {}) {
       const members = solved.filter(cc => cc.group === g && !cc.consumedBy);
       const pps = members.map(m => parametricPosForExport[m.id]).filter(Boolean);
       if (!members.length || pps.length !== members.length) continue;
-      const xE = `(${pps.map(pp2 => `(${pp2.cxExpr})`).join(' + ')})/${pps.length}`;
-      const yE = `(${pps.map(pp2 => `(${pp2.cyExpr})`).join(' + ')})/${pps.length}`;
+      // Each member piece MUST go through sanRigidPiece before the mean
+      // is composed — exactly like the δ composition. A um-FREE posExpr
+      // with a bare folded-drag constant ("+ 148.9045") would resolve
+      // that constant in METERS inside AEDT (the pivot mean mixes um-
+      // tagged baked terms with um-free live exprs, so the final
+      // exprWithUm pass bails and never tags the nested constants) —
+      // the translate-rotate-translate then flings every member outside
+      // Parasolid's size box (real shipped failure, v34 balun). The
+      // evalExpr round-trip guard below is unit-blind and cannot catch
+      // this class.
+      const xE = `(${pps.map(pp2 => `(${sanRigidPiece(pp2.cxExpr)})`).join(' + ')})/${pps.length}`;
+      const yE = `(${pps.map(pp2 => `(${sanRigidPiece(pp2.cyExpr)})`).join(' + ')})/${pps.length}`;
       let gx0 = 0, gy0 = 0;
       for (const m of members) { gx0 += m.cx; gy0 += m.cy; }
       gx0 /= members.length; gy0 /= members.length;

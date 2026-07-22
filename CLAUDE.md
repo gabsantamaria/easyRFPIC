@@ -1639,6 +1639,16 @@ same way: `grp_pivot_<group>_x/y` variables = mean of the member
 position exprs (guarded against the solved centroid; baked fallback +
 noteFrozen), emitted into the translate-rotate-translate Move vectors —
 so group rotation now tracks HFSS sweeps instead of staying baked.
+EVERY member piece in the pivot mean goes through `sanRigidPiece`
+BEFORE composition (exactly like the δ pieces): a um-free posExpr with
+a bare folded-drag constant ("+ 148.9045") had that constant resolve
+in METERS inside AEDT — the mean mixes um-tagged baked terms with
+um-free live exprs, so the final exprWithUm pass bails and never tags
+the nested constants, and the translate-rotate-translate flung every
+member outside Parasolid's size box ("body lying outside the size
+box", real shipped failure on the v34 balun-only design). The evalExpr
+round-trip guard is UNIT-BLIND and cannot catch this class — never
+compose raw posExprs into an emitted expression without sanRigidPiece.
 Meta-less computeParametricPositions callers (twoLine flattenReplicas)
 get a FROZEN-numeric δ (the inline form hit 30 kB per position on the
 real balun; frozen is exact at flatten-time params and passes that
